@@ -62,7 +62,7 @@ class Eml(object):
         #date,from,to&cc,subject,msgid,filename,mimetype,hash
         to_cc=" ".join(self.tos.split() + self.ccs.split()).replace(";",",")
 
-        msg_output="%s;%s;%s;%s;%s;"%(str(self.date).replace(";",","),self.froms.replace(";",","),to_cc,self.subject.replace(";",","),self.id.replace(";",","))
+        msg_output="%s;%s;%s;%s;%s;%s;"%(str(self.date).replace(";",","),self.froms.replace(";",","),to_cc,self.subject.replace(";",","),self.id.replace(";",","),self.filename.replace(";",","))
 
         if len(self.attachments)>0:
             for att in self.attachments:
