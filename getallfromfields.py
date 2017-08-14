@@ -108,9 +108,7 @@ class Eml(object):
             self.status="not_parsable" + str(e)
 
 def create_newmail(filename):
-    global q
-    e=Eml(filename)
-    q.put(e)
+    return Eml(filename)
 
 
 if __name__ == '__main__':
@@ -129,7 +127,8 @@ if __name__ == '__main__':
                 path = root.split(os.sep)
                 relpath = os.sep.join(root.split(os.sep)[basecount:])
 
-                pool.map(create_newmail,[root+os.sep+s for s in files])
+                new_mails=pool.map(create_newmail,[root+os.sep+s for s in files])
+                list_of_mail.extend(new_mails)
                 # for filename in (root+os.sep+s for s in files):
                     # print(filename)
                     # e=Eml(filename)
@@ -137,13 +136,13 @@ if __name__ == '__main__':
         pool.close()
         pool.join()
 
-    while not q.empty():
-        print(q.get().get_csv())
+
+
     # for mail in list_of_mail:
     #     mail.join()
     #
-    # for mail in list_of_mail:
-    #     if "done" in mail.status:
-    #         print(mail.get_csv())
-    #     else:
-    #         pass
+    for mail in list_of_mail:
+        if "done" in mail.status:
+            print(mail.get_csv())
+        else:
+            pass
