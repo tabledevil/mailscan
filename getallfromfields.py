@@ -8,7 +8,11 @@ import re
 import subprocess
 from pytz import timezone
 import pickle
+import threading
+import multiprocessing as mp
 
+
+q=mp.Queue()
 
 
 class Eml(object):
@@ -52,24 +56,29 @@ class Eml(object):
 
     def __str__(self):
         output=self.filename+":\n"
-        output+="From: %s\n" % self.froms
-        output+="To: %s\n" % self.tosmsg
-        output+="Date: %s\n" % self.subject
+        if "done" in self.status:
+            output+="From: %s\n" % self.froms
+            output+="To: %s\n" % self.tosmsg
+            output+="Date: %s\n" % self.subject
         return output
 
     def get_csv(self):
-        output=""
-        #date,from,to&cc,subject,msgid,filename,mimetype,hash
-        to_cc=" ".join(self.tos.split() + self.ccs.split()).replace(";",",")
+        if "done" in self.status:
+            output=""
+            #date,from,to&cc,subject,msgid,filename,mimetype,hash
+            to_cc=" ".join(self.tos.split() + self.ccs.split()).replace(";",",")
 
-        msg_output="%s;%s;%s;%s;%s;%s;"%(str(self.date).replace(";",","),self.froms.replace(";",","),to_cc,self.subject.replace(";",","),self.id.replace(";",","),self.filename.replace(";",","))
+            msg_output="%s;%s;%s;%s;%s;%s;"%(str(self.date).replace(";",","),self.froms.replace(";",","),to_cc,self.subject.replace(";",","),self.id.replace(";",","),self.filename.replace(";",","))
 
-        if len(self.attachments)>0:
-            for att in self.attachments:
-                output+=msg_output+att["filename"]+";"+att["mimetype"]+";"+att["md5"]+"\n"
+            if len(self.attachments)>0:
+                for att in self.attachments:
+                    output+=msg_output+att["filename"]+";"+att["mimetype"]+";"+att["md5"]+"\n"
+            else:
+                output+=msg_output+";;"
         else:
-            output+=msg_output+";;"
+            output=""
         return output.strip()
+
 
     def __init__(self,filename):
         self.status="new"
@@ -98,47 +107,42 @@ class Eml(object):
         except Exception as e:
             self.status="not_parsable" + str(e)
 
+def create_newmail(filename):
+    return Eml(filename)
 
 
+if __name__ == '__main__':
 
 
-list_of_mail=[]
-basepath=sys.argv[1]
-basecount=len(basepath.split(os.sep))-1
-if os.path.isfile(basepath):
-    e=Eml(basepath)
-    print(e)
-else:
-    for root, dirs, files in os.walk(basepath):
-        path = root.split(os.sep)
-        relpath = os.sep.join(root.split(os.sep)[basecount:])
-        for file in files:
-            filename=root+os.sep+file
-            relfilename=relpath+os.sep+file
-            list_of_mail.append(Eml(filename))
-for mail in list_of_mail:
-    if "done" in mail.status:
-        print(mail.get_csv())
+    list_of_mail=[]
+    basepath=sys.argv[1]
+    basecount=len(basepath.split(os.sep))-1
+    if os.path.isfile(basepath):
+        e=Eml(basepath)
+        print(e)
     else:
-        pass
-        # print(mail.filename)
-        # print(mail.status)
+        with mp.Pool(processes=4) as pool:
 
-# import gzip
-# import json
-#
-# # writing
-# with gzip.GzipFile(jsonfilename, 'w') as outfile:
-#     for obj in objects:
-#         outfile.write(json.dumps(obj) + '\n')
-#
-# # reading
-# with gzip.GzipFile(jsonfilename, 'r') as isfile:
-#     for line in infile:
-#         obj = json.loads(line)
-#         # process obj
-# picklefile=open("mails.dump",'wb')
-# for mail in list_of_mail:
-#     pickle.dump(mail, picklefile )
-#
-# picklefile.close()
+            for root, dirs, files in os.walk(basepath):
+                path = root.split(os.sep)
+                relpath = os.sep.join(root.split(os.sep)[basecount:])
+
+                new_mails=pool.map(create_newmail,[root+os.sep+s for s in files])
+                list_of_mail.extend(new_mails)
+                # for filename in (root+os.sep+s for s in files):
+                    # print(filename)
+                    # e=Eml(filename)
+
+        pool.close()
+        pool.join()
+
+
+
+    # for mail in list_of_mail:
+    #     mail.join()
+    #
+    for mail in list_of_mail:
+        if "done" in mail.status:
+            print(mail.get_csv())
+        else:
+            pass
