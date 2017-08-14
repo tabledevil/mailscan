@@ -7,10 +7,14 @@ import sys
 import re
 import subprocess
 
+def get_mailaddresses_from_field(msgfield):
 
+    pass
+
+emailaddresspatter_rfc5322=r'''(?:[a-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[a-z0-9!#$%&'*+/=?^_`{|}~-]+)*|"(?:[\x01-\x08\x0b\x0c\x0e-\x1f\x21\x23-\x5b\x5d-\x7f]|\\[\x01-\x09\x0b\x0c\x0e-\x7f])*")@(?:(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]*[a-z0-9])?|\[(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?|[a-z0-9-]*[a-z0-9]:(?:[\x01-\x08\x0b\x0c\x0e-\x1f\x21-\x5a\x53-\x7f]|\\[\x01-\x09\x0b\x0c\x0e-\x7f])+)\])'''
 nodes={}
 encoding='latin-1'
-emailpattern=re.compile(r'(?<=<)([^>]+)(?=>)')
+emailpattern=re.compile(emailaddresspatter_rfc5322,re.IGNORECASE)
 basepath=sys.argv[1]
 basecount=len(basepath.split(os.sep))-1
 for root, dirs, files in os.walk(basepath):
@@ -19,8 +23,8 @@ for root, dirs, files in os.walk(basepath):
     for file in files:
         filename=root+os.sep+file
         relfilename=relpath+os.sep+file
-        # output=subprocess.run(["file",filename],stdout=subprocess.PIPE).stdout.decode('utf-8')
-        # filetype=output.split(":")[1]
+        output=subprocess.run(["file",filename],stdout=subprocess.PIPE).stdout.decode('utf-8')
+        filetype=output.split(":")[1]
         # print(file + ":" + filetype,end='')
         if True or "RFC 822 mail" in filetype:
             try:
@@ -31,22 +35,25 @@ for root, dirs, files in os.walk(basepath):
             list_senders=set()
             if "From" in msg.keys():
                 for sender in email.header.decode_header(msg.get("From")):
+                    print(sender)
                     if sender[1] is None:
-                        # print(sender[0])
                         sender=sender[0]
                     else:
-                        # print(sender[0].decode(sender[1]))
                         sender=sender[0].decode(sender[1])
-                    if isinstance(sender, bytes):
-                        print("BATES")
-                        sender=sender.decode("utf-8")
-                    print(type(sender))
 
-                    if "@" in sender:
-                        emailaddi=emailpattern.search(sender).group(1)
-                        list_senders.add(emailaddi)
-                        # print(emailaddi)
-            print(list_senders)
+                    if isinstance(sender, bytes):
+                        sender=sender.decode("utf-8")
+
+                    foundmail=emailpattern.findall(sender)
+                    if foundmail is not None:
+                        for ma in foundmail:
+                            list_senders.add(ma)
+            if len(list_senders)>0:
+                # print(file+":"+str(list_senders))
+                pass
+            else:
+                print(relfilename)
+                # print(filetype)
 
                     # print(sender)
                     # print(sender)

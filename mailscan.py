@@ -5,6 +5,9 @@ import email
 import hashlib
 import sys
 import re
+import subprocess
+from getallfromfields import Eml
+
 
 basepath=sys.argv[1]
 basecount=len(basepath.split(os.sep))-1
