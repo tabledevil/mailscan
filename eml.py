@@ -71,7 +71,8 @@ class Eml(object):
         if "done" in self.status:
             output+="From: %s\n" % self.froms
             output+="To: %s\n" % self.tos
-            output+="Date: %s\n" % self.subject
+            output+="Date: %s\n" % self.date
+            output+="Subject: %s\n" % self.subject
         return output
 
     def get_csv(self):
