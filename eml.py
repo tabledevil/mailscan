@@ -17,16 +17,19 @@ import email
 import hashlib
 import sys
 import re
-import subprocess
 from pytz import timezone
 import pickle
-import threading
-import multiprocessing as mp
 
 
 class Eml(object):
     rfc5322_mail_regex=r'''(?:[a-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[a-z0-9!#$%&'*+/=?^_`{|}~-]+)*|"(?:[\x01-\x08\x0b\x0c\x0e-\x1f\x21\x23-\x5b\x5d-\x7f]|\\[\x01-\x09\x0b\x0c\x0e-\x7f])*")@(?:(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]*[a-z0-9])?|\[(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?|[a-z0-9-]*[a-z0-9]:(?:[\x01-\x08\x0b\x0c\x0e-\x1f\x21-\x5a\x53-\x7f]|\\[\x01-\x09\x0b\x0c\x0e-\x7f])+)\])'''
     mail_re=re.compile(rfc5322_mail_regex,re.IGNORECASE)
+
+    def get_mailaddresses_from_field(self,msgfield="From"):
+        text=self.froms
+        match=self.mail_re.findall(text)
+        return match
+
 
     def strip_it(self,string):
         if isinstance(string,bytes):
@@ -67,7 +70,7 @@ class Eml(object):
         output=self.filename+":\n"
         if "done" in self.status:
             output+="From: %s\n" % self.froms
-            output+="To: %s\n" % self.tosmsg
+            output+="To: %s\n" % self.tos
             output+="Date: %s\n" % self.subject
         return output
 
@@ -89,7 +92,7 @@ class Eml(object):
         return output.strip()
 
 
-    def __init__(self,filename):
+    def __init__(self,filename,hash_attachments=True):
         self.status="new"
         self.filename=filename
         try:
@@ -104,14 +107,15 @@ class Eml(object):
             self.date=email.utils.parsedate_to_datetime(self.get_field_from(msg,"Date"))
             self.status="processing_attachments"
             self.attachments=[]
-            for part in msg.walk():
-                if part.get_filename() is not None:
-                    self.status=self.status+"."
-                    attachment={}
-                    attachment["filename"]=part.get_filename()
-                    attachment["mimetype"]=part.get_content_type()
-                    attachment["md5"]=hashlib.md5(part.get_payload(decode=True)).hexdigest()
-                    self.attachments.append(attachment)
+            if hash_attachments :
+                for part in msg.walk():
+                    if part.get_filename() is not None:
+                        self.status=self.status+"."
+                        attachment={}
+                        attachment["filename"]=part.get_filename()
+                        attachment["mimetype"]=part.get_content_type()
+                        attachment["md5"]=hashlib.md5(part.get_payload(decode=True)).hexdigest()
+                        self.attachments.append(attachment)
             self.status="done"
         except Exception as e:
             self.status="not_parsable" + str(e)
