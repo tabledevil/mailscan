@@ -19,11 +19,22 @@ import sys
 import re
 from pytz import timezone
 import pickle
+from dateutil.parser import parse
 
 
 class Eml(object):
     rfc5322_mail_regex=r'''(?:[a-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[a-z0-9!#$%&'*+/=?^_`{|}~-]+)*|"(?:[\x01-\x08\x0b\x0c\x0e-\x1f\x21\x23-\x5b\x5d-\x7f]|\\[\x01-\x09\x0b\x0c\x0e-\x7f])*")@(?:(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]*[a-z0-9])?|\[(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?|[a-z0-9-]*[a-z0-9]:(?:[\x01-\x08\x0b\x0c\x0e-\x1f\x21-\x5a\x53-\x7f]|\\[\x01-\x09\x0b\x0c\x0e-\x7f])+)\])'''
+    
     mail_re=re.compile(rfc5322_mail_regex,re.IGNORECASE)
+    received_p_from_details=r'''\((?P<fqdn>[^\[\] ]+)?\s?(\[(?P<ip>\S+)\])?\s*(\([^\)]+\))?\)\s*(\([^\)]+\))?\s*'''
+    received_p_from=r'''from (?P<from>\S+)\s*'''+p_from_details
+    received_p_by='\s*by\s+(?P<by>\S+)\s*(\([^\)]+\))?'
+    received_p_with='\s*(with\s+(?P<with>.*))?'
+    received_p_id='\s*(id\s+(?P<id>\S+))\s*(\([^\)]+\))?'
+    received_p_for='\s*(for\s+(?P<for>\S*))?'
+    received_p_date=';\s*(?P<date>\w+,\s\d+\s\w+\s\d+\s[\d:]+\s[\d+-]+\s\(\w+\)).*\s*(\([^\)]+\))?'
+    received_pattern=received_p_from+received_p_by+received_p_with+received_p_id+received_p_for+received_p_date
+    received_re=re.compile(received_pattern,re.IGNORECASE)
 
     def get_mailaddresses_from_field(self,msgfield="From"):
         text=self.froms
@@ -106,6 +117,7 @@ class Eml(object):
             self.subject=self.get_field_from(msg,"Subject")
             self.id=self.get_field_from(msg,"Message-ID")
             self.date=email.utils.parsedate_to_datetime(self.get_field_from(msg,"Date"))
+            self.received=self.get_field_from(msg,"Received")
             self.status="processing_attachments"
             self.attachments=[]
             if hash_attachments :
