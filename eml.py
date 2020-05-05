@@ -15,6 +15,7 @@ In the Future these objects are supposed to be items in searchable catalogue.
 import os
 import email
 import hashlib
+import multiprocessing as mp
 # import sys
 import re
 from pytz import timezone
@@ -144,7 +145,7 @@ class Eml(object):
 
     def has_attachments(self):
         '''Return True if mail has Files Attached.'''
-        pass
+        return len(self.attachments)>0
 
     def contains_hash(self,string):
         '''Return True if the hash of any part of the Mail equals supplied string'''
@@ -179,17 +180,31 @@ class Eml(object):
         match = self.mail_re.findall(text)
         return match
 
+    def __decode(self,string):
+        '''Decode string as far as possible'''
+        if isinstance(string, str):
+            text,encoding = email.header.decode_header(string)[0]
+            if encoding is None : return text
+            else : return text.decode(encoding)
+        if isinstance(string,bytes):
+            for encoding in ['utf-8-sig', 'utf-16', 'cp1252']:
+                try:
+                    return string.decode(encoding)
+                except UnicodeDecodeError:
+                    pass
+
+
     def __strip_it(self, string):
         if isinstance(string, bytes):
-            return self.strip_it(string.decode("utf-8"))
+            return self.__strip_it(string.decode("utf-8"))
         else:
             return " ".join(string.split()).strip()
 
     def __decode_strip_string(self, msgfield):
         if msgfield[1] is not None:
-            return self.strip_it(msgfield[0].decode(msgfield[1]))
+            return self.__strip_it(msgfield[0].decode(msgfield[1]))
         else:
-            return self.strip_it(msgfield[0])
+            return self.__strip_it(msgfield[0])
 
     def __get_filetype(self, filename):
         output = os.subprocess.run(
@@ -200,7 +215,7 @@ class Eml(object):
         if field in msg.keys():
             items = []
             for item in email.header.decode_header(msg.get(field)):
-                decoded_item = self.decode_strip_string(item)
+                decoded_item = self.__decode_strip_string(item)
                 items.append(decoded_item)
             return " ".join(items)
         else:
@@ -225,19 +240,18 @@ class Eml(object):
         self.status = "new"
         self.filename = filename
         try:
-            msg = email.message_from_file(
-                open(filename, 'r', encoding='latin-1'))
+            msg = email.message_from_file(open(filename, 'r', encoding='latin-1'))
             self.header = msg.items()
             self.status = "processing_header"
-            self.froms = self.get_field_from(msg, "From")
-            self.tos = self.get_field_from(msg, "To")
-            self.ccs = self.get_field_from(
-                msg, "CC")+" "+self.get_field_from(msg, "Cc")
-            self.subject = self.get_field_from(msg, "Subject")
-            self.id = self.get_field_from(msg, "Message-ID")
+            self.froms = self.__get_field_from(msg, "From")
+            self.tos = self.__get_field_from(msg, "To")
+            self.ccs = self.__get_field_from(
+                msg, "CC")+" "+self.__get_field_from(msg, "Cc")
+            self.subject = self.__get_field_from(msg, "Subject")
+            self.id = self.__get_field_from(msg, "Message-ID")
             self.date = email.utils.parsedate_to_datetime(
-                self.get_field_from(msg, "Date"))
-            self.received = self.get_field_from(msg, "Received")
+                self.__get_field_from(msg, "Date"))
+            self.received = self.__get_field_from(msg, "Received")
             self.status = "processing_attachments"
             self.attachments = []
             if hash_attachments:
@@ -245,11 +259,13 @@ class Eml(object):
                     if part.get_filename() is not None:
                         self.status = self.status+"."
                         attachment = {}
-                        attachment["filename"] = part.get_filename()
+                        attachment["filename"] = self.__decode(part.get_filename())
                         attachment["mimetype"] = part.get_content_type()
-                        attachment["md5"] = hashlib.md5(
-                            part.get_payload(decode=True)).hexdigest()
+                        attachment['rawdata'] = part.get_payload(decode=True)
+                        attachment["md5"] = hashlib.md5(attachment['rawdata']).hexdigest()
+                        attachment["sha256"] = hashlib.sha256(attachment['rawdata']).hexdigest()
                         self.attachments.append(attachment)
             self.status = "done"
         except Exception as e:
             self.status = "not_parsable" + str(e)
+
