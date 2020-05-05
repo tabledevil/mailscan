@@ -15,120 +15,241 @@ In the Future these objects are supposed to be items in searchable catalogue.
 import os
 import email
 import hashlib
-import sys
+# import sys
 import re
 from pytz import timezone
-import pickle
+# import pickle
 from dateutil.parser import parse
 
 
 class Eml(object):
-    rfc5322_mail_regex=r'''(?:[a-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[a-z0-9!#$%&'*+/=?^_`{|}~-]+)*|"(?:[\x01-\x08\x0b\x0c\x0e-\x1f\x21\x23-\x5b\x5d-\x7f]|\\[\x01-\x09\x0b\x0c\x0e-\x7f])*")@(?:(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]*[a-z0-9])?|\[(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?|[a-z0-9-]*[a-z0-9]:(?:[\x01-\x08\x0b\x0c\x0e-\x1f\x21-\x5a\x53-\x7f]|\\[\x01-\x09\x0b\x0c\x0e-\x7f])+)\])'''
-    
-    mail_re=re.compile(rfc5322_mail_regex,re.IGNORECASE)
-    received_p_from_details=r'''\((?P<fqdn>[^\[\] ]+)?\s?(\[(?P<ip>\S+)\])?\s*(\([^\)]+\))?\)\s*(\([^\)]+\))?\s*'''
-    received_p_from=r'''from (?P<from>\S+)\s*'''+p_from_details
-    received_p_by='\s*by\s+(?P<by>\S+)\s*(\([^\)]+\))?'
-    received_p_with='\s*(with\s+(?P<with>.*))?'
-    received_p_id='\s*(id\s+(?P<id>\S+))\s*(\([^\)]+\))?'
-    received_p_for='\s*(for\s+(?P<for>\S*))?'
-    received_p_date=';\s*(?P<date>\w+,\s\d+\s\w+\s\d+\s[\d:]+\s[\d+-]+\s\(\w+\)).*\s*(\([^\)]+\))?'
-    received_pattern=received_p_from+received_p_by+received_p_with+received_p_id+received_p_for+received_p_date
-    received_re=re.compile(received_pattern,re.IGNORECASE)
+    rfc5322_mail_regex = r'''(?:[a-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[a-z0-9!#$%&'*+/=?^_`{|}~-]+)*|"(?:[\x01-\x08\x0b\x0c\x0e-\x1f\x21\x23-\x5b\x5d-\x7f]|\\[\x01-\x09\x0b\x0c\x0e-\x7f])*")@(?:(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]*[a-z0-9])?|\[(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?|[a-z0-9-]*[a-z0-9]:(?:[\x01-\x08\x0b\x0c\x0e-\x1f\x21-\x5a\x53-\x7f]|\\[\x01-\x09\x0b\x0c\x0e-\x7f])+)\])'''
 
-    def get_mailaddresses_from_field(self,msgfield="From"):
-        text=self.froms
-        match=self.mail_re.findall(text)
+    mail_re = re.compile(rfc5322_mail_regex, re.IGNORECASE)
+    received_p_from_details = r'''\((?P<fqdn>[^\[\] ]+)?\s?(\[(?P<ip>\S+)\])?\s*(\([^\)]+\))?\)\s*(\([^\)]+\))?\s*'''
+    received_p_from = r'''from (?P<from>\S+)\s*'''+received_p_from_details
+    received_p_by = r'''\s*by\s+(?P<by>\S+)\s*(\([^\)]+\))?'''
+    received_p_with = r'''\s*(with\s+(?P<with>.*))?'''
+    received_p_id = r'''\s*(id\s+(?P<id>\S+))\s*(\([^\)]+\))?'''
+    received_p_for = r'''\s*(for\s+(?P<for>\S*))?'''
+    received_p_date = r''';\s*(?P<date>\w+,\s\d+\s\w+\s\d+\s[\d:]+\s[\d+-]+\s\(\w+\)).*\s*(\([^\)]+\))?'''
+    received_pattern = received_p_from+received_p_by + \
+        received_p_with+received_p_id+received_p_for+received_p_date
+    received_re = re.compile(received_pattern, re.IGNORECASE)
+
+    def get_header(self, field):
+        '''Get a decoded list of all values for given header field.'''
+        pass
+
+    def get_header_raw(self, field):
+        '''Get list of all raw values for given header field.'''
+        pass
+
+    def get_eml(self):
+        '''Get email.email Object for this email.'''
+        return email.message_from_binary_file(open(self.filename, 'rb'))
+
+    def get_struct(self):
+        '''Get structure of email as dictionary.'''
+        pass
+
+    def get_mail_path(self):
+        '''Get mail delivery path as reconstructed from received fields as list.'''
+        pass
+
+    def get_timeline(self):
+        '''Get all timebased events for the mail as a list.'''
+        pass
+
+    def get_date(self,tz='UTC'):
+        '''Get date of mail converted to timezone. Default is UTC.'''
+        if tz is None:
+            return self.date
+        else:
+            return self.__convert_date_tz(self.date,tz)
+
+    def get_from(self):
+        '''Get from field of mail.'''
+        pass
+
+    def get_to(self):
+        '''Get to field of mail'''
+        pass
+
+    def get_subject(self):
+        '''Get subject line of mail'''
+        pass
+
+    def get_index(self):
+        '''Get tokenized index of all parseable text. A bit like linux strings.'''
+        pass
+
+    def get_hash(self,part='all',type='md5'):
+        '''
+        Get hash for selected parts.
+
+        part = (all,body,attachments,index) index from get_struct
+        type = (md5,sha256)
+        '''
+        pass
+
+    def get_attachments(self,filename=None):
+        '''Get list of attachments as list of dictionaries. (filename,mimetype,md5,sha256,rawdata)'''
+        pass
+
+    def get_lang(self):
+        '''Get a guess about content language.'''
+        pass
+
+    def get_iocs(self,type='all'):
+        '''Get dictionary of iocs'''
+        pass
+
+    def as_csv(self,selected_fields=None,delimiter=';'):
+        '''
+        Get a CSV-String representation of the mail.
+
+        future : selected_fields is a list of strings
+        '''
+        if "done" in self.status:
+            output = ""
+            #date, from, to&cc, subject, msgid, filename, mimetype, hash
+            to_cc = " ".join(self.tos.split()
+                             + self.ccs.split()).replace(";", ",")
+
+            msg_output = "%s;%s;%s;%s;%s;%s;" % (str(self.date).replace(";", ","), self.froms.replace(
+                ";", ","), to_cc, self.subject.replace(";", ","), self.id.replace(";", ","), self.filename.replace(";", ","))
+
+            if len(self.attachments) > 0:
+                for att in self.attachments:
+                    output += msg_output+att["filename"] + \
+                        ";"+att["mimetype"]+";"+att["md5"]+"\n"
+            else:
+                output += msg_output+";;"
+        else:
+            output = ""
+        return output.strip()
+
+    def as_tsv(self,selected_fields):
+        '''
+        Return a CSV-String representation of the mail.
+
+        future : selected_fields is a list of strings
+        '''
+        return self.as_csv(selected_fields,delimiter='\t')
+
+    def as_string(self,formatstring):
+        '''Return string representation of mail based on formatstring.'''
+        pass
+
+    def has_attachments(self):
+        '''Return True if mail has Files Attached.'''
+        pass
+
+    def contains_hash(self,string):
+        '''Return True if the hash of any part of the Mail equals supplied string'''
+        if len(string) == 64:
+            return string.lower() in self.get_hash(type='sha256')
+        if len(string) == 32:
+            return string.lower() in self.get_hash()
+        return False
+
+    def contains_string(self,string:str) -> bool:
+        '''Return True if mail contains string in its text.'''
+        return string.lower() in self.get_index()
+
+    def check_spoof(self) -> bool:
+        '''Perform spoof Check on mail an return result'''
+        return False
+
+    def check_sig(self) -> bool:
+        '''Perform valide smime if available and return result'''
+        return False
+
+    def check_dkim(self) -> bool:
+        '''Perform check on dkim signature if available return result'''
+        return False
+
+    def check_header(self) -> bool:
+        '''Perform consistancy check on header fields result'''
+        return False
+
+    def __get_mailaddresses_from_field(self, msgfield="From"):
+        text = self.get_field_from(msg, "From")
+        match = self.mail_re.findall(text)
         return match
 
-
-    def strip_it(self,string):
-        if isinstance(string,bytes):
+    def __strip_it(self, string):
+        if isinstance(string, bytes):
             return self.strip_it(string.decode("utf-8"))
         else:
             return " ".join(string.split()).strip()
 
-    def decode_strip_string(self,msgfield):
+    def __decode_strip_string(self, msgfield):
         if msgfield[1] is not None:
             return self.strip_it(msgfield[0].decode(msgfield[1]))
         else:
             return self.strip_it(msgfield[0])
 
-
-    def get_filetype(self,filename):
-        output=subprocess.run(["file",filename],stdout=subprocess.PIPE).stdout.decode('utf-8')
+    def __get_filetype(self, filename):
+        output = os.subprocess.run(
+            ["file", filename], stdout=os.subprocess.PIPE).stdout.decode('utf-8')
         return output.split(":")[1].rstrip()
 
-
-    def get_field_from(self,msg,field):
+    def __get_field_from(self, msg, field):
         if field in msg.keys():
-            items=[]
+            items = []
             for item in email.header.decode_header(msg.get(field)):
-                decoded_item=self.decode_strip_string(item)
+                decoded_item = self.decode_strip_string(item)
                 items.append(decoded_item)
             return " ".join(items)
         else:
             return ""
 
-
-    def convert_date_utc(self,datetime):
-        return datetime.astimezone(tz=timezone('UTC'))
-
-    def get_date_utc(self):
-        return self.convert_date_utc(self.date)
+    def __convert_date_tz(self, datetime, tz='UTC'):
+        return datetime.astimezone(tz=timezone(tz))
 
     def __str__(self):
-        output=self.filename+":\n"
+
+        output = self.filename+":\n"
         if "done" in self.status:
-            output+="From: %s\n" % self.froms
-            output+="To: %s\n" % self.tos
-            output+="Date: %s\n" % self.date
-            output+="Subject: %s\n" % self.subject
+            output += "From: %s\n" % self.froms
+            output += "To: %s\n" % self.tos
+            output += "Date: %s\n" % self.date
+            output += "Subject: %s\n" % self.subject
         return output
 
-    def get_csv(self):
-        if "done" in self.status:
-            output=""
-            #date,from,to&cc,subject,msgid,filename,mimetype,hash
-            to_cc=" ".join(self.tos.split() + self.ccs.split()).replace(";",",")
-
-            msg_output="%s;%s;%s;%s;%s;%s;"%(str(self.date).replace(";",","),self.froms.replace(";",","),to_cc,self.subject.replace(";",","),self.id.replace(";",","),self.filename.replace(";",","))
-
-            if len(self.attachments)>0:
-                for att in self.attachments:
-                    output+=msg_output+att["filename"]+";"+att["mimetype"]+";"+att["md5"]+"\n"
-            else:
-                output+=msg_output+";;"
-        else:
-            output=""
-        return output.strip()
 
 
-    def __init__(self,filename,hash_attachments=True):
-        self.status="new"
-        self.filename=filename
+    def __init__(self, filename, hash_attachments=True):
+        self.status = "new"
+        self.filename = filename
         try:
-            msg=email.message_from_file(open(filename,'r',encoding='latin-1'))
-            self.header=msg.items()
-            self.status="processing_header"
-            self.froms=self.get_field_from(msg,"From")
-            self.tos=self.get_field_from(msg,"To")
-            self.ccs=self.get_field_from(msg,"CC")+" "+self.get_field_from(msg,"Cc")
-            self.subject=self.get_field_from(msg,"Subject")
-            self.id=self.get_field_from(msg,"Message-ID")
-            self.date=email.utils.parsedate_to_datetime(self.get_field_from(msg,"Date"))
-            self.received=self.get_field_from(msg,"Received")
-            self.status="processing_attachments"
-            self.attachments=[]
-            if hash_attachments :
+            msg = email.message_from_file(
+                open(filename, 'r', encoding='latin-1'))
+            self.header = msg.items()
+            self.status = "processing_header"
+            self.froms = self.get_field_from(msg, "From")
+            self.tos = self.get_field_from(msg, "To")
+            self.ccs = self.get_field_from(
+                msg, "CC")+" "+self.get_field_from(msg, "Cc")
+            self.subject = self.get_field_from(msg, "Subject")
+            self.id = self.get_field_from(msg, "Message-ID")
+            self.date = email.utils.parsedate_to_datetime(
+                self.get_field_from(msg, "Date"))
+            self.received = self.get_field_from(msg, "Received")
+            self.status = "processing_attachments"
+            self.attachments = []
+            if hash_attachments:
                 for part in msg.walk():
                     if part.get_filename() is not None:
-                        self.status=self.status+"."
-                        attachment={}
-                        attachment["filename"]=part.get_filename()
-                        attachment["mimetype"]=part.get_content_type()
-                        attachment["md5"]=hashlib.md5(part.get_payload(decode=True)).hexdigest()
+                        self.status = self.status+"."
+                        attachment = {}
+                        attachment["filename"] = part.get_filename()
+                        attachment["mimetype"] = part.get_content_type()
+                        attachment["md5"] = hashlib.md5(
+                            part.get_payload(decode=True)).hexdigest()
                         self.attachments.append(attachment)
-            self.status="done"
+            self.status = "done"
         except Exception as e:
-            self.status="not_parsable" + str(e)
+            self.status = "not_parsable" + str(e)
