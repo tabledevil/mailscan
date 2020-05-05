@@ -8,20 +8,25 @@ Furthermore file attachments get hashed.
 
 In the Future these objects are supposed to be items in searchable catalogue.
 
-
-
 @author tke
 """
 import os
 import email
+from email.header import decode_header
 import hashlib
-import multiprocessing as mp
-# import sys
+from functools import lru_cache
 import re
 from pytz import timezone
-# import pickle
 from dateutil.parser import parse
 
+#followin import and decorate can be removed after rework
+import inspect
+def depricated(fn):
+    def wraper(*args,**kwargs):
+        print(f'''>{inspect.stack()[1].function} called depricated function {fn.__name__}''')
+        return fn(*args,**kwargs)
+
+    return wraper
 
 class Eml(object):
     rfc5322_mail_regex = r'''(?:[a-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[a-z0-9!#$%&'*+/=?^_`{|}~-]+)*|"(?:[\x01-\x08\x0b\x0c\x0e-\x1f\x21\x23-\x5b\x5d-\x7f]|\\[\x01-\x09\x0b\x0c\x0e-\x7f])*")@(?:(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]*[a-z0-9])?|\[(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?|[a-z0-9-]*[a-z0-9]:(?:[\x01-\x08\x0b\x0c\x0e-\x1f\x21-\x5a\x53-\x7f]|\\[\x01-\x09\x0b\x0c\x0e-\x7f])+)\])'''
@@ -40,12 +45,18 @@ class Eml(object):
 
     def get_header(self, field):
         '''Get a decoded list of all values for given header field.'''
-        pass
+        return [self.__decode(value) for value in self.get_header_raw(field)]
 
     def get_header_raw(self, field):
         '''Get list of all raw values for given header field.'''
-        pass
+        # msg=self.get_eml()
+        items = []
+        for key,value in self.header:
+            if key.lower() == field.lower():
+                items.append(value)
+        return items
 
+    @lru_cache(maxsize=1)
     def get_eml(self):
         '''Get email.email Object for this email.'''
         return email.message_from_binary_file(open(self.filename, 'rb'))
@@ -70,11 +81,16 @@ class Eml(object):
             return self.__convert_date_tz(self.date,tz)
 
     def get_from(self):
-        '''Get from field of mail.'''
+        '''Get all sender indicating fields of mail as dictionary'''
+        #from
+        #reply-to
+        #return-path
+        #received envelope info
         pass
 
     def get_to(self):
-        '''Get to field of mail'''
+        '''Get all recipient indicating fields of mail as a dictionary'''
+
         pass
 
     def get_subject(self):
@@ -92,7 +108,11 @@ class Eml(object):
         part = (all,body,attachments,index) index from get_struct
         type = (md5,sha256)
         '''
-        pass
+        hashes=[]
+        if part == "all" or part == "attachments":
+            hashes.extend([x[type] for x in self.attachments])
+
+        return hashes
 
     def get_attachments(self,filename=None):
         '''Get list of attachments as list of dictionaries. (filename,mimetype,md5,sha256,rawdata)'''
@@ -183,7 +203,7 @@ class Eml(object):
     def __decode(self,string):
         '''Decode string as far as possible'''
         if isinstance(string, str):
-            text,encoding = email.header.decode_header(string)[0]
+            text,encoding = decode_header(string)[0]
             if encoding is None : return text
             else : return text.decode(encoding)
         if isinstance(string,bytes):
@@ -193,24 +213,27 @@ class Eml(object):
                 except UnicodeDecodeError:
                     pass
 
-
+    @depricated
     def __strip_it(self, string):
         if isinstance(string, bytes):
             return self.__strip_it(string.decode("utf-8"))
         else:
             return " ".join(string.split()).strip()
 
+    @depricated
     def __decode_strip_string(self, msgfield):
         if msgfield[1] is not None:
             return self.__strip_it(msgfield[0].decode(msgfield[1]))
         else:
             return self.__strip_it(msgfield[0])
 
+    @depricated
     def __get_filetype(self, filename):
         output = os.subprocess.run(
             ["file", filename], stdout=os.subprocess.PIPE).stdout.decode('utf-8')
         return output.split(":")[1].rstrip()
 
+    @depricated
     def __get_field_from(self, msg, field):
         if field in msg.keys():
             items = []
@@ -240,31 +263,29 @@ class Eml(object):
         self.status = "new"
         self.filename = filename
         try:
-            msg = email.message_from_file(open(filename, 'r', encoding='latin-1'))
-            self.header = msg.items()
+            # msg = email.message_from_file(open(filename, 'r', encoding='latin-1'))
+            self.header = self.get_eml().items()
             self.status = "processing_header"
-            self.froms = self.__get_field_from(msg, "From")
-            self.tos = self.__get_field_from(msg, "To")
-            self.ccs = self.__get_field_from(
-                msg, "CC")+" "+self.__get_field_from(msg, "Cc")
-            self.subject = self.__get_field_from(msg, "Subject")
-            self.id = self.__get_field_from(msg, "Message-ID")
-            self.date = email.utils.parsedate_to_datetime(
-                self.__get_field_from(msg, "Date"))
-            self.received = self.__get_field_from(msg, "Received")
-            self.status = "processing_attachments"
-            self.attachments = []
-            if hash_attachments:
-                for part in msg.walk():
-                    if part.get_filename() is not None:
-                        self.status = self.status+"."
-                        attachment = {}
-                        attachment["filename"] = self.__decode(part.get_filename())
-                        attachment["mimetype"] = part.get_content_type()
-                        attachment['rawdata'] = part.get_payload(decode=True)
-                        attachment["md5"] = hashlib.md5(attachment['rawdata']).hexdigest()
-                        attachment["sha256"] = hashlib.sha256(attachment['rawdata']).hexdigest()
-                        self.attachments.append(attachment)
+            self.froms = self.get_header("from")
+            self.tos = self.get_header("To")
+            self.ccs = self.get_header("CC")
+            # self.subject = self.get_header("Subject")
+            # self.id = self.get_header("Message-ID")
+            # self.date = email.utils.parsedate_to_datetime(self.get_header("Date"))
+            # self.received = self.get_header("Received")
+            # self.status = "processing_attachments"
+            # self.attachments = []
+            # if hash_attachments:
+            #     for part in self.get_eml().walk():
+            #         if part.get_filename() is not None:
+            #             self.status = self.status+"."
+            #             attachment = {}
+            #             attachment["filename"] = self.__decode(part.get_filename())
+            #             attachment["mimetype"] = part.get_content_type()
+            #             attachment['rawdata'] = part.get_payload(decode=True)
+            #             attachment["md5"] = hashlib.md5(attachment['rawdata']).hexdigest()
+            #             attachment["sha256"] = hashlib.sha256(attachment['rawdata']).hexdigest()
+            #             self.attachments.append(attachment)
             self.status = "done"
         except Exception as e:
             self.status = "not_parsable" + str(e)
@@ -274,7 +295,7 @@ def create_newmail(filename):
     return Eml(filename)
 
 def scan_folder(basepath):
-
+    import multiprocessing as mp
     list_of_mail=[]
     basecount=len(basepath.split(os.sep))-1
     if os.path.isfile(basepath):
