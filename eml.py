@@ -120,3 +120,34 @@ class Eml(object):
             self.status="done"
         except Exception as e:
             self.status="not_parsable" + str(e)
+            print(e)
+
+
+
+import multiprocessing as mp
+
+def create_newmail(filename):
+    return Eml(filename)
+
+def scan(basepath):
+    list_of_mail=[]
+    basecount=len(basepath.split(os.sep))-1
+    if os.path.isfile(basepath):
+        e=Eml(basepath)
+        print(e)
+    else:
+        with mp.Pool(processes=mp.cpu_count()) as pool:
+
+            for root, dirs, files in os.walk(basepath):
+                path = root.split(os.sep)
+                relpath = os.sep.join(root.split(os.sep)[basecount:])
+
+                new_mails=pool.map(create_newmail,[root+os.sep+s for s in files])
+                list_of_mail.extend(new_mails)
+
+        pool.close()
+        pool.join()
+    return list_of_mail
+
+if __name__ == '__main__':
+    a=scan(sys.argv[1])
