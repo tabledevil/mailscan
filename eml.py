@@ -116,6 +116,7 @@ class Eml(object):
                         attachment["filename"]=part.get_filename()
                         attachment["mimetype"]=part.get_content_type()
                         attachment["md5"]=hashlib.md5(part.get_payload(decode=True)).hexdigest()
+                        attachment["sha256"]=hashlib.sha256(part.get_payload(decode=True)).hexdigest()
                         self.attachments.append(attachment)
             self.status="done"
         except Exception as e:
