@@ -19,6 +19,7 @@ import re
 from pytz import timezone
 from dateutil.parser import parse
 import multiprocessing as mp
+import sys
 
 #followin import and decorate can be removed after rework
 import inspect
@@ -289,3 +290,5 @@ def scan_folder(basepath):
         pool.close()
         pool.join()
     return list_of_mail
+
+a=scan_folder(sys.argv[1])
