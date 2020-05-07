@@ -18,6 +18,7 @@ import os
 import re
 from email.header import decode_header
 from functools import lru_cache
+
 # from anytree import Node, RenderTree, AsciiStyle, PreOrderIter
 # from anytree.importer import DictImporter
 from dateutil.parser import parse
@@ -50,11 +51,12 @@ class Eml(object):
     re_pat_f_received = received_p_from + received_p_by + \
                         received_p_with + received_p_id + received_p_for + received_p_date
 
-    re_pattern={
-        'email'     : re_pat_email,
-        'ipv4'      : re_pat_ipv4,
-        'received'  : re_pat_f_received
+    re_pattern = {
+        'email': re_pat_email,
+        'ipv4': re_pat_ipv4,
+        'received': re_pat_f_received
     }
+
     def get_header(self, field):
         """Get a decoded list of all values for given header field."""
         return [self.__decode(value) for value in self.get_header_raw(field)]
@@ -72,6 +74,16 @@ class Eml(object):
     def get_eml(self):
         """Get email.email Object for this email."""
         return email.message_from_binary_file(open(self.filename, 'rb'))
+
+    def __get_from_struct(self, fieldname, struct=None):
+        if struct is None:
+            struct = self.struct
+        if fieldname in struct and struct[fieldname] is not None:
+            yield struct[fieldname]
+        if "children" in struct and len(struct["children"]) > 0:
+            for child in struct["children"]:
+                for hit in self.__get_from_struct(fieldname, child):
+                    yield hit
 
     def __get_sub_struct(self, msg_part):
         tmp_struct = {
@@ -145,8 +157,7 @@ class Eml(object):
         """
         hashes = []
         if part == "all" or part == "attachments":
-            hashes.extend([x[hash_type] for x in self.attachments])
-
+            hashes.extend([x for x in self.__get_from_struct(hash_type)])
         return hashes
 
     def get_attachments(self, filename=None):
@@ -198,7 +209,7 @@ class Eml(object):
         return False
 
     def extract_from_text(self, text, pattern='email'):
-        pat=re.compile(self.re_pattern["email"],re.IGNORECASE)
+        pat = re.compile(self.re_pattern["email"], re.IGNORECASE)
         match = pat.findall(text)
         return match
 
@@ -233,7 +244,7 @@ class Eml(object):
         self.status = "new"
         self.filename = filename
         try:
-            # msg = email.message_from_file(open(filename, 'r', encoding='latin-1'))
+            # self.msg = self.get_eml()
             self.header = self.get_eml().items()
             self.status = "processing_header"
             self.froms = self.get_header("from")
@@ -247,18 +258,18 @@ class Eml(object):
             self.attachments = []
             self._struct = None
             self.struct
-            if hash_attachments:
-                for part in self.get_eml().walk():
-                    if part.get_filename() is not None:
-                        self.status = self.status + "."
-                        attachment = {}
-                        attachment["filename"] = self.__decode(part.get_filename())
-                        attachment["mimetype"] = part.get_content_type()
-                        # attachment["mimetype"] = part.get_content_type()
-                        attachment['rawdata'] = part.get_payload(decode=True)
-                        attachment["md5"] = hashlib.md5(attachment['rawdata']).hexdigest()
-                        attachment["sha256"] = hashlib.sha256(attachment['rawdata']).hexdigest()
-                        self.attachments.append(attachment)
+            # if hash_attachments:
+            #     for part in self.get_eml().walk():
+            #         if part.get_filename() is not None:
+            #             self.status = self.status + "."
+            #             attachment = {}
+            #             attachment["filename"] = self.__decode(part.get_filename())
+            #             attachment["mimetype"] = part.get_content_type()
+            #             # attachment["mimetype"] = part.get_content_type()
+            #             attachment['rawdata'] = part.get_payload(decode=True)
+            #             attachment["md5"] = hashlib.md5(attachment['rawdata']).hexdigest()
+            #             attachment["sha256"] = hashlib.sha256(attachment['rawdata']).hexdigest()
+            #             self.attachments.append(attachment)
             self.status = "done"
         except Exception as e:
             print(e)
@@ -295,3 +306,20 @@ if __name__ == '__main__':
     b = [x for x in a if x.status == 'done']
     print(len(a))
     print(len(b))
+    hashes = {}
+    for x in b:
+        for h in x.get_hash():
+            if h in hashes:
+                hashes[h].append(x)
+            else:
+                hashes[h] = [x]
+
+    print(len(hashes))
+    max = 0
+    max_hash = ""
+    for x in hashes:
+        if len(hashes[x]) > max:
+            max = len(hashes[x])
+            max_hash = x
+
+    print(max)
