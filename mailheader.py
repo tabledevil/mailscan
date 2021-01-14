@@ -1,10 +1,8 @@
 #!/usr/bin/python3
 # -*- coding: utf-8 -*-
-import os
 import email
+import os
 import sys
-import dkim
-
 
 with open(sys.argv[1],'r',encoding='latin-1') as f:
 
