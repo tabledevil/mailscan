@@ -3,6 +3,12 @@
 import email
 import sys
 import chardet
+import argparse
+
+parser = argparse.ArgumentParser()
+parser.add_argument('-f', dest='field', nargs='?', action='append', help='Header field to look for')
+parser.add_argument('infile', nargs='+', type=argparse.FileType('rb'))
+args = parser.parse_args()
 
 def fdecode(string):
     if isinstance(string, str):
@@ -22,15 +28,19 @@ def fdecode(string):
             except UnicodeDecodeError:
                 pass
 
-with open(sys.argv[1],'r',encoding='latin-1') as f:
-    msg_data=f.read()
-    msg=email.message_from_string(msg_data)
 
-for (k,v) in msg.items():
-    for (string,encoding) in email.header.decode_header(v):
-        if encoding != None:
-            value=string.decode(encoding)
-        else:
-            value=fdecode(string)
-        value=' '.join(value.split())
-        print("{}: {}".format(k,value.strip()))
+for file in args.infile:
+    print(file.name)
+    msg=email.message_from_binary_file(file)
+    file.close()
+
+    for (k,v) in msg.items():
+        if args.field is not None and k.lower() not in (field.lower() for field in args.field):
+            continue
+        for (string,encoding) in email.header.decode_header(v):
+            if encoding != None:
+                value=string.decode(encoding)
+            else:
+                value=fdecode(string)
+            value=' '.join(value.split())
+            print("{}: {}".format(k,value.strip()))
