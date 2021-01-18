@@ -3,3 +3,6 @@ __pycache__
 sender.txt
 mails.csv
 .idea
+.vscode/settings.json
+.vscode/.ropeproject/objectdb
+.vscode/.ropeproject/config.py
