@@ -16,6 +16,7 @@ import inspect
 import multiprocessing as mp
 import os
 import re
+import chardet
 from email.header import decode_header
 from functools import lru_cache
 
@@ -59,7 +60,14 @@ class Eml(object):
 
     def get_header(self, field):
         """Get a decoded list of all values for given header field."""
-        return [self.__decode(value) for value in self.get_header_raw(field)]
+        for v in self.get_header_raw(field):
+            for value,encoding in email.header.decode_header(v):
+                if encoding != None:
+                    value=value.decode(encoding)
+                else:
+                    value=self.__decode(value)
+                yield ' '.join(value.split())
+            
 
     def get_header_raw(self, field):
         """Get list of all raw values for given header field."""
@@ -73,7 +81,11 @@ class Eml(object):
     @lru_cache(maxsize=2)
     def get_eml(self):
         """Get email.email Object for this email."""
-        return email.message_from_binary_file(open(self.filename, 'rb'))
+        data=open(self.filename, 'rb').read()
+        self.md5=hashlib.md5(data).hexdigest()
+        self.sha256=hashlib.sha256(data).hexdigest()
+        self.sha1=hashlib.sha1(data).hexdigest()
+        return email.message_from_bytes(data)
 
     def __get_from_struct(self, fieldname, struct=None):
         if struct is None:
@@ -99,6 +111,7 @@ class Eml(object):
         else:
             data = msg_part.get_payload(decode=True)
             tmp_struct["md5"] = hashlib.md5(data).hexdigest()
+            tmp_struct["sha1"] = hashlib.sha1(data).hexdigest()
             tmp_struct["sha256"] = hashlib.sha256(data).hexdigest()
         return tmp_struct
 
@@ -130,6 +143,7 @@ class Eml(object):
     def get_from(self):
         """Get all sender indicating fields of mail as dictionary"""
         # from
+        return self.get_header("from")
         # reply-to
         # return-path
         # received envelope info
@@ -153,7 +167,7 @@ class Eml(object):
         Get hash for selected parts.
 
         part = (all,body,attachments,index) index from get_struct
-        type = (md5,sha256)
+        type = (md5,sha1,sha256)
         """
         hashes = []
         if part == "all" or part == "attachments":
@@ -216,13 +230,17 @@ class Eml(object):
     def __decode(self, string):
         '''Decode string as far as possible'''
         if isinstance(string, str):
-            text, encoding = decode_header(string)[0]
+            text, encoding = email.header.decode_header(string)[0]
             if encoding is None:
                 return text
             else:
                 return text.decode(encoding)
         if isinstance(string, bytes):
-            for encoding in ['utf-8-sig', 'utf-16', 'cp1252']:
+            encodings = ['utf-8-sig', 'utf-16', 'iso-8859-15']
+            detection = chardet.detect(string)
+            if "encoding" in detection and len(detection["encoding"]) > 2:
+                encodings.insert(0,detection["encoding"])
+            for encoding in encodings:
                 try:
                     return string.decode(encoding)
                 except UnicodeDecodeError:
@@ -234,10 +252,16 @@ class Eml(object):
     def __str__(self):
         output = self.filename + ":\n"
         if "done" in self.status:
-            output += "From: %s\n" % self.froms
-            output += "To: %s\n" % self.tos
+            for f in self.froms:
+                output += "From: {}\n".format(f)
+            for t in self.tos:
+                output += "To: {}\n".format(t)
             output += "Date: %s\n" % self.date
             output += "Subject: %s\n" % self.subject
+            output += "MD5: %s\n" % self.md5
+            output += "SHA1: %s\n" % self.sha1
+            output += "SHA256: %s\n" % self.sha256
+
         return output
 
     def __init__(self, filename, hash_attachments=True):
@@ -302,24 +326,10 @@ def scan_folder(basepath):
 
 
 if __name__ == '__main__':
-    a = scan_folder('/media/data/cases/testmails')
-    b = [x for x in a if x.status == 'done']
-    print(len(a))
-    print(len(b))
-    hashes = {}
-    for x in b:
-        for h in x.get_hash():
-            if h in hashes:
-                hashes[h].append(x)
-            else:
-                hashes[h] = [x]
-
-    print(len(hashes))
-    max = 0
-    max_hash = ""
-    for x in hashes:
-        if len(hashes[x]) > max:
-            max = len(hashes[x])
-            max_hash = x
-
-    print(max)
+    import argparse
+    parser=argparse.ArgumentParser()
+    parser.add_argument('mail',help="Mail you want to analyze")
+    args=parser.parse_args()
+    malmail=Eml(args.mail)
+    print(malmail)
+    # print([x for x in malmail.get_header('from')])
