@@ -13,9 +13,11 @@ In the Future these objects are supposed to be items in searchable catalogue.
 import email
 import hashlib
 import inspect
+import pprint
 import multiprocessing as mp
 import os
 import re
+import magic
 import chardet
 from email.header import decode_header
 from functools import lru_cache
@@ -92,24 +94,27 @@ class Eml(object):
             struct = self.struct
         if fieldname in struct and struct[fieldname] is not None:
             yield struct[fieldname]
-        if "children" in struct and len(struct["children"]) > 0:
-            for child in struct["children"]:
+        if "parts" in struct and len(struct["parts"]) > 0:
+            for child in struct["parts"]:
                 for hit in self.__get_from_struct(fieldname, child):
                     yield hit
 
     def __get_sub_struct(self, msg_part):
-        tmp_struct = {
-            "content_type": msg_part.get_content_type(),
-            "is_multipart": msg_part.is_multipart(),
-            # "boundary": msg_part.get_boundary(),
-            "filename": self.__decode(msg_part.get_filename()),
-            # "default_type": msg_part.get_default_type(),
-            "content_disposition": msg_part.get_content_disposition()
-        }
+        tmp_struct = {}
+        tmp_struct['content_type'] = msg_part.get_content_type()
+        tmp_struct['content_disposition'] = msg_part.get_content_disposition()
+        
         if msg_part.is_multipart():
-            tmp_struct["children"] = [self.__get_sub_struct(part) for part in msg_part.get_payload()]
+            tmp_struct["parts"] = [self.__get_sub_struct(part) for part in msg_part.get_payload()]
         else:
             data = msg_part.get_payload(decode=True)
+            if msg_part.get_filename():
+                tmp_struct['filename'] = (self.__decode(msg_part.get_filename()))
+            try:
+                tmp_struct['magic_mime'] = magic.from_buffer(data,mime=True)
+                tmp_struct['magic'] = magic.from_buffer(data)
+            except:
+                pass
             tmp_struct["md5"] = hashlib.md5(data).hexdigest()
             tmp_struct["sha1"] = hashlib.sha1(data).hexdigest()
             tmp_struct["sha256"] = hashlib.sha256(data).hexdigest()
@@ -249,6 +254,31 @@ class Eml(object):
     def __convert_date_tz(self, datetime, tz='UTC'):
         return datetime.astimezone(tz=timezone(tz))
 
+    def __struct_str(self,struct,level=0,index=0):
+        content_disposition = struct['content_disposition'] if struct['content_disposition'] else ''
+        if 'attachment' in content_disposition:
+            content_disposition='📎'
+        output = ''
+        output += '{}{} {}\n'.format(" "*level,struct['content_type'],content_disposition)
+        if 'filename' in struct:
+            output += '{} filename : {}\n'.format(" "*level,struct['filename'])
+        if 'magic_mime' in struct:
+            if struct['magic_mime'] != struct['content_type']:
+                output += '{} MIME!    : {}\n'.format(" "*level,struct['magic_mime'])
+        if 'magic' in struct:
+            if struct['magic'] != struct['content_type']:
+                output += '{} magic    : {}\n'.format(" "*level,struct['magic'])
+        if 'md5' in struct:
+            output += '{} md5      : {}\n'.format(" "*level,struct['md5'])
+        if 'sha1' in struct:
+            output += '{} sha1     : {}\n'.format(" "*level,struct['sha1'])
+        if 'sha256' in struct:
+            output += '{} sha256   : {}\n'.format(" "*level,struct['sha256'])
+        if 'parts' in struct and len(struct['parts'])>0:
+            for x in struct['parts']:
+                output += self.__struct_str(x,level=level+4)
+        return output
+
     def __str__(self):
         output = self.filename + ":\n"
         if "done" in self.status:
@@ -257,10 +287,13 @@ class Eml(object):
             for t in self.tos:
                 output += "To: {}\n".format(t)
             output += "Date: %s\n" % self.date
-            output += "Subject: %s\n" % self.subject
+            for s in self.subject:
+                output += "Subject: {}\n".format(s)
             output += "MD5: %s\n" % self.md5
             output += "SHA1: %s\n" % self.sha1
             output += "SHA256: %s\n" % self.sha256
+            output += "PARTS: \n{}".format(self.__struct_str(self.struct,level=2))
+
 
         return output
 
@@ -282,21 +315,10 @@ class Eml(object):
             self.attachments = []
             self._struct = None
             self.struct
-            # if hash_attachments:
-            #     for part in self.get_eml().walk():
-            #         if part.get_filename() is not None:
-            #             self.status = self.status + "."
-            #             attachment = {}
-            #             attachment["filename"] = self.__decode(part.get_filename())
-            #             attachment["mimetype"] = part.get_content_type()
-            #             # attachment["mimetype"] = part.get_content_type()
-            #             attachment['rawdata'] = part.get_payload(decode=True)
-            #             attachment["md5"] = hashlib.md5(attachment['rawdata']).hexdigest()
-            #             attachment["sha256"] = hashlib.sha256(attachment['rawdata']).hexdigest()
-            #             self.attachments.append(attachment)
             self.status = "done"
         except Exception as e:
             print(e)
+
             self.status = "not_parsable" + str(e)
 
 
@@ -316,13 +338,13 @@ def scan_folder(basepath):
             for root, dirs, files in os.walk(basepath):
                 path = root.split(os.sep)
                 relpath = os.sep.join(root.split(os.sep)[base_count:])
-
                 new_mails = pool.map(create_newmail, [root + os.sep + s for s in files])
                 list_of_mail.extend(new_mails)
 
         pool.close()
         pool.join()
     return list_of_mail
+
 
 
 if __name__ == '__main__':
@@ -332,4 +354,5 @@ if __name__ == '__main__':
     args=parser.parse_args()
     malmail=Eml(args.mail)
     print(malmail)
-    # print([x for x in malmail.get_header('from')])
+
+
