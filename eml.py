@@ -108,10 +108,12 @@ class Eml(object):
             tmp_struct["parts"] = [self.__get_sub_struct(part) for part in msg_part.get_payload()]
         else:
             data = msg_part.get_payload(decode=True)
+            tmp_struct['data'] = data
             if msg_part.get_filename():
                 tmp_struct['filename'] = (self.__decode(msg_part.get_filename()))
+                tmp_struct['size'] = len(tmp_struct['data'])
             try:
-                tmp_struct['magic_mime'] = magic.from_buffer(data,mime=True)
+                tmp_struct['mime'] = magic.from_buffer(data,mime=True)
                 tmp_struct['magic'] = magic.from_buffer(data)
             except:
                 pass
@@ -262,12 +264,14 @@ class Eml(object):
         output += '{}{} {}\n'.format(" "*level,struct['content_type'],content_disposition)
         if 'filename' in struct:
             output += '{} filename : {}\n'.format(" "*level,struct['filename'])
-        if 'magic_mime' in struct:
-            if struct['magic_mime'] != struct['content_type']:
-                output += '{} MIME!    : {}\n'.format(" "*level,struct['magic_mime'])
+        if 'size' in struct:
+            output += '{} size     : {}\n'.format(" "*level,struct['size'])
+        if 'mime' in struct:
+            if struct['mime'] != struct['content_type']:
+                output += '{} !MIME!   : {}\n'.format(" "*level,struct['mime'])
         if 'magic' in struct:
             if struct['magic'] != struct['content_type']:
-                output += '{} magic    : {}\n'.format(" "*level,struct['magic'])
+                output += '{} magic    : {}\n'.format(" "*level,struct['magic'][:180])
         if 'md5' in struct:
             output += '{} md5      : {}\n'.format(" "*level,struct['md5'])
         if 'sha1' in struct:

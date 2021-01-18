@@ -1,66 +1,49 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-import sys
-import email
-import os
-import hashlib
-import chardet
 import argparse
+import os
+import sys
 import eml
-
-def fdecode(string):
-    if isinstance(string, str):
-        text, encoding = email.header.decode_header(string)[0]
-        if encoding is None:
-            return text
-        else:
-            return text.decode(encoding)
-    if isinstance(string, bytes):
-        encodings = ['utf-8-sig', 'utf-16', 'iso-8859-15']
-        detection = chardet.detect(string)
-        if "encoding" in detection and len(detection["encoding"]) > 2:
-            encodings.insert(0,detection["encoding"])
-        for encoding in encodings:
-            try:
-                return string.decode(encoding)
-            except UnicodeDecodeError:
-                pass
-
-def get_md5(data):
-    md5=hashlib.md5()
-    md5.update(data)
-    return str(md5.hexdigest())
-
-def print_attachments(msg_data):
-    msg_md5=get_md5(msg_data)
-    msg=email.message_from_bytes(msg_data)
-    print("Attachments in Mail [{}]".format(msg_md5))
-    j=0
-    for part in msg.walk():
-        label='part'+str(j)
-        if part.get_filename() is not None:
-            print(part.get_filename())
-            try:
-                att_data=part.get_payload(decode=True)
-                md5=get_md5(att_data)
-                filename=fdecode(part.get_filename())
-                i+=1
-                print("{:02d}:{} >>{}<<".format(i,md5,filename))
-            except:
-                pass
-
+import queue
+import pprint
 
 if __name__ == "__main__":
+    path = os.path.join(os.getcwd(),'extract')
     parser = argparse.ArgumentParser()
-    parser.add_argument('files', nargs='+', type=argparse.FileType('rb'))
+    parser.add_argument('files', nargs='+', help="Mailfiles to analyse")
+    parser.add_argument("-x", "--extract", help="Save all parts of the mail to files", action="store_true")
+    parser.add_argument("-o", "--out-dir", help="output dir. [default={}]".format(path), default=path)
     args = parser.parse_args()
-    i=0
+    
     for f in args.files:
-        print_attachments(f.read())
-        # e=eml.Eml(f.name)
-        # print(e)
-        # print(e.struct)
-        f.close()
+        e = eml.Eml(f)
+        print(e)
+        if args.extract:
+            fpath=os.path.join(args.out_dir,e.md5)
+            if not os.path.isdir(fpath):
+                print("Creating folder {}".format(fpath))
+                os.makedirs(fpath)
+
+            q = queue.Queue()
+            q.put(e.struct)
+
+            while not q.empty():
+                x = q.get()
+                if 'data' in x:
+                    if 'filename' in x:
+                        pfpath=os.path.join(fpath,x['filename'])
+                    else:
+                        filename = '.'.join([x['md5'],x['mime'].replace("/","_")])
+                        pfpath = os.path.join(fpath,filename)
+                    
+                    print(pfpath)
+                    with open(pfpath,'wb') as of:
+                        of.write(x['data'])
+
+                if 'parts' in x:
+                    for p in x['parts']:
+                        q.put(p)
+
 
 
 
