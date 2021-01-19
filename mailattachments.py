@@ -2,16 +2,15 @@
 # -*- coding: utf-8 -*-
 import argparse
 import os
-import sys
 import eml
-import queue
-import pprint
+
 
 if __name__ == "__main__":
     path = os.path.join(os.getcwd(),'extract')
     parser = argparse.ArgumentParser()
     parser.add_argument('files', nargs='+', help="Mailfiles to analyse")
     parser.add_argument("-x", "--extract", help="Save all parts of the mail to files", action="store_true")
+    parser.add_argument("-f", "--filenames", help="Restore original Filenames", action="store_true")
     parser.add_argument("-o", "--out-dir", help="output dir. [default={}]".format(path), default=path)
     args = parser.parse_args()
     
@@ -23,26 +22,20 @@ if __name__ == "__main__":
             if not os.path.isdir(fpath):
                 print("Creating folder {}".format(fpath))
                 os.makedirs(fpath)
-
-            q = queue.Queue()
-            q.put(e.struct)
-
-            while not q.empty():
-                x = q.get()
+            for x in e.flat_struct:
                 if 'data' in x:
-                    if 'filename' in x:
+                    if args.filenames and 'filename' in x:
                         pfpath=os.path.join(fpath,x['filename'])
                     else:
                         filename = '.'.join([x['md5'],x['mime'].replace("/","_")])
                         pfpath = os.path.join(fpath,filename)
-                    
-                    print(pfpath)
+                    print(x['index'],pfpath)
                     with open(pfpath,'wb') as of:
                         of.write(x['data'])
+                else:
+                    print(x['index'],x['content_type'])
 
-                if 'parts' in x:
-                    for p in x['parts']:
-                        q.put(p)
+
 
 
 

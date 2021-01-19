@@ -129,6 +129,24 @@ class Eml(object):
             self._struct = self.__get_sub_struct(self.get_eml())
         return self._struct
 
+    @property
+    def flat_struct(self):
+        """Get structure of email as array."""
+        return self.__flatten_struct(self.struct)
+
+    def __flatten_struct(self, struct, index=0):
+        x = struct
+        x['index'] = index
+        yield x
+        if 'parts' in x:
+            for y in x['parts']:
+                for element in self.__flatten_struct(y):
+                    index += 1
+                    element['index'] = index
+                    yield element
+
+        return self._struct
+
     def get_mail_path(self):
         """Get mail delivery path as reconstructed from received fields as list."""
         pass
