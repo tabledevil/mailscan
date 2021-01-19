@@ -305,16 +305,16 @@ class Eml(object):
         output = self.filename + ":\n"
         if "done" in self.status:
             for f in self.froms:
-                output += "From: {}\n".format(f)
+                output += "From   : {}\n".format(f)
             for t in self.tos:
-                output += "To: {}\n".format(t)
-            output += "Date: %s\n" % self.date
+                output += "To     : {}\n".format(t)
+            output += "Date   : %s\n" % self.date
             for s in self.subject:
                 output += "Subject: {}\n".format(s)
-            output += "MD5: %s\n" % self.md5
-            output += "SHA1: %s\n" % self.sha1
-            output += "SHA256: %s\n" % self.sha256
-            output += "PARTS: \n{}".format(self.__struct_str(self.struct,level=2))
+            output += "MD5    : %s\n" % self.md5
+            output += "SHA1   : %s\n" % self.sha1
+            output += "SHA256 : %s\n" % self.sha256
+            output += "MAIL-PARTS  ⮷ \n{}".format(self.__struct_str(self.struct,level=2))
 
 
         return output
