@@ -302,7 +302,10 @@ class Eml(object):
         return output
 
     def __str__(self):
-        output = self.filename + ":\n"
+        output = f"╦═══>{self.full_filename}<\n"
+        output +=f"╟╌┄MD5    : {self.md5}\n"
+        output +=f"╟╌┄SHA1   : {self.sha1}\n"
+        output +=f"╙╌┄SHA256 : {self.sha256}\n"
         if "done" in self.status:
             for f in self.froms:
                 output += "From   : {}\n".format(f)
@@ -311,9 +314,6 @@ class Eml(object):
             output += "Date   : %s\n" % self.date
             for s in self.subject:
                 output += "Subject: {}\n".format(s)
-            output += "MD5    : %s\n" % self.md5
-            output += "SHA1   : %s\n" % self.sha1
-            output += "SHA256 : %s\n" % self.sha256
             output += "MAIL-PARTS  ⮷ \n{}".format(self.__struct_str(self.struct,level=2))
 
 
@@ -322,8 +322,8 @@ class Eml(object):
     def __init__(self, filename, hash_attachments=True):
         self.status = "new"
         self.filename = filename
+        self.full_filename = os.path.abspath(filename)
         try:
-            # self.msg = self.get_eml()
             self.header = self.get_eml().items()
             self.status = "processing_header"
             self.froms = self.get_header("from")
