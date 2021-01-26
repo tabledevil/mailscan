@@ -4,8 +4,28 @@ import sys
 import email
 import os
 import hashlib
+import chardet
 
-base_path="/data/cases/006_exchange/pst/"
+def fdecode(string):
+    if isinstance(string, str):
+        text, encoding = email.header.decode_header(string)[0]
+        if encoding is None:
+            return text
+        else:
+            return text.decode(encoding)
+    if isinstance(string, bytes):
+        encodings = ['utf-8-sig', 'utf-16', 'iso-8859-15']
+        detection = chardet.detect(string)
+        if "encoding" in detection and len(detection["encoding"]) > 2:
+            encodings.insert(0,detection["encoding"])
+        for encoding in encodings:
+            try:
+                return string.decode(encoding)
+            except UnicodeDecodeError:
+                pass
+
+
+base_path=sys.argv[1]
 i=0
 for root, dirs, files in os.walk(base_path):
     # path = root.split(os.sep)
@@ -27,7 +47,7 @@ for root, dirs, files in os.walk(base_path):
                     attachment_data=part.get_payload(decode=True)
                     md5=hashlib.md5()
                     md5.update(attachment_data)
-                    filename="export/"+str(md5.hexdigest()+"-"+str(i)+"-"+file)
+                    filename="export/"+file+"/"+str(md5.hexdigest())+"-"+str(i)+"-"+fdecode(part.get_filename())
                     i+=1
                     print(filename)
                     open(filename,'wb').write(attachment_data)
