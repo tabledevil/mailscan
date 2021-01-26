@@ -13,17 +13,13 @@ In the Future these objects are supposed to be items in searchable catalogue.
 import email
 import hashlib
 import inspect
-import pprint
 import multiprocessing as mp
 import os
 import re
-import magic
-import chardet
-from email.header import decode_header
 from functools import lru_cache
 
-# from anytree import Node, RenderTree, AsciiStyle, PreOrderIter
-# from anytree.importer import DictImporter
+import chardet
+import magic
 from dateutil.parser import parse
 from pytz import timezone
 
