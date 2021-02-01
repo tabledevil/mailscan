@@ -95,13 +95,15 @@ class Eml(object):
                 for hit in self.__get_from_struct(fieldname, child):
                     yield hit
 
-    def __get_sub_struct(self, msg_part):
+    def __get_sub_struct(self, msg_part,level=0,index=0):
         tmp_struct = {}
         tmp_struct['content_type'] = msg_part.get_content_type()
         tmp_struct['content_disposition'] = msg_part.get_content_disposition()
+        tmp_struct['level'] = level
+        tmp_struct['index'] = index
         
         if msg_part.is_multipart():
-            tmp_struct["parts"] = [self.__get_sub_struct(part) for part in msg_part.get_payload()]
+            tmp_struct["parts"] = [self.__get_sub_struct(part,level=level+1,index=index+1+sub_index) for sub_index, part in enumerate(msg_part.get_payload())]
         else:
             data = msg_part.get_payload(decode=True)
             tmp_struct['data'] = data
@@ -130,15 +132,12 @@ class Eml(object):
         """Get structure of email as array."""
         return self.__flatten_struct(self.struct)
 
-    def __flatten_struct(self, struct, index=0):
+    def __flatten_struct(self, struct):
         x = struct
-        x['index'] = index
         yield x
         if 'parts' in x:
             for y in x['parts']:
                 for element in self.__flatten_struct(y):
-                    index += 1
-                    element['index'] = index
                     yield element
 
         return self._struct
@@ -275,7 +274,7 @@ class Eml(object):
         if 'attachment' in content_disposition:
             content_disposition='📎'
         output = ''
-        output += '{}{} {}\n'.format(" "*level,struct['content_type'],content_disposition)
+        output += f'{struct["index"]}{" "*level}{struct["content_type"]} {content_disposition}\n'
         if 'filename' in struct:
             output += '{} filename : {}\n'.format(" "*level,struct['filename'])
         if 'size' in struct:
