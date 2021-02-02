@@ -269,31 +269,32 @@ class Eml(object):
     def __convert_date_tz(self, datetime, tz='UTC'):
         return datetime.astimezone(tz=timezone(tz))
 
-    def __struct_str(self,struct,level=0,index=0):
+    def __struct_str(self,struct,pre_indent=0,index=0):
         content_disposition = struct['content_disposition'] if struct['content_disposition'] else ''
         if 'attachment' in content_disposition:
             content_disposition='📎'
         output = ''
-        output += f'{struct["index"]}{" "*level}{struct["content_type"]} {content_disposition}\n'
+        indent = "  " + "    " * struct['level']
+        output += f'{struct["index"]:_<{len(indent)}d}{struct["content_type"]} {content_disposition}\n'
         if 'filename' in struct:
-            output += '{} filename : {}\n'.format(" "*level,struct['filename'])
+            output += f'{indent} filename : {struct["filename"]}\n'
         if 'size' in struct:
-            output += '{} size     : {}\n'.format(" "*level,struct['size'])
+            output += f'{indent} size     : {struct["size"]}\n'
         if 'mime' in struct:
             if struct['mime'] != struct['content_type']:
-                output += '{} !MIME!   : {}\n'.format(" "*level,struct['mime'])
+                output += f'{indent} !MIME!   : {struct["mime"]}\n'
         if 'magic' in struct:
             if struct['magic'] != struct['content_type']:
-                output += '{} magic    : {}\n'.format(" "*level,struct['magic'][:180])
+                output += f'{indent} magic    : {struct["magic"][:180]}\n'
         if 'md5' in struct:
-            output += '{} md5      : {}\n'.format(" "*level,struct['md5'])
+            output += f'{indent} md5      : {struct["md5"]}\n'
         if 'sha1' in struct:
-            output += '{} sha1     : {}\n'.format(" "*level,struct['sha1'])
+            output += f'{indent} sha1     : {struct["sha1"]}\n'
         if 'sha256' in struct:
-            output += '{} sha256   : {}\n'.format(" "*level,struct['sha256'])
+            output += f'{indent} sha256   : {struct["sha256"]}\n'
         if 'parts' in struct and len(struct['parts'])>0:
             for x in struct['parts']:
-                output += self.__struct_str(x,level=level+4)
+                output += self.__struct_str(x,pre_indent=pre_indent)
         return output
 
     def __str__(self):
@@ -303,13 +304,13 @@ class Eml(object):
         output +=f"╙╌┄SHA256 : {self.sha256}\n"
         if "done" in self.status:
             for f in self.froms:
-                output += "From   : {}\n".format(f)
+                output += f"From   : {f}\n"
             for t in self.tos:
-                output += "To     : {}\n".format(t)
-            output += "Date   : %s\n" % self.date
+                output += f"To     : {t}\n"
+            output += f"Date   : {self.date}\n"
             for s in self.subject:
-                output += "Subject: {}\n".format(s)
-            output += "MAIL-PARTS  ⮷ \n{}".format(self.__struct_str(self.struct,level=2))
+                output += f"Subject: {s}\n"
+            output += f"MAIL-PARTS  ⮷ \n{self.__struct_str(self.struct,pre_indent=3)}"
 
 
         return output
