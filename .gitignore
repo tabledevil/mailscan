@@ -1,9 +1,11 @@
 __pycache__/*
 __pycache__
+#ignore outputs
 sender.txt
 mails.csv
+#ignore ide-files
 .idea
-.vscode/settings.json
-.vscode/.ropeproject/objectdb
-.vscode/.ropeproject/config.py
+.vscode
+#ignore testfiles
 *.eml
+test.*
