@@ -1,3 +1,6 @@
+from ctypes import Structure
+from sys import flags
+from eml import Eml
 import magic
 import os
 import hashlib
@@ -9,10 +12,10 @@ from pprint import pprint as pp
 class Analyzer():
     compatible_mime_types = []
     description = "Generic Analyzer Class"
-    reports_available = ["summary"]
+
     def __init__(self,struct) -> None:
         self.struct = struct
-        self.analysis_data = { }
+        self.analysis_data = {}
         self.analysis()
 
     def analysis(self):
@@ -27,18 +30,22 @@ class Analyzer():
         return Analyzer
 
     def get_childitems(self) -> list():
-        pass
+        return []
 
     @property
     def info(self):
         return self.analysis_data['info']
 
-    def get_report(self,report='summary'):
-        if report in self.reports_available:
-            if not report in self.analysis_data:
-                self.analysis()
-            else:
-                return self.analysis_data[report]
+    @property
+    def summary(self):
+        return self.analysis_data['summary']
+
+    def get_report(self,report='info'):
+        return self.analysis_data[report]
+
+    @property
+    def reports_available(self):
+        return [report for report in self.analysis_data.keys()]
 
     def __str__(self) -> str:
         return type(self).description
@@ -47,6 +54,18 @@ class EmailAnalyzer(Analyzer):
     compatible_mime_types = ['message/rfc822']
     description = "Email analyser"
 
+    def analysis(self):
+        super().analysis()
+        import eml
+        self.eml=Eml(filename=self.struct.filename, data=self.struct.rawdata)
+        self.analysis_data['info'] = f'{",".join(self.eml.subject)}'
+        self.analysis_data['summary'] = f'{self.eml}'
+    
+    def get_childitems(self) -> list():
+        childs = []
+        for idx,part in enumerate([x for x in self.eml.flat_struct if x['data']]):
+            childs.append(Structure(file=part['filename'],data=part['data'],mime_type=part['content_type'],level=self.struct.level+1,index=idx))
+        return childs
 
 
     
@@ -55,12 +74,16 @@ class ZipAnalyzer(Analyzer):
     description = "ZIP-File analyser"
 
     def analysis(self):
-        #super().analysis()
+        super().analysis()
         import zipfile, io
         file_like_object = io.BytesIO(self.struct.rawdata)
-        zipfile_ob = zipfile.ZipFile(file_like_object)
-        self.analysis_data['info'] = f'{len(zipfile_ob.filelist)} compressed file(s)'
-        self.analysis_data['summary'] = zipfile_ob.filelist
+        self.zipobj = zipfile.ZipFile(file_like_object)
+        self.analysis_data['info'] = f'{len(self.zipobj.filelist)} compressed file(s)'
+        filelist = [f'{f.filename} [{f.file_size}]' for f in self.zipobj.filelist]
+        self.analysis_data['summary'] = '\n'.join(filelist)
+    
+    def get_childitems(self) -> list():
+        return [Structure(file=name,data=self.zipobj.read(name),level=self.struct.level+1,index=index) for index, name in enumerate(self.zipobj.namelist())]
 
 
 class Structure(dict):
@@ -73,45 +96,50 @@ class Structure(dict):
             if hasher.digest_size > 0:
                 self[key] = hasher.hexdigest()
                 return self[key]
+        if key is not '__analyzer' and self.__analyzer and key in self.__analyzer.reports_available:
+            return self.__analyzer.get_report(key)
         raise AttributeError()
     def __setattr__(self, name, value): 
         self[name] = value
 
-    def __init__(self, file=None, data=None, mime_type=None, path="", level=0, index=0) -> None:
-        if file is not None and os.path.isfile(file):
-            self.fullpath = os.path.abspath(file)
-            self.filename = os.path.split(self.fullpath)[1]
-            self.folder = os.path.split(self.fullpath)[0]
-            self.abstractpath = self.fullpath
-            self.realfile = True
-            if data is None:
-                self.read_rawdata()
-            elif len(data) != os.stat(file).st_size:
-                logging.error(f'Both data and filename was provided but length of file on disk an data differs : {len(data)} <> {os.stat(file).st_size}')
-                self.rawdata = data
+    def __init__(self, file=None, data=None, mime_type=None, level=0, index=0) -> None:
+        self.__analyzer = None
+        if data is None:
+            if file is not None and os.path.isfile(file):
+                self.fullpath = os.path.abspath(file)
+                self.filename = os.path.split(self.fullpath)[1]
+                logging.debug(f'Reading file {self.fullpath}')
+                with open(self.fullpath,'rb') as f:
+                    self.__rawdata = f.read()
+            else:
+                raise ValueError("No Data was supplied for struct")
+
         else:
-            self.rawdata = data
-            self.realfile = False
-            self.filename = f"[{self.md5[:8]}]"
+            self.__rawdata = data
+            self.filename = f"{self.md5[:8]}" if file is None else file
         self.level = level
         self.index = index
         self.parent = None
         self.mime_type = self.magic if mime_type is None else mime_type
         self.type_mismatch = self.mime_type == self.magic
         self.__children = None
-        self.analyzer = Analyzer.get_analyzer(self.magic)(self)
+        self.__analyzer = Analyzer.get_analyzer(self.magic)(self)
 
-    def read_rawdata(self):
-        logging.info(f'Reading file {self.fullpath}')
-        try:
-            with open(self.fullpath,'rb') as f:
-                self.rawdata = f.read()
-        except OSError as e:
-            logging.error(f'Could not load Data from file "{e.filename}" [{e.strerror}]')
+    @property
+    def realfile(self):
+        if os.path.isfile(self.filename):
+            return self.size == os.stat(self.filename).st_size
+        return False
 
+    @property
+    def rawdata(self):
+        return self.__rawdata
 
     def __str__(self):
-        return f'{self.index}:{self.mime_type}[{self.size}] <{self.analyzer.info}>'
+        # if self.realfile or self.filename:
+        return f'{self.level}/{self.index}:{self.filename}[{self.mime_type}][{self.size}] <{self.info}>'
+        # else:
+        #     return f'{self.level}/{self.index}:{self.mime_type}[{self.md5}] <{self.info}>'
 
     @property
     def size(self):
@@ -125,11 +153,19 @@ class Structure(dict):
                 hashes[algo] = getattr(self,algo)
         return hashes
 
+    @property
+    def report(self):
+        txt = f'{self}\n'
+        for report in self.__analyzer.reports_available:
+            txt += f'{self.__analyzer.get_report(report)}\n'
+        return txt
+
+    def extract(self,basepath):
+        pass
 
     @property
     def has_children(self):
         return len(self.children) > 0
-
 
     @property
     def magic(self):
@@ -146,10 +182,9 @@ class Structure(dict):
 
     @property
     def children(self):
-        if self.__children is not None:
-            return self.__children
-        else:
-            self.analyzer.get_childitems()
+        if self.__children is None:
+            self.__children = self.__analyzer.get_childitems()
+        return self.__children
 
 
 
@@ -158,19 +193,16 @@ cwd=os.getcwd()
 logging.info(f'Working directory: {cwd}')
     
 s1=Structure(file="mail.eml")
-s2=Structure(file="test.zip")
-s3=Structure(file="test.exe")
-# print(a.fullpath)
-# print(a.filename)
-# print(a.folder)
+# s2=Structure(file="test.zip")
+# with open('mail2.eml','rb') as f:
+#     d=f.read()
+# s3=Structure(data=d,file="mail.eml")
 
-print(s1)
-print(s2)
-print(s3)
-# print(Analyzer.inheritors())
-# print(a.description)
-# print(b.description)
-# print(c.description)
-# print(Analyzer.get_analyzer('message/rfc822').description)
+c=s1.children
+# print(s1.report)
+for x in c:
+    print(x)
+
+
 
     

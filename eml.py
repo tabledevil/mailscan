@@ -105,7 +105,8 @@ class Eml(object):
         tmp_struct['content_disposition'] = msg_part.get_content_disposition()
         tmp_struct['level'] = level
         tmp_struct['index'] = index
-        
+        tmp_struct['filename'] = None       
+        tmp_struct['data'] = None
         if msg_part.is_multipart():
             tmp_struct["parts"] = [self.__get_sub_struct(part,level=level+1,index=index+1+sub_index) for sub_index, part in enumerate(msg_part.get_payload())]
         else:
