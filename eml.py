@@ -79,7 +79,11 @@ class Eml(object):
     @lru_cache(maxsize=2)
     def get_eml(self):
         """Get email.email Object for this email."""
-        data=open(self.filename, 'rb').read()
+        if self.data is None:
+            data=open(self.filename, 'rb').read()
+            self.data = data
+        else:
+            data = self.data
         self.md5=hashlib.md5(data).hexdigest()
         self.sha256=hashlib.sha256(data).hexdigest()
         self.sha1=hashlib.sha1(data).hexdigest()
@@ -315,10 +319,17 @@ class Eml(object):
 
         return output
 
-    def __init__(self, filename, hash_attachments=True):
+    def __init__(self, filename=None , data=None, hash_attachments=True):
         self.status = "new"
-        self.filename = filename
-        self.full_filename = os.path.abspath(filename)
+        if filename is None:
+            if data is None:
+                raise ValueError()
+            self.filename = 'unknown'
+            self.full_filename = 'unknown'
+        else:
+            self.filename = filename
+            self.full_filename = os.path.abspath(filename)
+        self.data = data
         try:
             self.header = self.get_eml().items()
             self.status = "processing_header"
@@ -370,7 +381,10 @@ if __name__ == '__main__':
     parser=argparse.ArgumentParser()
     parser.add_argument('mail',help="Mail you want to analyze")
     args=parser.parse_args()
-    malmail=Eml(args.mail)
+    with open(args.mail,'rb') as md:
+        data=md.read()
+    #malmail=Eml(args.mail)
+    malmail=Eml(data=data)
     print(malmail)
 
 
