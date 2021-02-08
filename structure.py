@@ -1,5 +1,7 @@
 from ctypes import Structure
 from sys import flags
+
+from pytz import NonExistentTimeError
 from eml import Eml
 import magic
 import os
@@ -8,20 +10,51 @@ import logging
 import inspect
 import time
 import textwrap
+from icecream import ic
 from pprint import pprint as pp
+
+class AnalysisModuleException(Exception):
+    pass
+
+
+
+
+class Report():
+    def __init__(self,text,short=None,label='',rank=0,verbosity=0):
+        self.text = text
+        self.short = self.text if short is None else short
+        self.label = label
+        self.rank = rank
+        self.verbosity = verbosity
+    
+    def __str__(self) -> str:
+        return self.text
 
 class Analyzer():
     compatible_mime_types = []
     description = "Generic Analyzer Class"
+    modules = {}
 
     def __init__(self,struct) -> None:
         self.struct = struct
-        self.analysis_data = {}
+        self.childitems = []
+        self.reports = {}
+        self.modules = {}
+        self.info = ""
         self.analysis()
 
+    def run_modules(self):
+        for module in self.modules:
+            try:
+                self.modules[module]()
+            except AnalysisModuleException as e:
+                logging.debug(f'Error during Module {module} : {e.msg}')
+            except Exception as e:
+                if debug:
+                    raise
+
     def analysis(self):
-        self.analysis_data['summary'] = ""
-        self.analysis_data['info'] = self.description
+        self.run_modules()
 
     @staticmethod
     def get_analyzer(mimetype):
@@ -31,35 +64,33 @@ class Analyzer():
         return Analyzer
 
     def get_childitems(self) -> list():
-        return []
-
-    @property
-    def info(self):
-        return self.analysis_data['info']
+        return self.childitems
 
     @property
     def summary(self):
-        return self.analysis_data['summary']
-
-    def get_report(self,report='info'):
-        return self.analysis_data[report]
+        summary = ""
+        for report in self.reports:
+            #TODO filter by verbosity and sort by rank
+            summary += f"{report} : {self.reports[report].short}\n"
+        return summary
 
     @property
     def reports_available(self):
-        return [report for report in self.analysis_data.keys()]
+        return self.reports.keys()
 
     def __str__(self) -> str:
         return type(self).description
+
 
 class EmailAnalyzer(Analyzer):
     compatible_mime_types = ['message/rfc822']
     description = "Email analyser"
 
-    def analysis(self):
-        super().analysis()
+    def parse_mail(self):
+
         import eml
         self.eml=Eml(filename=self.struct.filename, data=self.struct.rawdata)
-        self.analysis_data['info'] = f'{",".join(self.eml.subject)}'
+        self.info = f'{",".join(self.eml.subject)}'
         summary = ""
         for f in self.eml.froms:
             summary += f"From   : {f}\n"
@@ -68,13 +99,27 @@ class EmailAnalyzer(Analyzer):
             summary += f"Date   : {self.eml.date}\n"
         for s in self.eml.subject:
             summary += f"Subject   : {s}\n"
-        self.analysis_data['summary'] = f'{summary}'
-    
-    def get_childitems(self) -> list():
-        childs = []
+        self.reports['summary'] = Report(f'{summary}')
+
+
+    def extract_parts(self):
         for idx,part in enumerate([x for x in self.eml.flat_struct if x['data']]):
-            childs.append(Structure(file=part['filename'],data=part['data'],mime_type=part['content_type'],level=self.struct.level+1,index=idx))
-        return childs
+            self.childitems.append(Structure(file=part['filename'],data=part['data'],mime_type=part['content_type'],level=self.struct.level+1,index=idx))
+
+
+
+    def analysis(self):
+
+        self.modules['emailparser'] = self.parse_mail 
+        self.modules['extract_parts'] = self.extract_parts
+        self.run_modules()
+
+
+
+
+
+    def get_childitems(self) -> list():
+        return self.childitems
 
 class PlainTextAnalyzer(Analyzer):
     compatible_mime_types =['text/plain']
@@ -130,19 +175,27 @@ class PlainTextAnalyzer(Analyzer):
         try:
             import chardet
             detection = chardet.detect(string)
-            if "encoding" in detection and len(detection["encoding"]) > 2:
+            ic(detection)
+            if "encoding" in detection and detection['encoding'] is not None and len(detection["encoding"]) > 2:
                 return [detection["encoding"]]
         except ImportError:
             logging.warning('Missing module chardet')
-            return []
+        return []
+
+    def decode(self):
+        self.text = self.__decode(self.struct.rawdata)
 
 
     def analysis(self):
+        self.text = "Could not decode"
+        self.lang = ""
+        self.modules['encoding'] = self.decode
+        self.modules['language'] = self.detect_lang
         super().analysis()
-        self.text = self.__decode(self.struct.rawdata)
-        self.lang = self.detect_lang()
-        self.analysis_data['info'] = f"language:{self.lang} {len(self.text)}"
-        self.analysis_data['summary'] = self.text
+       
+        # self.lang = self.detect_lang()
+        self.info = f"language:{self.lang} {len(self.text)}"
+        self.reports['summary'] = Report(self.text,short=textwrap.shorten(self.text,width=100))
 
 class HTMLAnalyzer(Analyzer):
     compatible_mime_types =['text/html']
@@ -155,6 +208,7 @@ class HTMLAnalyzer(Analyzer):
         from bs4 import BeautifulSoup as bs
         self.soup = bs(self.struct.rawdata,features="lxml")
         self.text = self.soup.getText()
+        self.info = len(self.soup.contents)
 
     def get_childitems(self) -> list():
         return [Structure(data=self.text.encode(),mime_type="text/plain",level=self.struct.level+1)]
@@ -180,24 +234,33 @@ class PDFAnalyzer(Analyzer):
                 page_object = pdfReader.getPage(page)
                 txt += page_object.extractText()
             self.text=txt
+            self.reports['pagecount']=Report(f'{pdfReader.numPages}',label="Pages")
+            info = pdfReader.getDocumentInfo()
+            self.reports['title']=Report(f'{info.title}',label="title")
+            self.reports['subject']=Report(f'{info.subject}',label="subject")
+            self.reports['creator']=Report(f'{info.creator}',label="creator")
+            self.reports['author']=Report(f'{info.author}',label="Author")
+            self.reports['producer']=Report(f'{info.producer}',label="producer")
+
         except:
             pass
             
 
     def analysis(self):
-        super().analysis()
         import io
         self.pdfobj = io.BytesIO(self.struct.rawdata)
-        self.text = None
-        self.get_text()
-        self.analysis_data['summary'] = textwrap.shorten(self.text,width=1000)
+        self.text = ""
+        self.modules['pdf2text'] = self.get_text
+        super().analysis()
+
+        
+
 
 
 
     def get_childitems(self) -> list():
         if self.text is not None:
-            pass
-            # return [Structure(data=self.text.encode(),mime_type="text/plain",level=self.struct.level+1)]
+            return [Structure(data=self.text.encode(),mime_type="text/plain",level=self.struct.level+1)]
         return []
 
 class ZipAnalyzer(Analyzer):
@@ -209,9 +272,9 @@ class ZipAnalyzer(Analyzer):
         import zipfile, io
         file_like_object = io.BytesIO(self.struct.rawdata)
         self.zipobj = zipfile.ZipFile(file_like_object)
-        self.analysis_data['info'] = f'{len(self.zipobj.filelist)} compressed file(s)'
+        self.info = f'{len(self.zipobj.filelist)} compressed file(s)'
         filelist = [f'{f.filename} [{f.file_size}]' for f in self.zipobj.filelist]
-        self.analysis_data['summary'] = '\n'.join(filelist)
+        self.reports['summary'] = Report('\n'.join(filelist))
     
     def get_childitems(self) -> list():
         return [Structure(file=name,data=self.zipobj.read(name),level=self.struct.level+1,index=index) for index, name in enumerate(self.zipobj.namelist())]
@@ -226,13 +289,15 @@ class Structure(dict):
             if hasher.digest_size > 0:
                 self[key] = hasher.hexdigest()
                 return self[key]
-        if key is not '__analyzer' and self.__analyzer and key in self.__analyzer.reports_available:
-            return self.__analyzer.get_report(key)
+        # if key != '__analyzer' and self.__analyzer and key in self.__analyzer.reports_available:
+        #     return self.__analyzer.get_report(key)
         raise AttributeError(key)
     def __setattr__(self, name, value): 
         self[name] = value
+
+
     def __init__(self, file=None, data=None, mime_type=None, level=0, index=0) -> None:
-        self.__analyzer = None
+        self.analyzer = None
         if data is None:
             if file is not None and os.path.isfile(file):
                 self.fullpath = os.path.abspath(file)
@@ -252,7 +317,7 @@ class Structure(dict):
         self.mime_type = self.magic if mime_type is None else mime_type
         self.type_mismatch = self.mime_type == self.magic
         self.__children = None
-        self.__analyzer = Analyzer.get_analyzer(self.mime_type)(self)
+        self.analyzer = Analyzer.get_analyzer(self.mime_type)(self)
 
     @property
     def realfile(self):
@@ -276,7 +341,7 @@ class Structure(dict):
         return self.__rawdata
 
     def __str__(self):
-        return f'{self.level}/{self.index}:{self.filename}[{self.mime_type}][{self.size}] <{self.info}>'
+        return self.analyzer.info
 
     @property
     def size(self):
@@ -293,13 +358,13 @@ class Structure(dict):
 
     def get_report(self):
         txt =  f'{self.index} >> {self.mime_type} {self.size}\n'
-        txt += f'info     : {self.info}\n'
+        txt += f'info     : {self.analyzer.info}\n'
         if self.has_filename:
             txt += f'filename : {self.filename}\n'
         txt += f'md5      : {self.md5}\n'
         # txt += f'sha1     : {self.sha1}\n'
         # txt += f'sha256   : {self.sha256}\n'
-        txt += f'{self.summary}\n'
+        txt += f'{self.analyzer.summary}\n'
         for child in self.get_children():
             txt += f'{child.get_report()}'
         return textwrap.indent(txt,prefix="    " * self.level)
@@ -327,7 +392,7 @@ class Structure(dict):
     
     def get_children(self):
         if self.__children is None:
-            self.__children = self.__analyzer.get_childitems()
+            self.__children = self.analyzer.get_childitems()
         return self.__children
 
 
@@ -335,14 +400,15 @@ class Structure(dict):
 
 cwd=os.getcwd()
 logging.info(f'Working directory: {cwd}')
-    
-# s1=Structure(file="mail.eml")
-# print(s1.get_report())
+debug = True
+s1=Structure(file="mail.eml")
+ic(s1.md5)
+print(s1.get_report())
 
 s3=Structure(file="test.pdf")
 print(s3.get_report())
 
-# s2=Structure(file="test.zip")
-# print(s2.get_report())
+s2=Structure(file="test.zip")
+print(s2.get_report())
 
     
