@@ -81,6 +81,8 @@ class Analyzer():
     def __str__(self) -> str:
         return type(self).description
 
+    def get_childitems(self) -> list():
+        return self.childitems
 
 class EmailAnalyzer(Analyzer):
     compatible_mime_types = ['message/rfc822']
@@ -104,22 +106,19 @@ class EmailAnalyzer(Analyzer):
 
     def extract_parts(self):
         for idx,part in enumerate([x for x in self.eml.flat_struct if x['data']]):
+            ic(part['filename'])
             self.childitems.append(Structure(file=part['filename'],data=part['data'],mime_type=part['content_type'],level=self.struct.level+1,index=idx))
 
 
 
     def analysis(self):
-
         self.modules['emailparser'] = self.parse_mail 
         self.modules['extract_parts'] = self.extract_parts
+        ic(self.childitems)
         self.run_modules()
 
 
 
-
-
-    def get_childitems(self) -> list():
-        return self.childitems
 
 class PlainTextAnalyzer(Analyzer):
     compatible_mime_types =['text/plain']
@@ -175,7 +174,6 @@ class PlainTextAnalyzer(Analyzer):
         try:
             import chardet
             detection = chardet.detect(string)
-            ic(detection)
             if "encoding" in detection and detection['encoding'] is not None and len(detection["encoding"]) > 2:
                 return [detection["encoding"]]
         except ImportError:
@@ -218,50 +216,54 @@ class PDFAnalyzer(Analyzer):
     description = 'PDF Analyser'
 
     def get_text(self):
-        # try:
-        #     import pdftotext
-        #     pdf = pdftotext.PDF(self.pdfobj)
-        #     self.page_count = len(pdf)
-        #     self.text = "\n\n".join(pdf)
-        # except:
-        #     pass
         try:
-            import PyPDF2
-            pdfReader = PyPDF2.PdfFileReader(self.pdfobj)
-            self.page_count = pdfReader.numPages
+            self.page_count = self.pdfobj.numPages
             txt = ""
             for page in range(self.page_count):
-                page_object = pdfReader.getPage(page)
+                page_object = self.pdfobj.getPage(page)
                 txt += page_object.extractText()
             self.text=txt
-            self.reports['pagecount']=Report(f'{pdfReader.numPages}',label="Pages")
-            info = pdfReader.getDocumentInfo()
-            self.reports['title']=Report(f'{info.title}',label="title")
-            self.reports['subject']=Report(f'{info.subject}',label="subject")
-            self.reports['creator']=Report(f'{info.creator}',label="creator")
-            self.reports['author']=Report(f'{info.author}',label="Author")
-            self.reports['producer']=Report(f'{info.producer}',label="producer")
+            self.reports['pagecount']=Report(f'{self.pdfobj.numPages}',label="Pages")
+            info = self.pdfobj.getDocumentInfo()
+            if info.title:
+                self.reports['title']=Report(f'{info.title}',label="title")
+            if info.subject:
+                self.reports['subject']=Report(f'{info.subject}',label="subject")
+            if info.creator:
+                self.reports['creator']=Report(f'{info.creator}',label="creator")
+            if info.author:
+                self.reports['author']=Report(f'{info.author}',label="Author")
+            if info.producer:
+                self.reports['producer']=Report(f'{info.producer}',label="producer")
+            self.childitems.append(Structure(data=self.text.encode(),mime_type="text/plain",level=self.struct.level+1))
 
         except:
             pass
             
+    def getAttachments(self):
+      catalog = self.pdfobj.trailer["/Root"]
+      fileNames = catalog['/Names']['/EmbeddedFiles']['/Names']
+      attachments = {}
+      for f in fileNames:
+          ic(f)
+          if isinstance(f, str):
+              name = f
+              dataIndex = fileNames.index(f) + 1
+              fDict = fileNames[dataIndex].getObject()
+              fData = fDict['/EF']['/F'].getData()
+              attachments[name] = fData
+      self.embedded_files = attachments
 
     def analysis(self):
-        import io
-        self.pdfobj = io.BytesIO(self.struct.rawdata)
+        import io,PyPDF2
+        fileobj = io.BytesIO(self.struct.rawdata)
+        self.pdfobj = PyPDF2.PdfFileReader(fileobj)
         self.text = ""
+        self.childitems = []
         self.modules['pdf2text'] = self.get_text
+        # self.modules['embeddedFiles'] = self.getAttachments
         super().analysis()
 
-        
-
-
-
-
-    def get_childitems(self) -> list():
-        if self.text is not None:
-            return [Structure(data=self.text.encode(),mime_type="text/plain",level=self.struct.level+1)]
-        return []
 
 class ZipAnalyzer(Analyzer):
     compatible_mime_types = ['application/zip']
@@ -402,13 +404,13 @@ cwd=os.getcwd()
 logging.info(f'Working directory: {cwd}')
 debug = True
 s1=Structure(file="mail.eml")
-ic(s1.md5)
+
 print(s1.get_report())
 
 s3=Structure(file="test.pdf")
 print(s3.get_report())
 
-s2=Structure(file="test.zip")
-print(s2.get_report())
+# s2=Structure(file="test.zip")
+# print(s2.get_report())
 
     
