@@ -26,7 +26,8 @@ class PDFAnalyzer(Analyzer):
                 self.reports['author'] = Report(f'{info.author}', label="Author")
             if info.producer:
                 self.reports['producer'] = Report(f'{info.producer}', label="producer")
-            self.childitems.append(self.generate_struct(data=self.text.encode(), mime_type="text/plain"))
+            if len(self.text) > 0:
+                self.childitems.append(self.generate_struct(data=self.text.encode(), mime_type="text/plain"))
 
         except Exception as e:
             raise AnalysisModuleException(e)
