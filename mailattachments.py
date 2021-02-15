@@ -15,30 +15,23 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     for f in args.files:
-        e = eml.Eml(f)
-        print(e)
-        if args.extract:
-            fpath=os.path.join(args.out_dir,e.md5)
-            if not os.path.isdir(fpath):
-                print("Creating folder {}".format(fpath))
-                os.makedirs(fpath)
-            for x in e.flat_struct:
-                if 'data' in x:
-                    if args.filenames and 'filename' in x:
-                        pfpath=os.path.join(fpath,x['filename'])
+        if os.path.isfile(f):
+            e = eml.Eml(f)
+            print(e)
+            if args.extract:
+                fpath=os.path.join(args.out_dir,e.md5)
+                if not os.path.isdir(fpath):
+                    print("Creating folder {}".format(fpath))
+                    os.makedirs(fpath)
+                for x in e.flat_struct:
+                    if 'data' in x:
+                        if args.filenames and 'filename' in x:
+                            pfpath=os.path.join(fpath,x['filename'])
+                        else:
+                            filename = '.'.join([x['md5'],x['mime'].replace("/","_")])
+                            pfpath = os.path.join(fpath,filename)
+                        print(x['index'],pfpath)
+                        with open(pfpath,'wb') as of:
+                            of.write(x['data'])
                     else:
-                        filename = '.'.join([x['md5'],x['mime'].replace("/","_")])
-                        pfpath = os.path.join(fpath,filename)
-                    print(x['index'],pfpath)
-                    with open(pfpath,'wb') as of:
-                        of.write(x['data'])
-                else:
-                    print(x['index'],x['content_type'])
-
-
-
-
-
-
-    
-
+                        print(x['index'],x['content_type'])
