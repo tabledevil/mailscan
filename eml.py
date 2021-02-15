@@ -80,14 +80,31 @@ class Eml(object):
                 items.append(value)
         return items
 
+    @property
+    @lru_cache()
+    def md5(self):
+        return hashlib.md5(self.rawdata).hexdigest()
+
+    @property
+    @lru_cache()
+    def sha1(self):
+        return hashlib.sha1(self.rawdata).hexdigest()
+
+    @property
+    @lru_cache()
+    def sha256(self):
+        return hashlib.sha256(self.rawdata).hexdigest()
+
     @lru_cache(maxsize=2)
     def get_eml(self):
         """Get email.email Object for this email."""
-        data=open(self.filename, 'rb').read()
-        self.md5=hashlib.md5(data).hexdigest()
-        self.sha256=hashlib.sha256(data).hexdigest()
-        self.sha1=hashlib.sha1(data).hexdigest()
-        return email.message_from_bytes(data)
+        return email.message_from_bytes(self.rawdata)
+
+    @property
+    def rawdata(self):
+        data = open(self.filename, 'rb').read()
+        return data
+
 
     def __get_from_struct(self, fieldname, struct=None):
         if struct is None:
