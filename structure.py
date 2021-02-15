@@ -198,19 +198,19 @@ class Structure(dict):
             self.__children = self.analyzer.get_childitems()
         return self.__children
 
+if __name__ == "__main__":
+    debug = True
+    if debug:
+        logging.basicConfig(level=logging.DEBUG)
+    cwd = os.getcwd()
+    logging.info(f'Working directory: {cwd}')
 
-debug = True
-if debug:
-    logging.basicConfig(level=logging.DEBUG)
-cwd = os.getcwd()
-logging.info(f'Working directory: {cwd}')
+    s1 = Structure(filename="mail.eml")
 
-s1 = Structure(filename="mail.eml")
+    print(s1.get_report())
 
-print(s1.get_report())
+    s3 = Structure(filename="test.pdf")
+    print(s3.get_report())
 
-s3 = Structure(filename="test.pdf")
-print(s3.get_report())
-
-# s2=Structure(file="test.zip")
-# print(s2.get_report())
+    # s2=Structure(file="test.zip")
+    # print(s2.get_report())
