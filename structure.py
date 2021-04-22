@@ -137,7 +137,7 @@ class Structure(dict):
         if self.__filename is not None:
             return self.__filename
         else:
-            return f"{self.md5[:8]}"
+            return f"{self.md5[:8]}.{self.magic}"
 
     @property
     def has_filename(self):
@@ -175,12 +175,35 @@ class Structure(dict):
             txt += f'{child.get_report()}'
         return textwrap.indent(txt, prefix="    " * self.level)
 
-    def extract(self, basepath):
-        pass
+    def extract(self, basepath=None, filenames=False, recursive=False):
+        if basepath is None:
+            basepath = os.getcwd()
+        if not os.path.isdir(basepath):
+            logging.debug(f"Creating folder {basepath}")
+            os.makedirs(basepath)
+        filename = self.sanatized_filename if filenames else self.md5
+        outfile = os.path.join(basepath,filename)
+        logging.debug(f"Writing {outfile}")
+        try:
+            with open(outfile,'wb') as outfile_obj:
+                outfile_obj.write(self.rawdata)
+        except OSError as e:
+            logging.error(f"Error during extraction [{e}]")
+        if recursive and self.has_children:
+            newbasepath=f"{outfile}.children"
+            for child in self.get_children():
+                child.extract(basepath=newbasepath,filenames=filenames,recursive=recursive)
+        
 
     @property
     def has_children(self):
         return len(self.get_children()) > 0
+
+    @property
+    def sanatized_filename(self):
+        import re
+        rx = re.compile('[ <>|:!&*?]')
+        return rx.sub('_', self.filename)
 
     @property
     def magic(self):
