@@ -180,7 +180,7 @@ class Structure(dict):
 
     @property
     def has_children(self):
-        return len(self.children) > 0
+        return len(self.get_children()) > 0
 
     @property
     def magic(self):
