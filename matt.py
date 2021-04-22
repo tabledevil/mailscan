@@ -3,6 +3,7 @@
 import argparse
 import os
 import structure
+import logging
 from Config.config import flags
 
 if __name__ == "__main__":
@@ -19,6 +20,9 @@ if __name__ == "__main__":
 
     for f in args.files:
         fpath=os.path.join(path,f)
+        if not os.path.isfile(f):
+            logging.warning(f"skipping {f} : not a file")
+            continue
         s = structure.Structure(filename=f)
         print(s.get_report())
         if args.extract:
