@@ -4,6 +4,7 @@ import os
 import textwrap
 import magic
 import sys
+from Config.config import flags
 logging.getLogger()
 logging.basicConfig(stream=sys.stderr, level=logging.INFO,format='[%(levelname)s]%(filename)s(%(lineno)d)/%(funcName)s:%(message)s')
 class AnalysisModuleException(Exception):
@@ -42,7 +43,7 @@ class Analyzer:
             except AnalysisModuleException as e:
                 logging.error(f'Error during Module {module} : {e}')
             except Exception as e:
-                if debug:
+                if flags.debug:
                     raise
 
     def analysis(self):
@@ -199,8 +200,8 @@ class Structure(dict):
         return self.__children
 
 if __name__ == "__main__":
-    debug = True
-    if debug:
+    flags.debug = True
+    if flags.debug:
         logging.basicConfig(level=logging.DEBUG)
     cwd = os.getcwd()
     logging.info(f'Working directory: {cwd}')
