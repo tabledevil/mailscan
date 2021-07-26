@@ -113,7 +113,13 @@ class Eml(object):
             data = msg_part.get_payload(decode=True)
             tmp_struct['data'] = data
             if msg_part.get_filename():
-                tmp_struct['filename'] = (self.__decode(msg_part.get_filename()))
+                filename = msg_part.get_param('filename', None, 'content-disposition')
+                if filename is None:
+                    filename = msg_part.get_param('name', None, 'content-type')
+                filename=self.__decode(filename.strip())
+                
+
+                tmp_struct['filename'] = (filename)
                 tmp_struct['size'] = len(tmp_struct['data'])
             try:
                 tmp_struct['mime'] = magic.from_buffer(data,mime=True)
@@ -255,11 +261,13 @@ class Eml(object):
     def __decode(self, string):
         '''Decode string as far as possible'''
         if isinstance(string, str):
-            text, encoding = email.header.decode_header(string)[0]
-            if encoding is None:
-                return text
-            else:
-                return text.decode(encoding)
+            fulltext=""
+            for (text,encoding) in email.header.decode_header(string):
+                if hasattr(text,"decode"):
+                    fulltext+=text.decode() if encoding is None else text.decode(encoding)
+                else:
+                    fulltext+=text
+            return fulltext
         if isinstance(string, bytes):
             encodings = ['utf-8-sig', 'utf-16', 'iso-8859-15']
             detection = chardet.detect(string)

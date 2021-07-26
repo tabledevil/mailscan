@@ -27,11 +27,5 @@ if __name__ == "__main__":
         print(s.get_report())
         if args.extract:
             s.extract(basepath=args.out_dir,filenames=args.filenames,recursive=True)
-
-
-
-
-
-
-    
+            
 
