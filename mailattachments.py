@@ -23,8 +23,8 @@ if __name__ == "__main__":
                 print("Creating folder {}".format(fpath))
                 os.makedirs(fpath)
             for x in e.flat_struct:
-                if 'data' in x:
-                    if args.filenames and 'filename' in x:
+                if 'data' in x and x["data"] is not None :
+                    if args.filenames and 'filename' in x and x['filename'] is not None:
                         pfpath=os.path.join(fpath,x['filename'])
                     else:
                         filename = '.'.join([x['md5'],x['mime'].replace("/","_")])
