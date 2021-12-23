@@ -104,6 +104,8 @@ class Structure(dict):
         self[name] = value
 
     def __init__(self, filename=None, data=None, mime_type=None, level=0, index=0) -> None:
+        if flags.debug:
+            logging.getLogger() .setLevel(logging.DEBUG)
         self.analyzer = None
         if data is None:
             if filename is not None and os.path.isfile(filename):
