@@ -38,7 +38,7 @@ for file in args.infile:
         if args.field is not None and k.lower() not in (field.lower() for field in args.field):
             continue
         for (string,encoding) in email.header.decode_header(v):
-            if encoding != None:
+            if encoding != None and not encoding == "unknown-8bit":
                 value=string.decode(encoding)
             else:
                 value=fdecode(string)
