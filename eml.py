@@ -60,7 +60,7 @@ class Eml(object):
         """Get a decoded list of all values for given header field."""
         for v in self.get_header_raw(field):
             for value,encoding in email.header.decode_header(v):
-                if encoding != None:
+                if encoding != None and not encoding == 'unknown-8bit':
                     value=value.decode(encoding)
                 else:
                     value=self.__decode(value)
