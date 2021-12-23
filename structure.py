@@ -202,7 +202,7 @@ class Structure(dict):
     @property
     def sanatized_filename(self):
         import re
-        rx = re.compile('[ <>|:!&*?]')
+        rx = re.compile(r'''[ <>|:!&*?/]''')
         return rx.sub('_', self.filename)
 
     @property
