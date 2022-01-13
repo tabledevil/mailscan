@@ -5,7 +5,7 @@ from eml import Eml
 
 
 class EmailAnalyzer(Analyzer):
-    compatible_mime_types = ['message/rfc822']
+    compatible_mime_types = ['message/rfc822','application/octet-stream']
     description = "Email analyser"
 
     def parse_mail(self):
