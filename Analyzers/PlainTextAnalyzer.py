@@ -1,3 +1,4 @@
+from langdetect.lang_detect_exception import LangDetectException
 from structure import Analyzer, Report
 import logging
 
@@ -35,8 +36,11 @@ class PlainTextAnalyzer(Analyzer):
         return language
     
     def __detect_language_langdetect(self):
-        from langdetect import detect
-        language = detect(self.text)
+        from langdetect import detect, lang_detect_exception
+        try:
+            language = detect(self.text)
+        except lang_detect_exception.LangDetectException as e:
+            language = f"[{e}]"
         self.reports['lang_langdetect']=Report(f'{language}')
         return language
 
@@ -46,8 +50,8 @@ class PlainTextAnalyzer(Analyzer):
         for detector in detectors:
             try:
                 resp = detector()
-            except:
-                pass
+            except ModuleNotFoundError as e:
+                logging.debug(f"Exception {type(e)}:{e}")
             if resp is not None:
                 break
         if resp is None:
