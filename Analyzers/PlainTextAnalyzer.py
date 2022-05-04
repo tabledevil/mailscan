@@ -1,4 +1,4 @@
-from langdetect.lang_detect_exception import LangDetectException
+# from langdetect.lang_detect_exception import LangDetectException
 from structure import Analyzer, Report
 import logging
 
@@ -84,6 +84,19 @@ class PlainTextAnalyzer(Analyzer):
             logging.warning('Missing module chardet')
         return []
 
+    def scan4passwords(self):
+        if len(self.text) > 0:
+            import re
+            _RE_FIND_PW = re.compile(r'''(pw|kennwort|pass(wor[dt])?)(?P<words>.*)''', re.IGNORECASE)
+            match = _RE_FIND_PW.search(self.text)
+            if match:
+                words=[word for word in match['words'].split() if len(word) >3]
+                if len(words) > 0 :
+                    self.reports['possible_passwords'] = Report(",".join(words))
+
+
+           
+
     def decode(self):
         self.text = self.__decode(self.struct.rawdata)
 
@@ -92,8 +105,8 @@ class PlainTextAnalyzer(Analyzer):
         self.lang = ""
         self.modules['encoding'] = self.decode
         self.modules['language'] = self.detect_lang
+        self.modules['passwords'] = self.scan4passwords
         super().analysis()
-
         # self.lang = self.detect_lang()
         self.info = f"language:{self.lang}"
         self.reports['summary'] = Report(self.text, short=textwrap.shorten(self.text, width=100))
