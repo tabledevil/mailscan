@@ -15,25 +15,32 @@ class ZipAnalyzer(Analyzer):
         tmpfile = tempfile.NamedTemporaryFile(mode='w+b',delete=False)
         tmpfile.write(self.struct.rawdata)
         tmpfile.close()
-
+        zipped_files = None
         try:
             self.zipobj = py7zr.SevenZipFile(tmpfile.name)
+            if self.zipobj.password_protected:
+                password_protected = True
+            else:
+                zipped_files = self.zipobj.readall()
         except py7zr.exceptions.Bad7zFile:
             logging.warning("Not a 7z-File")
-        zipped_files = None
-        if self.zipobj.password_protected:
+            password_protected = False
+        except py7zr.exceptions.PasswordRequired:
+            logging.warning("Can't open 7z-File because a Password is required")
+            password_protected = True
+        
+        if password_protected:
             for password in self.passwords:
                 try:
                     self.zipobj = py7zr.SevenZipFile(tmpfile.name,password=password)
                     zipped_files = self.zipobj.readall()
                     if len(zipped_files) > 0:
+                        self.reports['password'] = Report(password)
                         break
                 except lzma.LZMAError:
                     logging.debug(f"Wrong password : {password}")
             if zipped_files is None:
                 logging.error("Couldn't guess password")
-        else:
-            zipped_files = self.zipobj.readall()
         if zipped_files and len(zipped_files)>0:
             for idx, zipped_file in enumerate(zipped_files):
                 print(f"{idx} : {zipped_file} : ")
