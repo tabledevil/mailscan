@@ -3,6 +3,7 @@ import logging
 import os
 import textwrap
 import magic
+import mimetypes
 import sys
 from Config.config import flags
 logging.getLogger()
@@ -183,7 +184,7 @@ class Structure(dict):
         if not os.path.isdir(basepath):
             logging.debug(f"Creating folder {basepath}")
             os.makedirs(basepath)
-        filename = self.sanatized_filename if filenames else self.md5
+        filename = self.sanatized_filename if filenames else self.generated_filename
         outfile = os.path.join(basepath,filename)
         logging.debug(f"Writing {outfile}")
         try:
@@ -204,8 +205,17 @@ class Structure(dict):
     @property
     def sanatized_filename(self):
         import re
-        rx = re.compile(r'''[ <>|:!&*?/]''')
-        return rx.sub('_', self.filename)
+        _RE_REPLACE_SPECIAL = re.compile(r'''[ <>|:!&*?/]''')
+        _RE_COMBINE_UNDERSCORE = re.compile(r"(?a:_+)")
+
+        return _RE_COMBINE_UNDERSCORE.sub('_',_RE_REPLACE_SPECIAL.sub('_', self.filename))
+
+
+    @property
+    def generated_filename(self):
+        filename=f"{self.md5}{mimetypes.guess_extension(self.magic,strict=False)}"
+        return filename
+
 
     @property
     def magic(self):
