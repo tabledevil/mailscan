@@ -1,5 +1,8 @@
 from structure import Analyzer, AnalysisModuleException, Report
 import logging
+from pdf2image import convert_from_bytes
+import base64
+import io
 
 
 class PDFAnalyzer(Analyzer):
@@ -51,11 +54,29 @@ class PDFAnalyzer(Analyzer):
                 attachments[name] = fData
         self.embedded_files = attachments
 
+    def generate_preview(self):
+        try:
+            images = convert_from_bytes(self.struct.rawdata, first_page=1, last_page=1, fmt='png')
+            if images:
+                image = images[0]
+                buffer = io.BytesIO()
+                image.save(buffer, format="PNG")
+                encoded_string = base64.b64encode(buffer.getvalue()).decode('ascii')
+                self.reports['preview'] = Report(
+                    text="First page preview",
+                    label="Preview",
+                    content_type='image/png',
+                    data=encoded_string
+                )
+        except Exception as e:
+            logging.warning(f"Could not generate PDF preview: {e}")
+
     def analysis(self):
         #self.text = ""
         #self.childitems = []
         self.modules['parser'] = self.parse_pdf
         self.modules['pdf2text'] = self.get_text
+        self.modules['preview'] = self.generate_preview
         # self.modules['embeddedFiles'] = self.getAttachments
         super().analysis()
 
