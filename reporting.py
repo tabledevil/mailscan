@@ -46,14 +46,17 @@ class ReportManager:
 
         for report in node['reports']:
             label = report['label'] or ''
-            text = str(report['text'] or '')
-            lines = textwrap.wrap(text, width=100, subsequent_indent='  ')
-            if not lines:
-                yield f"{label} : \n"
+            if report['content_type'] == 'image/png':
+                yield f"{label} : [Image: {report['text'] or 'preview in HTML report'}]\n"
             else:
-                yield f"{label} : {lines[0]}\n"
-                for line in lines[1:]:
-                    yield f"  {line}\n"
+                text = str(report['text'] or '')
+                lines = textwrap.wrap(text, width=100, subsequent_indent='  ')
+                if not lines:
+                    yield f"{label} : \n"
+                else:
+                    yield f"{label} : {lines[0]}\n"
+                    for line in lines[1:]:
+                        yield f"  {line}\n"
 
         num_children = len(node['children'])
         for i, child in enumerate(node['children']):
@@ -73,14 +76,17 @@ class ReportManager:
 
         for report in node['reports']:
             label = report['label'] or ''
-            text = str(report['text'] or '')
-            lines = textwrap.wrap(text, width=100, subsequent_indent='  ')
-            if not lines:
-                yield f"{content_prefix}{label} : \n"
+            if report['content_type'] == 'image/png':
+                yield f"{content_prefix}{label} : [Image: {report['text'] or 'preview in HTML report'}]\n"
             else:
-                yield f"{content_prefix}{label} : {lines[0]}\n"
-                for line in lines[1:]:
-                    yield f"{content_prefix}  {line}\n"
+                text = str(report['text'] or '')
+                lines = textwrap.wrap(text, width=100, subsequent_indent='  ')
+                if not lines:
+                    yield f"{content_prefix}{label} : \n"
+                else:
+                    yield f"{content_prefix}{label} : {lines[0]}\n"
+                    for line in lines[1:]:
+                        yield f"{content_prefix}  {line}\n"
 
         num_children = len(node['children'])
         for i, child in enumerate(node['children']):
@@ -95,7 +101,10 @@ class ReportManager:
             report_str += f"{indent}  * **Filename**: {node['info']['filename']}\n"
         report_str += f"{indent}  * **MD5**: {node['info']['md5']}\n"
         for report in node['reports']:
-            report_str += f"{indent}  * **{report['label']}**: {report['text']}\n"
+            if report['content_type'] == 'image/png':
+                report_str += f"{indent}  * **{report['label']}**: [Image: {report['text'] or 'preview in HTML report'}]\n"
+            else:
+                report_str += f"{indent}  * **{report['label']}**: {report['text']}\n"
         for child in node['children']:
             report_str += self.render_markdown(child, level + 1)
         return report_str
@@ -109,7 +118,10 @@ class ReportManager:
             report_str += f"<li><b>Filename</b>: {node['info']['filename']}</li>\n"
         report_str += f"<li><b>MD5</b>: {node['info']['md5']}</li>\n"
         for report in node['reports']:
-            report_str += f"<li><b>{report['label']}</b>: {report['text']}</li>\n"
+            if report['content_type'] == 'image/png' and report['data']:
+                report_str += f"<li><b>{report['label']}</b>: <img src=\"data:image/png;base64,{report['data']}\" alt=\"{report['text']}\"></li>\n"
+            else:
+                report_str += f"<li><b>{report['label']}</b>: {report['text']}</li>\n"
         for child in node['children']:
             report_str += self.render_html(child, level + 1)
         report_str += "</ul>\n"

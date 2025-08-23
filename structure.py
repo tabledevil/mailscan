@@ -14,12 +14,14 @@ class AnalysisModuleException(Exception):
 
 
 class Report:
-    def __init__(self, text, short=None, label='', rank=0, verbosity=0):
+    def __init__(self, text, short=None, label='', rank=0, verbosity=0, content_type='text/plain', data=None):
         self.text = text
         self.short = self.text if short is None else short
         self.label = label
         self.rank = rank
         self.verbosity = verbosity
+        self.content_type = content_type
+        self.data = data
 
     def to_dict(self):
         return {
@@ -27,7 +29,9 @@ class Report:
             'short': self.short,
             'label': self.label,
             'rank': self.rank,
-            'verbosity': self.verbosity
+            'verbosity': self.verbosity,
+            'content_type': self.content_type,
+            'data': self.data,
         }
 
     def __str__(self) -> str:
