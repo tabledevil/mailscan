@@ -5,6 +5,7 @@ import textwrap
 import magic
 import mimetypes
 import sys
+from reporting import ReportManager
 from Config.config import flags
 logging.getLogger()
 logging.basicConfig(stream=sys.stderr, level=logging.INFO,format='[%(levelname)s]%(filename)s(%(lineno)d)/%(funcName)s:%(message)s')
@@ -13,12 +14,25 @@ class AnalysisModuleException(Exception):
 
 
 class Report:
-    def __init__(self, text, short=None, label='', rank=0, verbosity=0):
+    def __init__(self, text, short=None, label='', rank=0, verbosity=0, content_type='text/plain', data=None):
         self.text = text
         self.short = self.text if short is None else short
         self.label = label
         self.rank = rank
         self.verbosity = verbosity
+        self.content_type = content_type
+        self.data = data
+
+    def to_dict(self):
+        return {
+            'text': self.text,
+            'short': self.short,
+            'label': self.label,
+            'rank': self.rank,
+            'verbosity': self.verbosity,
+            'content_type': self.content_type,
+            'data': self.data,
+        }
 
     def __str__(self) -> str:
         return self.text
@@ -63,11 +77,8 @@ class Analyzer:
 
     @property
     def summary(self):
-        summary = ""
-        for report in self.reports:
-            # TODO filter by verbosity and sort by rank
-            summary += f"{report} : {self.reports[report].short}\n"
-        return summary
+        reports = sorted(self.reports.values(), key=lambda r: r.rank)
+        return reports
 
     @property
     def reports_available(self):
@@ -167,18 +178,9 @@ class Structure(dict):
                 hashes[algo] = getattr(self, algo)
         return hashes
 
-    def get_report(self):
-        txt = f'{self.index} >> {self.mime_type} {self.size}\n'
-        txt += f'info     : {self.analyzer.info}\n'
-        if self.has_filename:
-            txt += f'filename : {self.filename}\n'
-        txt += f'md5      : {self.md5}\n'
-        # txt += f'sha1     : {self.sha1}\n'
-        # txt += f'sha256   : {self.sha256}\n'
-        txt += f'{self.analyzer.summary}\n'
-        for child in self.get_children():
-            txt += f'{child.get_report()}'
-        return textwrap.indent(txt, prefix="    " * self.level)
+    def get_report(self, report_format='text', verbosity=0):
+        manager = ReportManager(self, verbosity=verbosity)
+        return manager.render(format=report_format)
 
     def extract(self, basepath=None, filenames=False, recursive=False):
         if basepath is None:
