@@ -21,6 +21,34 @@ from Analyzers import *
 
 
 class Structure(dict):
+    _cache = {}
+
+    @classmethod
+    def create(cls, filename=None, data=None, mime_type=None, level=0, index=0):
+        # Determine the raw data to calculate the hash
+        if data is None:
+            if filename is not None and os.path.isfile(filename):
+                with open(filename, 'rb') as f:
+                    raw_data = f.read()
+            else:
+                raise ValueError("No Data was supplied for struct")
+        else:
+            raw_data = data
+
+        # Calculate hash
+        sha256_hash = hashlib.sha256(raw_data).hexdigest()
+
+        # Check cache
+        if sha256_hash in cls._cache:
+            logging.info(f"Returning cached Structure object for hash {sha256_hash[:10]}...")
+            # Here we could adjust level/index if we decide to, for now just return
+            return cls._cache[sha256_hash]
+
+        # If not in cache, create a new one and cache it
+        new_struct = cls(filename=filename, data=raw_data, mime_type=mime_type, level=level, index=index)
+        cls._cache[sha256_hash] = new_struct
+        return new_struct
+
     def __getattr__(self, key):
         if key in self:
             return self[key]
@@ -44,9 +72,17 @@ class Structure(dict):
     def __init__(self, filename=None, data=None, mime_type=None, level=0, index=0) -> None:
         if flags.debug:
             logging.getLogger() .setLevel(logging.DEBUG)
+
+        if level > flags.max_analysis_depth:
+            logging.warning(f"Max analysis depth reached ({flags.max_analysis_depth}), stopping analysis.")
+            self.analyzer = BaseAnalyzer(self) # Create a dummy analyzer
+            return
+
         self.analyzer = None
         if data is None:
             if filename is not None and os.path.isfile(filename):
+                if os.path.getsize(filename) > flags.max_file_size:
+                    raise ValueError(f"File {filename} is too large.")
                 self.fullpath = os.path.abspath(filename)
                 self.__filename = os.path.split(self.fullpath)[1]
                 logging.debug(f'Reading file {self.fullpath}')
@@ -56,6 +92,8 @@ class Structure(dict):
                 raise ValueError("No Data was supplied for struct")
 
         else:
+            if len(data) > flags.max_file_size:
+                raise ValueError("Data is too large.")
             self.__rawdata = data
             self.__filename = filename if filename is not None else None
         self.level = level
@@ -173,12 +211,12 @@ if __name__ == "__main__":
     cwd = os.getcwd()
     logging.info(f'Working directory: {cwd}')
 
-    s1 = Structure(filename="mail.eml")
+    s1 = Structure.create(filename="mail.eml")
 
     print(s1.get_report())
 
-    s3 = Structure(filename="test.pdf")
+    s3 = Structure.create(filename="test.pdf")
     print(s3.get_report())
 
-    # s2=Structure(file="test.zip")
+    # s2=Structure.create(file="test.zip")
     # print(s2.get_report())

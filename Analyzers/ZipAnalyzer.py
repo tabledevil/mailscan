@@ -18,6 +18,13 @@ class ZipAnalyzer(BaseAnalyzer):
                 filelist = [f'{f.filename} {("<encrypted>" if f.is_encrypted() else "")} [{f.file_size}]' for f in zip_file.infolist()]
                 self.reports['summary'] = Report("\n".join(filelist))
 
+                # Zip bomb check
+                total_uncompressed_size = sum(f.file_size for f in zip_file.infolist())
+                if self.struct.size > 0 and total_uncompressed_size / self.struct.size > self.struct.flags.max_compression_ratio:
+                    logging.warning("Zip bomb detected: compression ratio too high.")
+                    self.reports['error'] = Report("Zip bomb detected: compression ratio too high.")
+                    return
+
                 is_encrypted = any(f.is_encrypted() for f in zip_file.infolist())
 
                 if is_encrypted:

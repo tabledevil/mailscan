@@ -1,8 +1,8 @@
 import logging
-import tempfile
 import os
 import lzma
 from .base import BaseAnalyzer, Report
+from Utils.temp_manager import TempFileManager
 
 try:
     import py7zr
@@ -21,14 +21,12 @@ class SevenZipAnalyzer(BaseAnalyzer):
             logging.warning("py7zr is not installed, cannot analyze 7z files.")
             return
 
-        tmpfile = tempfile.NamedTemporaryFile(delete=False)
-        try:
-            tmpfile.write(self.struct.rawdata)
-            tmpfile.close()
+        with TempFileManager() as temp_manager:
+            tmp_file_path = temp_manager.create_temp_file(self.struct.rawdata)
 
             password_protected = False
             try:
-                with py7zr.SevenZipFile(tmpfile.name, 'r') as archive:
+                with py7zr.SevenZipFile(tmp_file_path, 'r') as archive:
                     if archive.password_protected:
                         password_protected = True
                     else:
@@ -40,10 +38,7 @@ class SevenZipAnalyzer(BaseAnalyzer):
                 return
 
             if password_protected:
-                self.try_passwords(tmpfile.name)
-
-        finally:
-            os.remove(tmpfile.name)
+                self.try_passwords(tmp_file_path)
 
     def try_passwords(self, filepath):
         for password in self.passwords:
@@ -61,6 +56,13 @@ class SevenZipAnalyzer(BaseAnalyzer):
 
     def extract_files(self, archive):
         try:
+            # Zip bomb check
+            total_uncompressed_size = sum(f.uncompressed for f in archive.list())
+            if self.struct.size > 0 and total_uncompressed_size / self.struct.size > self.struct.flags.max_compression_ratio:
+                logging.warning("7z bomb detected: compression ratio too high.")
+                self.reports['error'] = Report("7z bomb detected: compression ratio too high.")
+                return
+
             all_files = archive.readall()
             for filename, bio in all_files.items():
                 self.childitems.append(self.generate_struct(filename=filename, data=bio.read()))

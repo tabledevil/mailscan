@@ -51,7 +51,7 @@ def main():
         if not os.path.isfile(f):
             logging.warning(f"skipping {f} : not a file")
             continue
-        s = structure.Structure(filename=f,mime_type=mimetypes.guess_type(f,strict=False)[0])
+        s = structure.Structure.create(filename=f,mime_type=mimetypes.guess_type(f,strict=False)[0])
         print(s.get_report())
         if args.extract:
             s.extract(basepath=args.out_dir,filenames=args.filenames,recursive=True)
