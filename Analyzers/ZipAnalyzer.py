@@ -1,40 +1,55 @@
-from structure import Analyzer, Report
 import logging
+import zipfile
+import io
+from .base import BaseAnalyzer, Report
 
-class ZipAnalyzer(Analyzer):
+class ZipAnalyzer(BaseAnalyzer):
     compatible_mime_types = ['application/zip']
     description = "ZIP-File analyser"
-    passwords = ["infected","Infected","iNFECTED","INFECTED"]
-
-    def _test_pw(self):
-        for password in self.passwords:
-            self.zipobj.setpassword(bytes(password,'utf-8'))
-            try:
-                test = self.zipobj.testzip()
-                self.reports['password'] = Report(password)
-                return True
-            except RuntimeError as e:
-                if e.args[0].startswith('Bad password for file'):
-                    return False
-                raise e
-
-    def _isencrypted(self):
-        for file in self.zipobj.filelist:
-            if file.flag_bits & 0x1 :
-                return True
-        return False
+    passwords = ["infected", "Infected", "iNFECTED", "INFECTED"]
 
     def analysis(self):
         super().analysis()
-        import zipfile, io
         file_like_object = io.BytesIO(self.struct.rawdata)
-        self.zipobj = zipfile.ZipFile(file_like_object)
-        self.info = f'{len(self.zipobj.filelist)} compressed file(s)'
-        filelist = [f'{f.filename} {("<encrypted>" if f.flag_bits & 0x1 else "")} [{f.file_size}]' for f in self.zipobj.filelist]
-        self.reports['summary'] = Report("\n".join(filelist))
-        if self._isencrypted():
-            self.reports['encrypted'] = Report("ZIP File is Password protected")
-            self._test_pw()
 
-        for idx, zipped_file in enumerate(self.zipobj.namelist()):
-            self.childitems.append(self.generate_struct(filename=zipped_file, data=self.zipobj.read(zipped_file), index=idx))
+        try:
+            with zipfile.ZipFile(file_like_object) as zip_file:
+                self.info = f'{len(zip_file.infolist())} compressed file(s)'
+                filelist = [f'{f.filename} {("<encrypted>" if f.is_encrypted() else "")} [{f.file_size}]' for f in zip_file.infolist()]
+                self.reports['summary'] = Report("\n".join(filelist))
+
+                is_encrypted = any(f.is_encrypted() for f in zip_file.infolist())
+
+                if is_encrypted:
+                    self.reports['encrypted'] = Report("ZIP File is Password protected")
+                    password_found = self._test_passwords(zip_file)
+                    if not password_found:
+                        logging.warning("Could not find password for encrypted ZIP file.")
+                        return # Stop if encrypted and no password works
+
+                # If not encrypted, or if password was found, extract files
+                for idx, file_info in enumerate(zip_file.infolist()):
+                    try:
+                        file_data = zip_file.read(file_info.filename)
+                        self.childitems.append(self.generate_struct(filename=file_info.filename, data=file_data, index=idx))
+                    except RuntimeError as e:
+                        logging.error(f"Could not extract {file_info.filename} from zip: {e}")
+
+        except zipfile.BadZipFile:
+            logging.error("Bad ZIP file.")
+            self.reports['error'] = Report("Bad ZIP file.")
+
+    def _test_passwords(self, zip_file):
+        for password in self.passwords:
+            try:
+                zip_file.setpassword(password.encode('utf-8'))
+                zip_file.testzip() # Test if password is correct for all files
+                self.reports['password'] = Report(password)
+                return True
+            except RuntimeError as e:
+                if 'Bad password' in str(e):
+                    continue # Try next password
+                else:
+                    logging.error(f"Error testing password on ZIP file: {e}")
+                    return False # Stop on other errors
+        return False

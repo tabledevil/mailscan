@@ -6,81 +6,16 @@ import magic
 import mimetypes
 import sys
 from Config.config import flags
+import hashlib
+import logging
+import os
+import textwrap
+import magic
+import mimetypes
+import sys
+from Analyzers.base import BaseAnalyzer, Report, AnalysisModuleException
 logging.getLogger()
 logging.basicConfig(stream=sys.stderr, level=logging.INFO,format='[%(levelname)s]%(filename)s(%(lineno)d)/%(funcName)s:%(message)s')
-class AnalysisModuleException(Exception):
-    pass
-
-
-class Report:
-    def __init__(self, text, short=None, label='', rank=0, verbosity=0):
-        self.text = text
-        self.short = self.text if short is None else short
-        self.label = label
-        self.rank = rank
-        self.verbosity = verbosity
-
-    def __str__(self) -> str:
-        return self.text
-
-
-class Analyzer:
-    compatible_mime_types = []
-    description = "Generic Analyzer Class"
-    modules = {}
-
-    def __init__(self, struct) -> None:
-        self.struct = struct
-        self.childitems = []
-        self.reports = {}
-        self.modules = {}
-        self.info = ""
-        self.analysis()
-
-    def run_modules(self):
-        for module in self.modules:
-            try:
-                self.modules[module]()
-            except AnalysisModuleException as e:
-                logging.error(f'Error during Module {module} : {e}')
-            except Exception as e:
-                logging.error(f"Error during Module {module} : {e}")
-                if flags.debug:
-                    raise
-
-    def analysis(self):
-        self.run_modules()
-
-    @staticmethod
-    def get_analyzer(mimetype):
-        for analyser in Analyzer.__subclasses__():
-            if mimetype in analyser.compatible_mime_types:
-                return analyser
-        return Analyzer
-
-    def generate_struct(self, data, filename=None, index=0, mime_type=None):
-        return Structure(data=data, filename=filename, level=self.struct.level + 1, index=index,mime_type=mime_type)
-
-    @property
-    def summary(self):
-        summary = ""
-        for report in self.reports:
-            # TODO filter by verbosity and sort by rank
-            summary += f"{report} : {self.reports[report].short}\n"
-        return summary
-
-    @property
-    def reports_available(self):
-        return self.reports.keys()
-
-    def __str__(self) -> str:
-        return type(self).description
-
-    def get_childitems(self) -> list():
-        return self.childitems
-
-
-
 from Analyzers import *
 
 
@@ -129,7 +64,7 @@ class Structure(dict):
         self.mime_type = self.magic if mime_type is None else mime_type
         self.type_mismatch = self.mime_type == self.magic
         self.__children = None
-        self.analyzer = Analyzer.get_analyzer(self.mime_type)(self)
+        self.analyzer = BaseAnalyzer.get_analyzer(self.mime_type)(self)
 
     @property
     def realfile(self):
