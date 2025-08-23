@@ -44,6 +44,7 @@ class Analyzer:
             except AnalysisModuleException as e:
                 logging.error(f'Error during Module {module} : {e}')
             except Exception as e:
+                logging.error(f"Error during Module {module} : {e}")
                 if flags.debug:
                     raise
 
@@ -56,9 +57,6 @@ class Analyzer:
             if mimetype in analyser.compatible_mime_types:
                 return analyser
         return Analyzer
-
-    def get_childitems(self):
-        return self.childitems
 
     def generate_struct(self, data, filename=None, index=0, mime_type=None):
         return Structure(data=data, filename=filename, level=self.struct.level + 1, index=index,mime_type=mime_type)
@@ -91,6 +89,10 @@ class Structure(dict):
     def __getattr__(self, key):
         if key in self:
             return self[key]
+        # This is a bit of magic to dynamically calculate hashes. If an attribute
+        # is requested that is a valid hash algorithm, we calculate the hash
+        # of the raw data and store it in the object's dictionary. This way,
+        # hashes are only calculated once and only when they are needed.
         if key in hashlib.algorithms_available:
             hasher = hashlib.new(key)
             hasher.update(self.rawdata)
@@ -184,7 +186,7 @@ class Structure(dict):
         if not os.path.isdir(basepath):
             logging.debug(f"Creating folder {basepath}")
             os.makedirs(basepath)
-        filename = self.sanatized_filename if filenames else self.generated_filename
+        filename = self.sanitized_filename if filenames else self.generated_filename
         outfile = os.path.join(basepath,filename)
         logging.debug(f"Writing {outfile}")
         try:
@@ -193,7 +195,8 @@ class Structure(dict):
         except OSError as e:
             logging.error(f"Error during extraction [{e}]")
         if recursive and self.has_children:
-            newbasepath=f"{outfile}.children"
+            base, ext = os.path.splitext(outfile)
+            newbasepath = os.path.join(base, "children")
             for child in self.get_children():
                 child.extract(basepath=newbasepath,filenames=filenames,recursive=recursive)
         
@@ -203,7 +206,7 @@ class Structure(dict):
         return len(self.get_children()) > 0
 
     @property
-    def sanatized_filename(self):
+    def sanitized_filename(self):
         import re
         _RE_REPLACE_SPECIAL = re.compile(r'''[ <>|:!&*?/]''')
         _RE_COMBINE_UNDERSCORE = re.compile(r"(?a:_+)")
@@ -222,12 +225,6 @@ class Structure(dict):
         if not hasattr(self, "__magic_mime"):
             self.__magic_mime = magic.from_buffer(self.rawdata, mime=True)
         return self.__magic_mime
-
-    @property
-    def magic_long(self):
-        if not hasattr(self, "__magic_long"):
-            self.__magic_long = magic.from_buffer(self.rawdata, mime=True)
-        return self.__magic_long
 
     def get_children(self):
         if self.__children is None:
