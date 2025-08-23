@@ -17,12 +17,15 @@ class Report:
     def __str__(self) -> str:
         return self.text
 
+import subprocess
+
 class BaseAnalyzer(object):
     compatible_mime_types = []
     description = "Generic Analyzer Class"
     modules = {}
     pip_dependencies = []
     system_dependencies = []
+    system_dependencies_check = {}
 
     def __init__(self, struct) -> None:
         self.struct = struct
@@ -60,7 +63,7 @@ class BaseAnalyzer(object):
 
     def generate_struct(self, data, filename=None, index=0, mime_type=None):
         from structure import Structure
-        return Structure(data=data, filename=filename, level=self.struct.level + 1, index=index,mime_type=mime_type)
+        return Structure.create(data=data, filename=filename, level=self.struct.level + 1, index=index,mime_type=mime_type)
 
     @property
     def summary(self):
@@ -85,14 +88,31 @@ class BaseAnalyzer(object):
         """
         Check if all dependencies for this analyzer are met.
         """
+        # Check for pip dependencies
         for package in cls.pip_dependencies:
             try:
                 importlib.import_module(package)
             except ImportError:
                 return False, f"Missing pip dependency: {package}"
 
+        # Check for system dependencies (simple check)
         for command in cls.system_dependencies:
             if not shutil.which(command):
                 return False, f"Missing system dependency: {command}"
+
+        # Perform enhanced system tool checks
+        for command, check_details in cls.system_dependencies_check.items():
+            if not shutil.which(command):
+                return False, f"Missing system dependency: {command}"
+
+            try:
+                args = [command] + check_details['args']
+                result = subprocess.run(args, capture_output=True, text=True, check=False)
+
+                if check_details['expected_output'] not in result.stdout and check_details['expected_output'] not in result.stderr:
+                    return False, f"System dependency {command} is not working as expected."
+
+            except (subprocess.SubprocessError, FileNotFoundError) as e:
+                return False, f"Error checking system dependency {command}: {e}"
 
         return True, ""
