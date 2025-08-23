@@ -24,14 +24,11 @@ from dateutil.parser import parse
 from pytz import timezone
 
 
-def depricated(fn):
-    def wraper(*args, **kwargs):
-        print(f'''>{inspect.stack()[1].function} called depricated function {fn.__name__}''')
+def deprecated(fn):
+    def wrapper(*args, **kwargs):
+        print(f'''>{inspect.stack()[1].function} called deprecated function {fn.__name__}''')
         return fn(*args, **kwargs)
-    return wraper
-
-import re
-from dateutil.parser import parse
+    return wrapper
 
 class ReceivedParserError(Exception):
     def __init__(self, message):
@@ -39,6 +36,16 @@ class ReceivedParserError(Exception):
         Exception.__init__(self, message)
 
 class ReceivedParser(object):
+    # This class parses "Received" headers from emails. This is a very tricky
+    # task as the format of these headers is not strictly defined and varies
+    # wildly between different mail servers. The approach taken here is to use
+    # a list of regular expressions to match the most common formats.
+    #
+    # This is inherently fragile. If a mail server changes its header format,
+    # the regex might break.
+    #
+    # The regexes are tried in order, so the most specific ones should come
+    # first.
     regexes = [
         ("from\s+(mail\s+pickup\s+service|(?P<from_name>[\[\]\w\.\-]*))\s*(\(\s*\[?(?P<from_ip>[a-f\d\.\:]+)(\%\d+|)\]?\s*\)|)\s*by\s*(?P<by_hostname>[\w\.\-]+)\s*(\(\s*\[?(?P<by_ip>[\d\.\:a-f]+)(\%\d+|)\]?\)|)\s*(over\s+TLS\s+secured\s+channel|)\s*with\s*(mapi|Microsoft\s+SMTP\s+Server|Microsoft\s+SMTPSVC(\((?P<server_version>[\d\.]+)\)|))\s*(\((TLS|version=(?P<tls>[\w\.]+)|)\,?\s*(cipher=(?P<cipher>[\w\_]+)|)\)|)\s*(id\s+(?P<id>[\d\.]+)|)", "MS SMTP Server"), #exchange
         ("(from\s+(?P<from_name>[\[\S\]]+)\s+\(((?P<from_hostname>[\S]*)|)\s*\[(IPv6\:(?P<from_ipv6>[a-f\d\:]+)\:|)((?P<from_ip>[\d\.\:]+)|)\]\s*(\(may\s+be\s+forged\)|)\)\s*(\(using\s+(?P<tls>[\w\.]+)\s+with\s+cipher\s+(?P<cipher>[\w\-]+)\s+\([\w\/\s]+\)\)\s+(\(No\s+client\s+certificate\s+requested\)|)|)|)\s*(\(Authenticated\s+sender\:\s+(?P<authenticated_sender>[\w\.\-\@]+)\)|)\s*by\s+(?P<by_hostname>[\S]+)\s*(\((?P<by_hostname2>[\S]*)\s*\[((?P<by_ipv6>[a-f\:\d]+)|)(?P<by_ip>[\d\.]+)\]\)|)\s*(\([^\)]*\)|)\s*(\(Postfix\)|)\s*(with\s+(?P<protocol>\w*)|)\s*id\s+(?P<id>[\w\-]+)\s*(for\s+\<(?P<envelope_for>[\w\.\@]+)\>|)", "postfix"), #postfix
@@ -222,17 +229,19 @@ class Eml(object):
         return self._struct
     def _get_received_headers(self):
         relays = self.get_eml().get_all('Received')
-        for relay in relays:
-            try:
-                yield ReceivedParser.parse(relay)
-            except ReceivedParserError:
-                pass
+        if relays:
+            for relay in relays:
+                try:
+                    yield ReceivedParser.parse(relay)
+                except ReceivedParserError:
+                    pass
 
     def get_mail_path(self):
         """Get mail delivery path as reconstructed from received fields as list."""
-        print(self.format_mail_route([x for x in self._get_received_headers()]))
-        for relay in self._get_received_headers():
-            print(relay )
+        headers = list(self._get_received_headers())
+        print(self.format_mail_route(headers))
+        for relay in headers:
+            print(relay)
 
     def format_mail_route(self, headers):
         formatted_route = []
@@ -299,12 +308,11 @@ class Eml(object):
 
     def get_to(self):
         """Get all recipient indicating fields of mail as a dictionary"""
-
-        pass
+        return self.tos
 
     def get_subject(self):
         """Get subject line of mail"""
-        pass
+        return self.subject
 
     def get_index(self):
         """Get tokenized index of all parsable text. A bit like linux strings."""
@@ -324,7 +332,13 @@ class Eml(object):
 
     def get_attachments(self, filename=None):
         """Get list of attachments as list of dictionaries. (filename,mimetype,md5,sha256,rawdata)"""
-        pass
+        attachments = []
+        for part in self.flat_struct:
+            if part.get('content_disposition') and 'attachment' in part.get('content_disposition'):
+                attachments.append(part)
+        if filename:
+            return [a for a in attachments if a.get('filename') == filename]
+        return attachments
 
     def get_lang(self):
         """Get a guess about content language."""
@@ -472,8 +486,7 @@ class Eml(object):
             self.struct
             self.status = "done"
         except Exception as e:
-            print(e)
-
+            logging.error(f"Failed to parse email: {e}")
             self.status = "not_parsable" + str(e)
 
 
