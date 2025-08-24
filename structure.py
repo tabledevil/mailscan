@@ -5,20 +5,136 @@ import textwrap
 import magic
 import mimetypes
 import sys
+from reporting import ReportManager
 from Config.config import flags
-import hashlib
-import logging
-import os
-import textwrap
-import magic
-import mimetypes
-import sys
-from Analyzers.base import BaseAnalyzer, Report, AnalysisModuleException
-logging.getLogger()
-logging.basicConfig(stream=sys.stderr, level=logging.INFO,format='[%(levelname)s]%(filename)s(%(lineno)d)/%(funcName)s:%(message)s')
+import importlib
+import shutil
+import subprocess
+
+class AnalysisModuleException(Exception):
+    pass
+
+
+class Report:
+    def __init__(self, text, short=None, label='', rank=0, verbosity=0, content_type='text/plain', data=None):
+        self.text = text
+        self.short = self.text if short is None else short
+        self.label = label
+        self.rank = rank
+        self.verbosity = verbosity
+        self.content_type = content_type
+        self.data = data
+
+    def to_dict(self):
+        return {
+            'text': self.text,
+            'short': self.short,
+            'label': self.label,
+            'rank': self.rank,
+            'verbosity': self.verbosity,
+            'content_type': self.content_type,
+            'data': self.data,
+        }
+
+    def __str__(self) -> str:
+        return self.text
+
+
+class Analyzer(object):
+    compatible_mime_types = []
+    description = "Generic Analyzer Class"
+    modules = {}
+    pip_dependencies = []
+    system_dependencies = []
+    system_dependencies_check = {}
+
+    def __init__(self, struct) -> None:
+        self.struct = struct
+        self.childitems = []
+        self.reports = {}
+        self.modules = {}
+        self.info = ""
+        self.analysis()
+
+    def run_modules(self):
+        for module in self.modules:
+            try:
+                self.modules[module]()
+            except AnalysisModuleException as e:
+                logging.error(f'Error during Module {module} : {e}')
+            except Exception as e:
+                logging.error(f"Error during Module {module} : {e}")
+                if flags.debug:
+                    raise
+
+    def analysis(self):
+        self.run_modules()
+
+    @classmethod
+    def is_available(cls):
+        """
+        Check if all dependencies for this analyzer are met.
+        """
+        # Check for pip dependencies
+        for package in cls.pip_dependencies:
+            try:
+                importlib.import_module(package)
+            except ImportError:
+                return False, f"Missing pip dependency: {package}"
+
+        # Check for system dependencies (simple check)
+        for command in cls.system_dependencies:
+            if not shutil.which(command):
+                return False, f"Missing system dependency: {command}"
+
+        # Perform enhanced system tool checks
+        for command, check_details in cls.system_dependencies_check.items():
+            if not shutil.which(command):
+                return False, f"Missing system dependency: {command}"
+
+            try:
+                args = [command] + check_details['args']
+                result = subprocess.run(args, capture_output=True, text=True, check=False)
+
+                if check_details['expected_output'] not in result.stdout and check_details['expected_output'] not in result.stderr:
+                    return False, f"System dependency {command} is not working as expected."
+
+            except (subprocess.SubprocessError, FileNotFoundError) as e:
+                return False, f"Error checking system dependency {command}: {e}"
+
+        return True, ""
+
+    @staticmethod
+    def get_analyzer(mimetype):
+        for analyser in Analyzer.__subclasses__():
+            if mimetype in analyser.compatible_mime_types:
+                if hasattr(analyser, 'is_available'):
+                    available, reason = analyser.is_available()
+                    if not available:
+                        logging.warning(f"Analyzer {analyser.__name__} is not available: {reason}")
+                        continue
+                return analyser
+        return Analyzer
+
+    def generate_struct(self, data, filename=None, index=0, mime_type=None):
+        return Structure.create(data=data, filename=filename, level=self.struct.level + 1, index=index,mime_type=mime_type)
+
+    @property
+    def summary(self):
+        reports = sorted(self.reports.values(), key=lambda r: r.rank)
+        return reports
+
+    @property
+    def reports_available(self):
+        return self.reports.keys()
+
+    def __str__(self) -> str:
+        return type(self).description
+
+    def get_childitems(self) -> list():
+        return self.childitems
+
 from Analyzers import *
-
-
 
 class Structure(dict):
     _cache = {}
@@ -75,7 +191,7 @@ class Structure(dict):
 
         if level > flags.max_analysis_depth:
             logging.warning(f"Max analysis depth reached ({flags.max_analysis_depth}), stopping analysis.")
-            self.analyzer = BaseAnalyzer(self) # Create a dummy analyzer
+            self.analyzer = Analyzer(self) # Create a dummy analyzer
             return
 
         self.analyzer = None
@@ -102,7 +218,7 @@ class Structure(dict):
         self.mime_type = self.magic if mime_type is None else mime_type
         self.type_mismatch = self.mime_type == self.magic
         self.__children = None
-        self.analyzer = BaseAnalyzer.get_analyzer(self.mime_type)(self)
+        self.analyzer = Analyzer.get_analyzer(self.mime_type)(self)
 
     @property
     def realfile(self):
@@ -140,18 +256,9 @@ class Structure(dict):
                 hashes[algo] = getattr(self, algo)
         return hashes
 
-    def get_report(self):
-        txt = f'{self.index} >> {self.mime_type} {self.size}\n'
-        txt += f'info     : {self.analyzer.info}\n'
-        if self.has_filename:
-            txt += f'filename : {self.filename}\n'
-        txt += f'md5      : {self.md5}\n'
-        # txt += f'sha1     : {self.sha1}\n'
-        # txt += f'sha256   : {self.sha256}\n'
-        txt += f'{self.analyzer.summary}\n'
-        for child in self.get_children():
-            txt += f'{child.get_report()}'
-        return textwrap.indent(txt, prefix="    " * self.level)
+    def get_report(self, report_format='text', verbosity=0):
+        manager = ReportManager(self, verbosity=verbosity)
+        return manager.render(format=report_format)
 
     def extract(self, basepath=None, filenames=False, recursive=False):
         if basepath is None:

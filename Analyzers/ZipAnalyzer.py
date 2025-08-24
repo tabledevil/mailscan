@@ -1,10 +1,10 @@
 import logging
 import zipfile
 import io
-from .base import BaseAnalyzer, Report
+from structure import Analyzer, Report
 from Config.config import flags
 
-class ZipAnalyzer(BaseAnalyzer):
+class ZipAnalyzer(Analyzer):
     compatible_mime_types = ['application/zip']
     description = "ZIP-File analyser"
     passwords = ["infected", "Infected", "iNFECTED", "INFECTED"]

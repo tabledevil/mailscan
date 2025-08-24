@@ -1,9 +1,9 @@
 import logging
-from .base import BaseAnalyzer, Report
+from structure import Analyzer, Report
 from eml import Eml
 
 
-class EmailAnalyzer(BaseAnalyzer):
+class EmailAnalyzer(Analyzer):
     compatible_mime_types = ['message/rfc822','application/octet-stream']
     description = "Email analyser"
     pip_dependencies = ['chardet', 'python-magic', 'python-dateutil', 'pytz']

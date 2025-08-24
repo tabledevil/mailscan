@@ -1,12 +1,12 @@
 import logging
-from .base import BaseAnalyzer, Report
+from structure import Analyzer, Report
 
 try:
     from bs4 import BeautifulSoup as bs
 except ImportError:
     bs = None
 
-class HTMLAnalyzer(BaseAnalyzer):
+class HTMLAnalyzer(Analyzer):
     compatible_mime_types = ['text/html']
     description = 'HTML Analyser'
     pip_dependencies = ['beautifulsoup4', 'lxml']

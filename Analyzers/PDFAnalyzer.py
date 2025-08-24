@@ -1,7 +1,9 @@
 import logging
 import io
 import textwrap
-from .base import BaseAnalyzer, Report, AnalysisModuleException
+import base64
+from structure import Analyzer, Report, AnalysisModuleException
+from pdf2image import convert_from_bytes
 
 try:
     import PyPDF2
@@ -9,10 +11,11 @@ except ImportError:
     PyPDF2 = None
 
 
-class PDFAnalyzer(BaseAnalyzer):
+class PDFAnalyzer(Analyzer):
     compatible_mime_types = ['application/pdf']
     description = 'PDF Analyser'
-    pip_dependencies = ['PyPDF2']
+    pip_dependencies = ['PyPDF2', 'pdf2image']
+    system_dependencies = ['poppler']
 
     def parse_pdf(self):
         if not PyPDF2:
@@ -76,6 +79,23 @@ class PDFAnalyzer(BaseAnalyzer):
             logging.error(f"Error extracting embedded files from PDF: {e}")
 
 
+    def generate_preview(self):
+        try:
+            images = convert_from_bytes(self.struct.rawdata, first_page=1, last_page=1, fmt='png')
+            if images:
+                image = images[0]
+                buffer = io.BytesIO()
+                image.save(buffer, format="PNG")
+                encoded_string = base64.b64encode(buffer.getvalue()).decode('ascii')
+                self.reports['preview'] = Report(
+                    text="First page preview",
+                    label="Preview",
+                    content_type='image/png',
+                    data=encoded_string
+                )
+        except Exception as e:
+            logging.warning(f"Could not generate PDF preview: {e}")
+
     def analysis(self):
         if not PyPDF2:
             logging.warning("PyPDF2 is not installed, cannot analyze PDF files.")
@@ -84,5 +104,5 @@ class PDFAnalyzer(BaseAnalyzer):
         self.modules['parser'] = self.parse_pdf
         self.modules['pdf2text'] = self.get_text
         self.modules['embeddedFiles'] = self.getAttachments
+        self.modules['preview'] = self.generate_preview
         super().analysis()
-

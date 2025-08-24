@@ -1,5 +1,5 @@
 import logging
-from .base import BaseAnalyzer, Report
+from structure import Analyzer, Report
 from Utils.temp_manager import TempFileManager
 
 try:
@@ -7,7 +7,7 @@ try:
 except ImportError:
     extract_msg = None
 
-class MsgAnalyzer(BaseAnalyzer):
+class MsgAnalyzer(Analyzer):
     compatible_mime_types = ['application/vnd.ms-outlook']
     description = "MSG Email Analyzer"
     pip_dependencies = ['extract-msg']
