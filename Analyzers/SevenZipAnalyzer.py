@@ -3,6 +3,7 @@ import os
 import lzma
 from .base import BaseAnalyzer, Report
 from Utils.temp_manager import TempFileManager
+from Config.config import flags
 
 try:
     import py7zr
@@ -56,11 +57,16 @@ class SevenZipAnalyzer(BaseAnalyzer):
 
     def extract_files(self, archive):
         try:
-            # Zip bomb check
+            # Zip bomb checks
             total_uncompressed_size = sum(f.uncompressed for f in archive.list())
-            if self.struct.size > 0 and total_uncompressed_size / self.struct.size > self.struct.flags.max_compression_ratio:
+            if self.struct.size > 0 and total_uncompressed_size / self.struct.size > flags.max_compression_ratio:
                 logging.warning("7z bomb detected: compression ratio too high.")
                 self.reports['error'] = Report("7z bomb detected: compression ratio too high.")
+                return
+
+            if total_uncompressed_size > flags.max_file_size:
+                logging.warning("7z bomb detected: total uncompressed size is too large.")
+                self.reports['error'] = Report("7z bomb detected: total uncompressed size is too large.")
                 return
 
             all_files = archive.readall()
