@@ -2,7 +2,7 @@ import logging
 import os
 import textwrap
 import re
-from .base import BaseAnalyzer, Report
+from structure import Analyzer, Report
 
 try:
     import cld3
@@ -31,7 +31,7 @@ except ImportError:
     requests = None
 
 
-class PlainTextAnalyzer(BaseAnalyzer):
+class PlainTextAnalyzer(Analyzer):
     compatible_mime_types = ['text/plain']
     description = 'Plain Textfile Analyser'
     pip_dependencies = ['pycld3', 'fasttext', 'langdetect', 'chardet', 'requests']

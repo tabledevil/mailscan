@@ -1,7 +1,7 @@
 import logging
 import os
 import lzma
-from .base import BaseAnalyzer, Report
+from structure import Analyzer, Report
 from Utils.temp_manager import TempFileManager
 from Config.config import flags
 
@@ -10,7 +10,7 @@ try:
 except ImportError:
     py7zr = None
 
-class SevenZipAnalyzer(BaseAnalyzer):
+class SevenZipAnalyzer(Analyzer):
     compatible_mime_types = ['application/x-7z-compressed']
     description = "7Z-File analyser"
     pip_dependencies = ['py7zr']
