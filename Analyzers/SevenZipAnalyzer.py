@@ -1,54 +1,81 @@
-from structure import Analyzer, Report
 import logging
+import os
+import lzma
+from structure import Analyzer, Report
+from Utils.temp_manager import TempFileManager
+from Config.config import flags
 
-class ZipAnalyzer(Analyzer):
+try:
+    import py7zr
+except ImportError:
+    py7zr = None
+
+class SevenZipAnalyzer(Analyzer):
     compatible_mime_types = ['application/x-7z-compressed']
     description = "7Z-File analyser"
-    passwords = ["infected","Infected","iNFECTED","INFECTED"]
-    passwords += ["ibfected","ibnfected","ifected","ifnected","igfected","ignfected","ihfected","ihnfected","iinfected","ijfected","ijnfected","imfected","imnfected","inbected","inbfected","incected","incfected","indected","indfected","inected","ineected","inefcted","inefected","infceted","infcted","infdcted","infdected","infeccted","infeced","infecetd","infecfed","infecfted","infecged","infecgted","infeched","infechted","infecred","infecrted","infectde","infectded","infecte","infectec","infectecd","infectedd","infectee","infecteed","infectef","infectefd","infecter","infecterd","infectes","infectesd","infectev","infectevd","infectew","infectewd","infectex","infectexd","infectfed","infectred","infectsed","infectted","infectwed","infecyed","infecyted","infedcted","infedted","infeected","infefcted","infefted","infescted","infested","infetced","infeted","infevcted","infevted","infexcted","infexted","inffcted","inffected","infrcted","infrected","infscted","infsected","infwcted","infwected","ingected","ingfected","innfected","inrected","inrfected","intected","intfected","invected","invfected","jinfected","jnfected","kinfected","knfected","linfected","lnfected","nfected","nifected","oinfected","onfected","uinfected","unfected"]
+    pip_dependencies = ['py7zr']
+    passwords = ["infected","Infected","iNFECTED","INFECTED"] # Add more common passwords if needed
 
     def analysis(self):
         super().analysis()
-        import py7zr, tempfile, lzma, os
+        if not py7zr:
+            logging.warning("py7zr is not installed, cannot analyze 7z files.")
+            return
 
-        #Write data to tempfile 
-        tmpfile = tempfile.NamedTemporaryFile(mode='w+b',delete=False)
-        tmpfile.write(self.struct.rawdata)
-        tmpfile.close()
-        zipped_files = None
-        try:
-            self.zipobj = py7zr.SevenZipFile(tmpfile.name)
-            if self.zipobj.password_protected:
-                password_protected = True
-            else:
-                zipped_files = self.zipobj.readall()
-        except py7zr.exceptions.Bad7zFile:
-            logging.warning("Not a 7z-File")
+        with TempFileManager() as temp_manager:
+            tmp_file_path = temp_manager.create_temp_file(self.struct.rawdata)
+
             password_protected = False
-        except py7zr.exceptions.PasswordRequired:
-            logging.warning("Can't open 7z-File because a Password is required")
-            password_protected = True
-        
-        if password_protected:
-            for password in self.passwords:
-                try:
-                    self.zipobj = py7zr.SevenZipFile(tmpfile.name,password=password)
-                    zipped_files = self.zipobj.readall()
-                    if len(zipped_files) > 0:
-                        self.reports['password'] = Report(password)
-                        break
-                except lzma.LZMAError:
-                    logging.debug(f"Wrong password : {password}")
-            if zipped_files is None:
-                logging.error("Couldn't guess password")
-        if zipped_files and len(zipped_files)>0:
-            for idx, zipped_file in enumerate(zipped_files):
-                print(f"{idx} : {zipped_file} : ")
-                print(zipped_files[zipped_file])
-                self.childitems.append(self.generate_struct(filename=zipped_file, data=zipped_files[zipped_file].read(), index=idx))
+            try:
+                with py7zr.SevenZipFile(tmp_file_path, 'r') as archive:
+                    if archive.password_protected:
+                        password_protected = True
+                    else:
+                        self.extract_files(archive)
+            except py7zr.exceptions.PasswordRequired:
+                password_protected = True
+            except py7zr.exceptions.Bad7zFile:
+                logging.warning("Bad 7z file, could not open.")
+                return
 
-        #self.info = f'{len(self.zipobj.filelist)} compressed file(s)'
-        filelist = [f'{f.filename} [{f.uncompressed}]' for f in self.zipobj.list()]
-        self.reports['summary'] = Report('\n'.join(filelist))
-        os.remove(tmpfile.name)
+            if password_protected:
+                self.try_passwords(tmp_file_path)
+
+    def try_passwords(self, filepath):
+        for password in self.passwords:
+            try:
+                with py7zr.SevenZipFile(filepath, 'r', password=password.encode()) as archive:
+                    self.reports['password'] = Report(password)
+                    self.extract_files(archive)
+                    return # Exit after first successful password
+            except lzma.LZMAError:
+                logging.debug(f"Wrong password for 7z file: {password}")
+            except py7zr.exceptions.Bad7zFile:
+                 logging.warning(f"Bad 7z file with password {password}, could not open.")
+                 return
+        logging.warning("Could not guess password for 7z file.")
+
+    def extract_files(self, archive):
+        try:
+            # Zip bomb checks
+            total_uncompressed_size = sum(f.uncompressed for f in archive.list())
+            if self.struct.size > 0 and total_uncompressed_size / self.struct.size > flags.max_compression_ratio:
+                logging.warning("7z bomb detected: compression ratio too high.")
+                self.reports['error'] = Report("7z bomb detected: compression ratio too high.")
+                return
+
+            if total_uncompressed_size > flags.max_file_size:
+                logging.warning("7z bomb detected: total uncompressed size is too large.")
+                self.reports['error'] = Report("7z bomb detected: total uncompressed size is too large.")
+                return
+
+            all_files = archive.readall()
+            for filename, bio in all_files.items():
+                self.childitems.append(self.generate_struct(filename=filename, data=bio.read()))
+
+            filelist = [f.filename for f in archive.list()]
+            self.info = f'{len(filelist)} compressed file(s)'
+            self.reports['summary'] = Report('\n'.join(filelist))
+        except Exception as e:
+            logging.error(f"Failed to extract files from 7z archive: {e}")
 
