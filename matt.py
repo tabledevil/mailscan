@@ -36,7 +36,8 @@ def main():
     parser.add_argument("-d", "--debug", help="Enable Debug output", action="store_true")
     parser.add_argument("-o", "--out-dir", help=f"output dir. [default={path}]", default=path)
     parser.add_argument("--format", help="Output format (text, markdown, html, json)", default="text")
-    parser.add_-oargument("--verbosity", help="Verbosity level (0-5)", type=int, default=0)
+    parser.add_argument("--verbosity", help="Verbosity level (0-5)", type=int, default=0
+    
     args = parser.parse_args()
 
     if args.check:
@@ -53,6 +54,7 @@ def main():
         if not os.path.isfile(f):
             logging.warning(f"skipping {f} : not a file")
             continue
+
         s = structure.Structure.create(filename=f,mime_type=mimetypes.guess_type(f,strict=False)[0])
         print(s.get_report(report_format=args.format, verbosity=args.verbosity))
         if args.extract:
