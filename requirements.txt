@@ -1,0 +1,16 @@
+chardet
+python-magic
+python-dateutil
+pytz
+beautifulsoup4
+lxml
+extract-msg
+PyPDF2
+pycld3
+fasttext
+langdetect
+requests
+py7zr
+olefile
+wheel
+setuptools

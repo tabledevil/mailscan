@@ -7,8 +7,10 @@ import mimetypes
 import sys
 from reporting import ReportManager
 from Config.config import flags
-logging.getLogger()
-logging.basicConfig(stream=sys.stderr, level=logging.INFO,format='[%(levelname)s]%(filename)s(%(lineno)d)/%(funcName)s:%(message)s')
+import importlib
+import shutil
+import subprocess
+
 class AnalysisModuleException(Exception):
     pass
 
@@ -38,10 +40,13 @@ class Report:
         return self.text
 
 
-class Analyzer:
+class Analyzer(object):
     compatible_mime_types = []
     description = "Generic Analyzer Class"
     modules = {}
+    pip_dependencies = []
+    system_dependencies = []
+    system_dependencies_check = {}
 
     def __init__(self, struct) -> None:
         self.struct = struct
@@ -65,15 +70,54 @@ class Analyzer:
     def analysis(self):
         self.run_modules()
 
+    @classmethod
+    def is_available(cls):
+        """
+        Check if all dependencies for this analyzer are met.
+        """
+        # Check for pip dependencies
+        for package in cls.pip_dependencies:
+            try:
+                importlib.import_module(package)
+            except ImportError:
+                return False, f"Missing pip dependency: {package}"
+
+        # Check for system dependencies (simple check)
+        for command in cls.system_dependencies:
+            if not shutil.which(command):
+                return False, f"Missing system dependency: {command}"
+
+        # Perform enhanced system tool checks
+        for command, check_details in cls.system_dependencies_check.items():
+            if not shutil.which(command):
+                return False, f"Missing system dependency: {command}"
+
+            try:
+                args = [command] + check_details['args']
+                result = subprocess.run(args, capture_output=True, text=True, check=False)
+
+                if check_details['expected_output'] not in result.stdout and check_details['expected_output'] not in result.stderr:
+                    return False, f"System dependency {command} is not working as expected."
+
+            except (subprocess.SubprocessError, FileNotFoundError) as e:
+                return False, f"Error checking system dependency {command}: {e}"
+
+        return True, ""
+
     @staticmethod
     def get_analyzer(mimetype):
         for analyser in Analyzer.__subclasses__():
             if mimetype in analyser.compatible_mime_types:
+                if hasattr(analyser, 'is_available'):
+                    available, reason = analyser.is_available()
+                    if not available:
+                        logging.warning(f"Analyzer {analyser.__name__} is not available: {reason}")
+                        continue
                 return analyser
         return Analyzer
 
     def generate_struct(self, data, filename=None, index=0, mime_type=None):
-        return Structure(data=data, filename=filename, level=self.struct.level + 1, index=index,mime_type=mime_type)
+        return Structure.create(data=data, filename=filename, level=self.struct.level + 1, index=index,mime_type=mime_type)
 
     @property
     def summary(self):
@@ -90,13 +134,37 @@ class Analyzer:
     def get_childitems(self) -> list():
         return self.childitems
 
-
-
 from Analyzers import *
 
-
-
 class Structure(dict):
+    _cache = {}
+
+    @classmethod
+    def create(cls, filename=None, data=None, mime_type=None, level=0, index=0):
+        # Determine the raw data to calculate the hash
+        if data is None:
+            if filename is not None and os.path.isfile(filename):
+                with open(filename, 'rb') as f:
+                    raw_data = f.read()
+            else:
+                raise ValueError("No Data was supplied for struct")
+        else:
+            raw_data = data
+
+        # Calculate hash
+        sha256_hash = hashlib.sha256(raw_data).hexdigest()
+
+        # Check cache
+        if sha256_hash in cls._cache:
+            logging.info(f"Returning cached Structure object for hash {sha256_hash[:10]}...")
+            # Here we could adjust level/index if we decide to, for now just return
+            return cls._cache[sha256_hash]
+
+        # If not in cache, create a new one and cache it
+        new_struct = cls(filename=filename, data=raw_data, mime_type=mime_type, level=level, index=index)
+        cls._cache[sha256_hash] = new_struct
+        return new_struct
+
     def __getattr__(self, key):
         if key in self:
             return self[key]
@@ -120,9 +188,17 @@ class Structure(dict):
     def __init__(self, filename=None, data=None, mime_type=None, level=0, index=0) -> None:
         if flags.debug:
             logging.getLogger() .setLevel(logging.DEBUG)
+
+        if level > flags.max_analysis_depth:
+            logging.warning(f"Max analysis depth reached ({flags.max_analysis_depth}), stopping analysis.")
+            self.analyzer = Analyzer(self) # Create a dummy analyzer
+            return
+
         self.analyzer = None
         if data is None:
             if filename is not None and os.path.isfile(filename):
+                if os.path.getsize(filename) > flags.max_file_size:
+                    raise ValueError(f"File {filename} is too large.")
                 self.fullpath = os.path.abspath(filename)
                 self.__filename = os.path.split(self.fullpath)[1]
                 logging.debug(f'Reading file {self.fullpath}')
@@ -132,6 +208,8 @@ class Structure(dict):
                 raise ValueError("No Data was supplied for struct")
 
         else:
+            if len(data) > flags.max_file_size:
+                raise ValueError("Data is too large.")
             self.__rawdata = data
             self.__filename = filename if filename is not None else None
         self.level = level
@@ -240,12 +318,12 @@ if __name__ == "__main__":
     cwd = os.getcwd()
     logging.info(f'Working directory: {cwd}')
 
-    s1 = Structure(filename="mail.eml")
+    s1 = Structure.create(filename="mail.eml")
 
     print(s1.get_report())
 
-    s3 = Structure(filename="test.pdf")
+    s3 = Structure.create(filename="test.pdf")
     print(s3.get_report())
 
-    # s2=Structure(file="test.zip")
+    # s2=Structure.create(file="test.zip")
     # print(s2.get_report())
