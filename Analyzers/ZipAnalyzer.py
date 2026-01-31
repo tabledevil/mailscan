@@ -16,7 +16,7 @@ class ZipAnalyzer(Analyzer):
         try:
             with zipfile.ZipFile(file_like_object) as zip_file:
                 self.info = f'{len(zip_file.infolist())} compressed file(s)'
-                filelist = [f'{f.filename} {("<encrypted>" if f.is_encrypted() else "")} [{f.file_size}]' for f in zip_file.infolist()]
+                filelist = [f'{f.filename} {("<encrypted>" if f.flag_bits & 0x1 else "")} [{f.file_size}]' for f in zip_file.infolist()]
                 self.reports['summary'] = Report("\n".join(filelist))
 
                 # Zip bomb checks
@@ -31,7 +31,7 @@ class ZipAnalyzer(Analyzer):
                     self.reports['error'] = Report("Zip bomb detected: total uncompressed size is too large.")
                     return
 
-                is_encrypted = any(f.is_encrypted() for f in zip_file.infolist())
+                is_encrypted = any(f.flag_bits & 0x1 for f in zip_file.infolist())
 
                 if is_encrypted:
                     self.reports['encrypted'] = Report("ZIP File is Password protected")
