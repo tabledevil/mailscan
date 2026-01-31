@@ -6,7 +6,7 @@ from eml import Eml
 class EmailAnalyzer(Analyzer):
     compatible_mime_types = ['message/rfc822','application/octet-stream']
     description = "Email analyser"
-    pip_dependencies = ['chardet', 'python-magic', 'python-dateutil', 'pytz']
+    pip_dependencies = ['chardet', 'magic', 'dateutil', 'pytz']
 
     def parse_mail(self):
         try:

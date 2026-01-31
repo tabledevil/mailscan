@@ -6,14 +6,14 @@ import structure
 import logging
 import mimetypes
 from Config.config import flags
-from Analyzers.base import BaseAnalyzer
+from structure import Analyzer
 from Analyzers import *
 import sys
 
 def check_dependencies():
     print("Checking dependencies...")
     all_ok = True
-    for analyzer in BaseAnalyzer.__subclasses__():
+    for analyzer in Analyzer.__subclasses__():
         available, reason = analyzer.is_available()
         if not available:
             all_ok = False
@@ -36,7 +36,7 @@ def main():
     parser.add_argument("-d", "--debug", help="Enable Debug output", action="store_true")
     parser.add_argument("-o", "--out-dir", help=f"output dir. [default={path}]", default=path)
     parser.add_argument("--format", help="Output format (text, markdown, html, json)", default="text")
-    parser.add_argument("--verbosity", help="Verbosity level (0-5)", type=int, default=0
+    parser.add_argument("--verbosity", help="Verbosity level (0-5)", type=int, default=0)
     
     args = parser.parse_args()
 
