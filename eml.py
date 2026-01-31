@@ -127,6 +127,10 @@ class Eml(object):
         'received': re_pat_f_received
     }
 
+    _compiled_patterns = {
+        k: re.compile(v, re.IGNORECASE) for k, v in re_pattern.items()
+    }
+
     def get_header(self, field):
         """Get a decoded list of all values for given header field."""
         for v in self.get_header_raw(field):
@@ -381,7 +385,9 @@ class Eml(object):
         return False
 
     def extract_from_text(self, text, pattern='email'):
-        pat = re.compile(self.re_pattern[pattern], re.IGNORECASE)
+        pat = self._compiled_patterns.get(pattern)
+        if pat is None:
+            pat = re.compile(self.re_pattern[pattern], re.IGNORECASE)
         match = pat.findall(text)
         return match
 
