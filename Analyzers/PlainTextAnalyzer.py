@@ -38,6 +38,7 @@ class PlainTextAnalyzer(Analyzer):
 
     LANGUAGE_DB = 'lid.176.ftz'
     LANGUAGE_DB_URL = 'https://dl.fbaipublicfiles.com/fasttext/supervised-models/lid.176.ftz'
+    _fasttext_model = None
 
     def __detect_language_cld3(self):
         if not cld3: return None
@@ -47,15 +48,17 @@ class PlainTextAnalyzer(Analyzer):
 
     def __detect_language_fasttext(self):
         if not fasttext: return None
-        if not os.path.isfile(self.LANGUAGE_DB):
-            if not requests:
-                logging.warning("requests library not found, cannot download fasttext model.")
-                return None
-            logging.warning('Language File not Found. Download Starting...')
-            r = requests.get(self.LANGUAGE_DB_URL)
-            with open(self.LANGUAGE_DB, 'wb') as output_file:
-                output_file.write(r.content)
-        model = fasttext.load_model(self.LANGUAGE_DB)
+        if PlainTextAnalyzer._fasttext_model is None:
+            if not os.path.isfile(self.LANGUAGE_DB):
+                if not requests:
+                    logging.warning("requests library not found, cannot download fasttext model.")
+                    return None
+                logging.warning('Language File not Found. Download Starting...')
+                r = requests.get(self.LANGUAGE_DB_URL)
+                with open(self.LANGUAGE_DB, 'wb') as output_file:
+                    output_file.write(r.content)
+            PlainTextAnalyzer._fasttext_model = fasttext.load_model(self.LANGUAGE_DB)
+        model = PlainTextAnalyzer._fasttext_model
         # Suppressing fasttext warning about loading model from disk
         predictions, _ = model.predict(self.text.replace('\n', ' ').splitlines())
         predictions = [p[0] for p in predictions if p]
