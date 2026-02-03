@@ -19,7 +19,7 @@ import re
 from functools import lru_cache
 
 import chardet
-import magic
+from Utils.filetype import detect_mime
 from dateutil.parser import parse
 from pytz import timezone
 
@@ -196,11 +196,10 @@ class Eml(object):
 
                 tmp_struct['filename'] = (filename)
                 tmp_struct['size'] = len(tmp_struct['data'])
-            try:
-                tmp_struct['mime'] = magic.from_buffer(data,mime=True)
-                tmp_struct['magic'] = magic.from_buffer(data)
-            except:
-                pass
+            detection = detect_mime(data, filename=tmp_struct.get("filename"))
+            tmp_struct['mime'] = detection.mime
+            tmp_struct['magic'] = detection.description
+            tmp_struct['detection'] = detection.to_dict()
             tmp_struct["md5"] = hashlib.md5(data).hexdigest()
             tmp_struct["sha1"] = hashlib.sha1(data).hexdigest()
             tmp_struct["sha256"] = hashlib.sha256(data).hexdigest()
@@ -528,5 +527,4 @@ if __name__ == '__main__':
     malmail=Eml(data=data)
     print(malmail)
     print(malmail.get_mail_path())
-
 
