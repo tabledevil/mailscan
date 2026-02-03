@@ -2,7 +2,6 @@ import hashlib
 import logging
 import os
 import textwrap
-import magic
 import mimetypes
 import sys
 from reporting import ReportManager
@@ -10,6 +9,7 @@ from Config.config import flags
 import importlib
 import shutil
 import subprocess
+from Utils.filetype import detect_mime
 
 class AnalysisModuleException(Exception):
     pass
@@ -303,8 +303,23 @@ class Structure(dict):
     @property
     def magic(self):
         if not hasattr(self, "__magic_mime"):
-            self.__magic_mime = magic.from_buffer(self.rawdata, mime=True)
+            detection = detect_mime(self.rawdata, filename=self.__filename)
+            self.__magic_detection = detection
+            self.__magic_mime = detection.mime
+            self.__magic_description = detection.description
         return self.__magic_mime
+
+    @property
+    def magic_detection(self):
+        if not hasattr(self, "__magic_detection"):
+            _ = self.magic
+        return self.__magic_detection
+
+    @property
+    def magic_description(self):
+        if not hasattr(self, "__magic_description"):
+            _ = self.magic
+        return self.__magic_description
 
     def get_children(self):
         if self.__children is None:

@@ -8,5 +8,6 @@ class Flags(object):
 flags = Flags('debug', False,
               'max_analysis_depth', 10,
               'max_file_size', 1024*1024*1024,
-              'max_compression_ratio', 100)
-
+              'max_compression_ratio', 100,
+              'mime_provider_order', None,
+              'mime_file_command_timeout', 2.0)
