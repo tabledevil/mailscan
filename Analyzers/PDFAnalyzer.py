@@ -16,7 +16,7 @@ class PDFAnalyzer(Analyzer):
     compatible_mime_types = ['application/pdf']
     description = 'PDF Analyser'
     pip_dependencies = ['PyPDF2', 'pdf2image']
-    system_dependencies = ['poppler']
+    system_dependencies = ['pdftoppm']
 
     def parse_pdf(self):
         if not PyPDF2:
