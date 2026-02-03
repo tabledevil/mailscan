@@ -46,6 +46,8 @@ This project has several dependencies that need to be installed. You can install
 pip install python-magic chardet python-dateutil pytz extract-msg PyPDF2
 ```
 
+For mbox analysis, the standard library `mailbox` module is used and requires no extra dependencies.
+
 **Note:** The `python-magic` library depends on the `libmagic` library. You may need to install it using your system's package manager. For example, on Debian/Ubuntu:
 
 ```bash
