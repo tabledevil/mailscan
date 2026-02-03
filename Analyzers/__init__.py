@@ -5,3 +5,4 @@ from Analyzers.SevenZipAnalyzer import *
 from Analyzers.HTMLAnalyzer import *
 from Analyzers.PDFAnalyzer import *
 from Analyzers.MsgAnalyzer import *
+from Analyzers.MboxAnalyzer import *
