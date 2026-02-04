@@ -33,7 +33,8 @@ for root, dirs, files in os.walk(base_path):
     for file in files:
         mailfile=root+os.sep+file
         try:
-            msg=email.message_from_file(open(mailfile, 'r', encoding='latin-1'))
+            with open(mailfile, 'r', encoding='latin-1') as f:
+                msg=email.message_from_file(f)
         except Exception as e:
             print("Error %s"%mailfile)
             print(e)
