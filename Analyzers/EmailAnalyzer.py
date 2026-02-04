@@ -1,12 +1,19 @@
 import logging
+import importlib
 from structure import Analyzer, Report
+# eml module is internal and now safe to import even if dependencies are missing
 from eml import Eml
 
 
 class EmailAnalyzer(Analyzer):
     compatible_mime_types = ['message/rfc822','application/octet-stream']
     description = "Email analyser"
-    pip_dependencies = ['chardet', 'magic', 'dateutil', 'pytz']
+    # These are dependencies used by the Eml class
+    pip_dependencies = [
+        ('chardet', 'chardet'),
+        ('dateutil', 'python-dateutil'),
+        ('pytz', 'pytz')
+    ]
 
     def parse_mail(self):
         try:

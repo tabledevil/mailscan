@@ -9,21 +9,90 @@ from Config.config import flags
 from structure import Analyzer
 from Analyzers import *
 import sys
+import importlib.util
+from Utils import filetype
+
+CORE_DEPENDENCIES = [
+    ("chardet", "chardet"),
+    ("dateutil", "python-dateutil"),
+    ("pytz", "pytz"),
+]
+
+
+def _dependency_missing(import_name):
+    return importlib.util.find_spec(import_name) is None
+
 
 def check_dependencies():
-    print("Checking dependencies...")
-    all_ok = True
-    for analyzer in Analyzer.__subclasses__():
-        available, reason = analyzer.is_available()
-        if not available:
-            all_ok = False
-            print(f"  - {analyzer.description}: [FAILED] {reason}")
-        else:
-            print(f"  - {analyzer.description}: [OK]")
-    if not all_ok:
-        print("\nSome dependencies are missing. Please install them to use all features.")
+    print("Checking core dependencies...")
+    core_missing = [package for module, package in CORE_DEPENDENCIES if _dependency_missing(module)]
+    if core_missing:
+        print(f"  - Missing required packages: {', '.join(core_missing)}")
     else:
-        print("\nAll dependencies are installed.")
+        print("  - Core dependencies: [OK]")
+
+    print("\nChecking analyzer dependencies...")
+
+    all_missing_required = []
+    all_missing_optional = []
+
+    analyzers = set(Analyzer.__subclasses__())
+    analyzers = [a for a in analyzers if a is not Analyzer]
+
+    for analyzer in sorted(analyzers, key=lambda x: x.description or x.__name__):
+        status = analyzer.dependency_status()
+
+        missing_req = status.get("missing_required", [])
+        missing_opt = status.get("missing_optional", [])
+        missing_alt = status.get("missing_alternatives", [])
+
+        all_missing_required.extend(missing_req)
+        all_missing_required.extend(missing_alt)
+        all_missing_optional.extend(missing_opt)
+
+        msgs = []
+        if missing_req:
+            msgs.append(f"[ERROR] Missing required: {', '.join(missing_req)}")
+
+        if missing_alt:
+            for alt in missing_alt:
+                msgs.append(f"[ERROR] Missing alternative: {alt}")
+
+        if missing_opt:
+            msgs.append(f"[WARNING] Missing optional: {', '.join(missing_opt)}")
+
+        if not msgs:
+            print(f"  - {analyzer.description}: [OK]")
+        else:
+            print(f"  - {analyzer.description}:")
+            for msg in msgs:
+                print(f"      {msg}")
+
+            extra = getattr(analyzer, "extra", None)
+            if extra:
+                 print(f"      Install: pip install .[{extra}]")
+
+    print("\nChecking MIME detection providers...")
+    provider_order = filetype.get_provider_order()
+    print(f"  - Provider order: {', '.join(provider_order)}")
+    provider_status = filetype.get_provider_status(provider_order)
+    for entry in provider_status:
+        if entry["available"]:
+            print(f"  - {entry['provider']}: [OK]")
+        else:
+            print(f"  - {entry['provider']}: [MISSING] {entry['reason']}")
+
+    if any(not entry["available"] for entry in provider_status):
+        print("    install: pip install .[mime]")
+        print("    note: the tool will fall back to mimetypes if no provider is available.")
+
+    if core_missing or all_missing_required:
+        print("\n[!] Some required dependencies are missing. Please install them to use all features.")
+    elif all_missing_optional:
+        print("\n[i] Some optional dependencies are missing. Install extras to enable additional features.")
+        print("    Install all optional features: pip install .[all]")
+    else:
+        print("\n[OK] All dependencies are installed.")
     sys.exit(0)
 
 def main():
