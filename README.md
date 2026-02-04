@@ -40,10 +40,30 @@ python3 matt.py -x <file>
 
 ## Dependencies
 
-This project has several dependencies that need to be installed. You can install them using pip:
+Install the core dependencies (required for basic analysis) with pip:
 
 ```bash
-pip install python-magic chardet python-dateutil pytz extract-msg PyPDF2
+pip install .
+```
+
+If you are installing in an offline environment, you can use:
+
+```bash
+pip install . --no-build-isolation
+```
+
+This project uses the legacy `setup.py` build to avoid build-time downloads in restricted environments.
+
+Optional features are provided via extras. For example:
+
+```bash
+pip install .[all]
+```
+
+Available extras include `pdf`, `html`, `msg`, `7z`, `lang`, and `mime`. You can also check what is missing on your system with:
+
+```bash
+matt --check
 ```
 
 For mbox analysis, the standard library `mailbox` module is used and requires no extra dependencies.

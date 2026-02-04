@@ -9,7 +9,8 @@ except ImportError:
 class HTMLAnalyzer(Analyzer):
     compatible_mime_types = ['text/html']
     description = 'HTML Analyser'
-    pip_dependencies = ['beautifulsoup4', 'lxml']
+    optional_pip_dependencies = [('bs4', 'beautifulsoup4'), ('lxml', 'lxml')]
+    extra = "html"
 
     def analysis(self):
         super().analysis()
