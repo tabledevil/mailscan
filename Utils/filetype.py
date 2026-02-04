@@ -66,7 +66,7 @@ class FileCommandProvider(BaseProvider):
                 list(args),
                 input=data,
                 capture_output=True,
-                text=True,
+                text=False,
                 check=False,
                 timeout=self.timeout_s,
             )
@@ -76,18 +76,18 @@ class FileCommandProvider(BaseProvider):
     def detect(self, data: bytes, filename: Optional[str] = None) -> DetectionResult:
         mime_proc = self._run(["file", "--mime-type", "--brief", "-"], data)
         if mime_proc.returncode != 0:
-            stderr = mime_proc.stderr.strip()
+            stderr = mime_proc.stderr.decode('utf-8', errors='replace').strip()
             raise ProviderError(f"file command failed: {stderr or 'unknown error'}")
-        mime = mime_proc.stdout.strip()
+        mime = mime_proc.stdout.decode('utf-8', errors='replace').strip()
 
         description = ""
         desc_proc = self._run(["file", "--brief", "-"], data)
         if desc_proc.returncode == 0:
-            description = desc_proc.stdout.strip()
+            description = desc_proc.stdout.decode('utf-8', errors='replace').strip()
         else:
             logging.warning(
                 "file command description failed: %s",
-                desc_proc.stderr.strip() or "unknown error",
+                desc_proc.stderr.decode('utf-8', errors='replace').strip() or "unknown error",
             )
         return DetectionResult(mime=mime, description=description, provider=self.name)
 
@@ -147,6 +147,58 @@ def _resolve_provider_order() -> List[str]:
     if order:
         return order
     return ["python_magic", "file_command", "magika"]
+
+
+def get_provider_order() -> List[str]:
+    return _resolve_provider_order()
+
+
+def get_provider_status(order: Optional[Sequence[str]] = None) -> List[Dict[str, str]]:
+    provider_order = list(order) if order is not None else _resolve_provider_order()
+    status = []
+    for provider_name in provider_order:
+        if provider_name == "python_magic":
+            if importlib.util.find_spec("magic") is None:
+                status.append(
+                    {
+                        "provider": provider_name,
+                        "available": False,
+                        "reason": "python-magic is not installed",
+                    }
+                )
+            else:
+                status.append({"provider": provider_name, "available": True, "reason": ""})
+        elif provider_name == "file_command":
+            if not shutil.which("file"):
+                status.append(
+                    {
+                        "provider": provider_name,
+                        "available": False,
+                        "reason": "system command 'file' is missing",
+                    }
+                )
+            else:
+                status.append({"provider": provider_name, "available": True, "reason": ""})
+        elif provider_name == "magika":
+            if importlib.util.find_spec("magika") is None:
+                status.append(
+                    {
+                        "provider": provider_name,
+                        "available": False,
+                        "reason": "magika is not installed",
+                    }
+                )
+            else:
+                status.append({"provider": provider_name, "available": True, "reason": ""})
+        else:
+            status.append(
+                {
+                    "provider": provider_name,
+                    "available": False,
+                    "reason": "unknown provider",
+                }
+            )
+    return status
 
 
 def detect_mime(data: bytes, filename: Optional[str] = None) -> DetectionResult:

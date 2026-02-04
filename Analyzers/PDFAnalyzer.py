@@ -2,8 +2,10 @@ import logging
 import io
 import textwrap
 import base64
+import importlib
+import importlib.util
+import shutil
 from structure import Analyzer, Report, AnalysisModuleException
-from pdf2image import convert_from_bytes
 
 try:
     import PyPDF2
@@ -15,8 +17,9 @@ except ImportError:
 class PDFAnalyzer(Analyzer):
     compatible_mime_types = ['application/pdf']
     description = 'PDF Analyser'
-    pip_dependencies = ['PyPDF2', 'pdf2image']
-    system_dependencies = ['poppler']
+    optional_pip_dependencies = ['PyPDF2', 'pdf2image']
+    optional_system_dependencies = ['pdftoppm']
+    extra = "pdf"
 
     def parse_pdf(self):
         if not PyPDF2:
@@ -81,23 +84,13 @@ class PDFAnalyzer(Analyzer):
 
 
     def generate_preview(self):
-        try:
-            images = convert_from_bytes(self.struct.rawdata, first_page=1, last_page=1, fmt='png')
-            if images:
-                image = images[0]
-                buffer = io.BytesIO()
-                image.save(buffer, format="PNG")
-                encoded_string = base64.b64encode(buffer.getvalue()).decode('ascii')
-                self.reports['preview'] = Report(
-                    text="First page preview",
-                    label="Preview",
-                    content_type='image/png',
-                    data=encoded_string
-                )
-        except Exception as e:
-            logging.warning(f"Could not generate PDF preview: {e}")
-
-    def generate_preview(self):
+        if importlib.util.find_spec("pdf2image") is None:
+            logging.warning("pdf2image is not installed, cannot generate PDF preview.")
+            return
+        if not shutil.which("pdftoppm"):
+            logging.warning("poppler (pdftoppm) is not installed, cannot generate PDF preview.")
+            return
+        convert_from_bytes = importlib.import_module("pdf2image").convert_from_bytes
         try:
             images = convert_from_bytes(self.struct.rawdata, first_page=1, last_page=1, fmt='png')
             if images:

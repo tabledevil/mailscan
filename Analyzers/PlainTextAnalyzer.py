@@ -34,7 +34,14 @@ except ImportError:
 class PlainTextAnalyzer(Analyzer):
     compatible_mime_types = ['text/plain']
     description = 'Plain Textfile Analyser'
-    pip_dependencies = ['pycld3', 'fasttext', 'langdetect', 'chardet', 'requests']
+    optional_pip_dependencies = [
+        ('cld3', 'pycld3'),
+        ('fasttext', 'fasttext'),
+        ('langdetect', 'langdetect'),
+        ('chardet', 'chardet'),
+        ('requests', 'requests'),
+    ]
+    extra = "lang"
 
     LANGUAGE_DB = 'lid.176.ftz'
     LANGUAGE_DB_URL = 'https://dl.fbaipublicfiles.com/fasttext/supervised-models/lid.176.ftz'
