@@ -1,7 +1,17 @@
 from setuptools import setup, find_packages
 
-with open('requirements.txt') as f:
+with open('requirements.txt', encoding='utf-8') as f:
     requirements = f.read().splitlines()
+
+extras = {
+    "pdf": ["PyPDF2", "pdf2image"],
+    "html": ["beautifulsoup4", "lxml"],
+    "msg": ["extract-msg"],
+    "7z": ["py7zr"],
+    "lang": ["pycld3", "fasttext", "langdetect", "requests"],
+    "mime": ["python-magic", "magika"],
+}
+extras["all"] = sorted({dep for deps in extras.values() for dep in deps})
 
 setup(
     name='matt',
@@ -9,11 +19,26 @@ setup(
     author='Your Name',
     author_email='your.email@example.com',
     description='Mail Analysis and Triage Tool',
-    long_description=open('README.md').read(),
+    long_description=open('README.md', encoding='utf-8').read(),
     long_description_content_type='text/markdown',
     url='https://github.com/your/repo',
-    py_modules=["matt"],
+    packages=find_packages(),
+    py_modules=[
+        "attest",
+        "eml",
+        "getallfromfields",
+        "mail2timeline",
+        "mailattachments",
+        "maildump",
+        "mailexport",
+        "mailfrom",
+        "mailheader",
+        "matt",
+        "reporting",
+        "structure",
+    ],
     install_requires=requirements,
+    extras_require=extras,
     entry_points={
         'console_scripts': [
             'matt=matt:main',

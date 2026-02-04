@@ -149,6 +149,58 @@ def _resolve_provider_order() -> List[str]:
     return ["python_magic", "file_command", "magika"]
 
 
+def get_provider_order() -> List[str]:
+    return _resolve_provider_order()
+
+
+def get_provider_status(order: Optional[Sequence[str]] = None) -> List[Dict[str, str]]:
+    provider_order = list(order) if order is not None else _resolve_provider_order()
+    status = []
+    for provider_name in provider_order:
+        if provider_name == "python_magic":
+            if importlib.util.find_spec("magic") is None:
+                status.append(
+                    {
+                        "provider": provider_name,
+                        "available": False,
+                        "reason": "python-magic is not installed",
+                    }
+                )
+            else:
+                status.append({"provider": provider_name, "available": True, "reason": ""})
+        elif provider_name == "file_command":
+            if not shutil.which("file"):
+                status.append(
+                    {
+                        "provider": provider_name,
+                        "available": False,
+                        "reason": "system command 'file' is missing",
+                    }
+                )
+            else:
+                status.append({"provider": provider_name, "available": True, "reason": ""})
+        elif provider_name == "magika":
+            if importlib.util.find_spec("magika") is None:
+                status.append(
+                    {
+                        "provider": provider_name,
+                        "available": False,
+                        "reason": "magika is not installed",
+                    }
+                )
+            else:
+                status.append({"provider": provider_name, "available": True, "reason": ""})
+        else:
+            status.append(
+                {
+                    "provider": provider_name,
+                    "available": False,
+                    "reason": "unknown provider",
+                }
+            )
+    return status
+
+
 def detect_mime(data: bytes, filename: Optional[str] = None) -> DetectionResult:
     errors: List[str] = []
     order = _resolve_provider_order()

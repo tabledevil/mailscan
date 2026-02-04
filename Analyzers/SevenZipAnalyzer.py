@@ -13,7 +13,8 @@ except ImportError:
 class SevenZipAnalyzer(Analyzer):
     compatible_mime_types = ['application/x-7z-compressed']
     description = "7Z-File analyser"
-    pip_dependencies = ['py7zr']
+    optional_pip_dependencies = ['py7zr']
+    extra = "7z"
     passwords = ["infected","Infected","iNFECTED","INFECTED"] # Add more common passwords if needed
 
     def analysis(self):
@@ -78,4 +79,3 @@ class SevenZipAnalyzer(Analyzer):
             self.reports['summary'] = Report('\n'.join(filelist))
         except Exception as e:
             logging.error(f"Failed to extract files from 7z archive: {e}")
-
