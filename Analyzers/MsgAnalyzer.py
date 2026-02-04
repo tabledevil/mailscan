@@ -10,7 +10,8 @@ except ImportError:
 class MsgAnalyzer(Analyzer):
     compatible_mime_types = ['application/vnd.ms-outlook']
     description = "MSG Email Analyzer"
-    pip_dependencies = ['extract-msg']
+    optional_pip_dependencies = [('extract_msg', 'extract-msg')]
+    extra = "msg"
 
     def analysis(self):
         super().analysis()

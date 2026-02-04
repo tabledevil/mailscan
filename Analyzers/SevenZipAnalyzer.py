@@ -1,9 +1,9 @@
 import logging
-import os
-import lzma
 from structure import Analyzer, Report
-from Utils.temp_manager import TempFileManager
 from Config.config import flags
+from Utils.temp_manager import TempFileManager
+import lzma
+import os
 
 try:
     import py7zr
@@ -13,8 +13,11 @@ except ImportError:
 class SevenZipAnalyzer(Analyzer):
     compatible_mime_types = ['application/x-7z-compressed']
     description = "7Z-File analyser"
-    pip_dependencies = ['py7zr']
-    passwords = ["infected","Infected","iNFECTED","INFECTED"] # Add more common passwords if needed
+    passwords = ["infected", "Infected", "iNFECTED", "INFECTED"]
+
+    # py7zr is required for this analyzer to work at all
+    optional_pip_dependencies = [('py7zr', 'py7zr')]
+    extra = "7z"
 
     def analysis(self):
         super().analysis()
@@ -78,4 +81,3 @@ class SevenZipAnalyzer(Analyzer):
             self.reports['summary'] = Report('\n'.join(filelist))
         except Exception as e:
             logging.error(f"Failed to extract files from 7z archive: {e}")
-

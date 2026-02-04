@@ -45,8 +45,13 @@ class Analyzer(object):
     description = "Generic Analyzer Class"
     modules = {}
     pip_dependencies = []
+    optional_pip_dependencies = []
     system_dependencies = []
     system_dependencies_check = {}
+    optional_system_dependencies = []
+    optional_system_dependencies_check = {}
+    required_alternatives = []
+    required_alternatives = []
 
     def __init__(self, struct) -> None:
         self.struct = struct
@@ -76,33 +81,103 @@ class Analyzer(object):
         Check if all dependencies for this analyzer are met.
         """
         # Check for pip dependencies
-        for package in cls.pip_dependencies:
-            try:
-                importlib.import_module(package)
-            except ImportError:
+        for import_name, package in cls._normalize_pip_dependencies(cls.pip_dependencies):
+            if importlib.util.find_spec(import_name) is None:
                 return False, f"Missing pip dependency: {package}"
 
-        # Check for system dependencies (simple check)
-        for command in cls.system_dependencies:
-            if not shutil.which(command):
-                return False, f"Missing system dependency: {command}"
+        # Check alternatives
+        for group in cls.required_alternatives:
+            group_met = False
+            normalized_group = cls._normalize_pip_dependencies(group)
+            for import_name, package in normalized_group:
+                if importlib.util.find_spec(import_name) is not None:
+                    group_met = True
+                    break
+            if not group_met:
+                group_desc = " OR ".join([pkg for _, pkg in normalized_group])
+                return False, f"Missing alternative dependency: {group_desc}"
 
-        # Perform enhanced system tool checks
-        for command, check_details in cls.system_dependencies_check.items():
-            if not shutil.which(command):
-                return False, f"Missing system dependency: {command}"
+        missing_required = cls._missing_system_dependencies(
+            cls.system_dependencies,
+            cls.system_dependencies_check,
+        )
+        if missing_required:
+            return False, missing_required[0]
 
+        return True, ""
+
+    @classmethod
+    def dependency_status(cls):
+        missing_required = []
+        missing_optional = []
+        missing_alternatives = []
+
+        for import_name, package in cls._normalize_pip_dependencies(cls.pip_dependencies):
+            if importlib.util.find_spec(import_name) is None:
+                missing_required.append(package)
+        for import_name, package in cls._normalize_pip_dependencies(cls.optional_pip_dependencies):
+            if importlib.util.find_spec(import_name) is None:
+                missing_optional.append(package)
+
+        # Check alternatives
+        for group in cls.required_alternatives:
+            group_met = False
+            normalized_group = cls._normalize_pip_dependencies(group)
+            for import_name, package in normalized_group:
+                if importlib.util.find_spec(import_name) is not None:
+                    group_met = True
+                    break
+            if not group_met:
+                group_desc = " OR ".join([pkg for _, pkg in normalized_group])
+                missing_alternatives.append(f"({group_desc})")
+
+        missing_required.extend(
+            cls._missing_system_dependencies(
+                cls.system_dependencies,
+                cls.system_dependencies_check,
+            )
+        )
+        missing_optional.extend(
+            cls._missing_system_dependencies(
+                cls.optional_system_dependencies,
+                cls.optional_system_dependencies_check,
+            )
+        )
+
+        return {
+            "missing_required": missing_required,
+            "missing_optional": missing_optional,
+            "missing_alternatives": missing_alternatives,
+        }
+
+    @staticmethod
+    def _normalize_pip_dependencies(dependencies):
+        normalized = []
+        for dependency in dependencies:
+            if isinstance(dependency, (tuple, list)) and len(dependency) == 2:
+                normalized.append((dependency[0], dependency[1]))
+            else:
+                normalized.append((str(dependency), str(dependency)))
+        return normalized
+
+    @staticmethod
+    def _missing_system_dependencies(commands, checks):
+        missing = []
+        for command in commands:
+            if not shutil.which(command):
+                missing.append(f"Missing system dependency: {command}")
+        for command, check_details in checks.items():
+            if not shutil.which(command):
+                missing.append(f"Missing system dependency: {command}")
+                continue
             try:
                 args = [command] + check_details['args']
                 result = subprocess.run(args, capture_output=True, text=True, check=False)
-
                 if check_details['expected_output'] not in result.stdout and check_details['expected_output'] not in result.stderr:
-                    return False, f"System dependency {command} is not working as expected."
-
+                    missing.append(f"System dependency {command} is not working as expected.")
             except (subprocess.SubprocessError, FileNotFoundError) as e:
-                return False, f"Error checking system dependency {command}: {e}"
-
-        return True, ""
+                missing.append(f"Error checking system dependency {command}: {e}")
+        return missing
 
     @staticmethod
     def get_analyzer(mimetype):

@@ -18,10 +18,19 @@ import os
 import re
 from functools import lru_cache
 
-import chardet
+try:
+    import chardet
+except ImportError:
+    chardet = None
 from Utils.filetype import detect_mime
-from dateutil.parser import parse
-from pytz import timezone
+try:
+    from dateutil.parser import parse
+except ImportError:
+    parse = None
+try:
+    from pytz import timezone
+except ImportError:
+    timezone = None
 
 
 def deprecated(fn):
@@ -87,7 +96,7 @@ class ReceivedParser(object):
         # Some headers avec envelop from after the ; :(
         if "envelope" in parts[1]:
             p = parts[1].split('(')[0].replace('\n', '')
-            data = {'timestamp': parse(p)}
+            data = {'timestamp': parse(p) if parse else None}
         else:
             data = {'timestamp': parse(parts[1].replace('\n', ''))}
 
@@ -288,6 +297,8 @@ class Eml(object):
 
     def get_date(self, tz='UTC'):
         """Get date of mail converted to timezone. Default is UTC."""
+        if not parse:
+            return None
         date = [parse(x, fuzzy=True) for x in self.get_header("Date")]
         if len(date) > 0:
             if not tz is None:
@@ -402,9 +413,13 @@ class Eml(object):
             return fulltext
         if isinstance(string, bytes):
             encodings = ['utf-8-sig', 'utf-16', 'iso-8859-15']
-            detection = chardet.detect(string)
-            if "encoding" in detection and len(detection["encoding"]) > 2:
-                encodings.insert(0,detection["encoding"])
+            if chardet:
+                try:
+                    detection = chardet.detect(string)
+                    if "encoding" in detection and len(detection["encoding"]) > 2:
+                        encodings.insert(0,detection["encoding"])
+                except Exception:
+                    pass
             for encoding in encodings:
                 try:
                     return string.decode(encoding)
@@ -412,6 +427,8 @@ class Eml(object):
                     pass
 
     def __convert_date_tz(self, datetime, tz='UTC'):
+        if not timezone:
+            return datetime
         return datetime.astimezone(tz=timezone(tz))
 
     def __struct_str(self,struct,pre_indent=0,index=0):
