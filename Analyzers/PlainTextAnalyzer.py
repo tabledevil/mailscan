@@ -21,9 +21,12 @@ except ImportError:
     lang_detect_exception = None
 
 try:
-    import chardet
+    import cchardet as chardet
 except ImportError:
-    chardet = None
+    try:
+        import chardet
+    except ImportError:
+        chardet = None
 
 try:
     import requests
@@ -103,6 +106,13 @@ class PlainTextAnalyzer(Analyzer):
         if isinstance(string, str):
             return string
         if isinstance(string, bytes):
+            try:
+                decoded = string.decode('utf-8')
+                self.reports['encoding'] = Report('utf-8')
+                return decoded
+            except UnicodeDecodeError:
+                pass
+
             encodings = ['utf-8-sig', 'utf-16', 'iso-8859-15']
             guessed_encodings = self.__guess_encoding(string)
             if guessed_encodings:
