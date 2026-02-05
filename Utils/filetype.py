@@ -46,10 +46,13 @@ class PythonMagicProvider(BaseProvider):
     def detect(self, data: bytes, filename: Optional[str] = None) -> DetectionResult:
         if importlib.util.find_spec("magic") is None:
             raise ProviderError("python-magic is not installed")
-        magic_module = importlib.import_module("magic")
-        mime = magic_module.from_buffer(data, mime=True)
-        description = magic_module.from_buffer(data)
-        return DetectionResult(mime=mime, description=description, provider=self.name)
+        try:
+            magic_module = importlib.import_module("magic")
+            mime = magic_module.from_buffer(data, mime=True)
+            description = magic_module.from_buffer(data)
+            return DetectionResult(mime=mime, description=description, provider=self.name)
+        except (ImportError, OSError) as e:
+            raise ProviderError(f"failed to load libmagic: {e}")
 
 
 class FileCommandProvider(BaseProvider):
@@ -99,10 +102,13 @@ class MagikaProvider(BaseProvider):
     def _get_instance(self):
         if importlib.util.find_spec("magika") is None:
             raise ProviderError("magika is not installed")
-        magika_module = importlib.import_module("magika")
-        if MagikaProvider._instance is None:
-            MagikaProvider._instance = magika_module.Magika()
-        return MagikaProvider._instance
+        try:
+            magika_module = importlib.import_module("magika")
+            if MagikaProvider._instance is None:
+                MagikaProvider._instance = magika_module.Magika()
+            return MagikaProvider._instance
+        except ImportError as e:
+            raise ProviderError(f"failed to import magika: {e}")
 
     @staticmethod
     def _read_attr(obj, *names):
@@ -113,7 +119,11 @@ class MagikaProvider(BaseProvider):
 
     def detect(self, data: bytes, filename: Optional[str] = None) -> DetectionResult:
         instance = self._get_instance()
-        prediction = instance.identify_bytes(data)
+        try:
+            prediction = instance.identify_bytes(data)
+        except Exception as e:
+             raise ProviderError(f"magika identification failed: {e}")
+
         output = self._read_attr(prediction, "output") or prediction
         mime = self._read_attr(output, "mime_type", "mime")
         label = self._read_attr(output, "label", "description")
@@ -158,16 +168,20 @@ def get_provider_status(order: Optional[Sequence[str]] = None) -> List[Dict[str,
     status = []
     for provider_name in provider_order:
         if provider_name == "python_magic":
+            available = False
+            reason = ""
             if importlib.util.find_spec("magic") is None:
-                status.append(
-                    {
-                        "provider": provider_name,
-                        "available": False,
-                        "reason": "python-magic is not installed",
-                    }
-                )
+                reason = "python-magic is not installed"
             else:
-                status.append({"provider": provider_name, "available": True, "reason": ""})
+                # Try to import it to check for libmagic binary
+                try:
+                    importlib.import_module("magic")
+                    available = True
+                except (ImportError, OSError) as e:
+                    reason = f"libmagic issue: {e}"
+
+            status.append({"provider": provider_name, "available": available, "reason": reason})
+
         elif provider_name == "file_command":
             if not shutil.which("file"):
                 status.append(
@@ -214,6 +228,9 @@ def detect_mime(data: bytes, filename: Optional[str] = None) -> DetectionResult:
         try:
             result = provider.detect(data, filename=filename)
             if errors:
+                # If we had errors before success, just return success.
+                # Or do we want to carry errors?
+                # The original code returned errors in result.errors
                 return DetectionResult(
                     mime=result.mime,
                     description=result.description,
@@ -223,16 +240,23 @@ def detect_mime(data: bytes, filename: Optional[str] = None) -> DetectionResult:
             return result
         except ProviderError as exc:
             message = f"{provider_name}: {exc}"
-            logging.warning(message)
+            # Downgrade log level to DEBUG if we have other providers to try
+            # But we don't know if next ones succeed.
+            # However, usually "provider not found" is expected in some envs.
+            logging.debug(message) # CHANGED from warning to debug to reduce noise
             errors.append(message)
         except Exception as exc:
             message = f"{provider_name}: unexpected error {exc}"
-            logging.exception(message)
+            logging.exception(message) # Keep exception for unexpected ones
             errors.append(message)
 
     guessed_mime, _ = mimetypes.guess_type(filename or "")
     fallback_mime = guessed_mime or "application/octet-stream"
     description = "Unknown"
+
+    # If we are falling back, we might want to log that providers failed if it wasn't just 'not installed'.
+    # But errors list contains the messages.
+
     return DetectionResult(
         mime=fallback_mime,
         description=description,
