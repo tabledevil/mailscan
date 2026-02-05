@@ -11,6 +11,7 @@ from Analyzers import *
 import sys
 import importlib.util
 from Utils import filetype
+from Utils.logger import setup_logging
 
 CORE_DEPENDENCIES = [
     ("chardet", "chardet"),
@@ -108,6 +109,9 @@ def main():
     parser.add_argument("--verbosity", help="Verbosity level (0-5)", type=int, default=0)
     
     args = parser.parse_args()
+
+    # Configure logging
+    setup_logging(verbosity=args.verbosity, debug=args.debug)
 
     if args.check:
         check_dependencies()
