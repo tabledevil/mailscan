@@ -94,7 +94,8 @@ class PlainTextAnalyzer(Analyzer):
                 logging.debug(f"Language detector {detector.__name__} failed: {e}")
 
         if resp is None:
-            logging.warning('No language Detection module installed or working. [pycld3, fasttext, langdetect]')
+            # Downgraded from warning to debug/info to reduce noise
+            logging.info('No language Detection module installed or working. [pycld3, fasttext, langdetect]')
         self.lang=resp
         self.reports['language'] = Report(resp)
 
