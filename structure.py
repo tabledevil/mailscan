@@ -3,7 +3,6 @@ import logging
 import os
 import textwrap
 import mimetypes
-import sys
 from reporting import ReportManager
 from Config.config import flags
 import importlib
@@ -214,17 +213,28 @@ from Analyzers import *
 class Structure(dict):
     _cache = {}
 
-    @classmethod
-    def create(cls, filename=None, data=None, mime_type=None, level=0, index=0):
-        # Determine the raw data to calculate the hash
+    @staticmethod
+    def _read_data(filename=None, data=None):
+        raw_data = None
         if data is None:
             if filename is not None and os.path.isfile(filename):
+                if os.path.getsize(filename) > flags.max_file_size:
+                    raise ValueError(f"File {filename} is too large.")
+                logging.debug(f'Reading file {os.path.abspath(filename)}')
                 with open(filename, 'rb') as f:
                     raw_data = f.read()
             else:
                 raise ValueError("No Data was supplied for struct")
         else:
+            if len(data) > flags.max_file_size:
+                raise ValueError("Data is too large.")
             raw_data = data
+        return raw_data
+
+    @classmethod
+    def create(cls, filename=None, data=None, mime_type=None, level=0, index=0):
+        # Determine the raw data to calculate the hash
+        raw_data = cls._read_data(filename, data)
 
         # Calculate hash
         sha256_hash = hashlib.sha256(raw_data).hexdigest()
@@ -239,7 +249,6 @@ class Structure(dict):
         new_struct = cls(filename=filename, data=raw_data, mime_type=mime_type, level=level, index=index)
         cls._cache[sha256_hash] = new_struct
         return new_struct
-
     def __getattr__(self, key):
         if key in self:
             return self[key]
@@ -270,23 +279,15 @@ class Structure(dict):
             return
 
         self.analyzer = None
-        if data is None:
-            if filename is not None and os.path.isfile(filename):
-                if os.path.getsize(filename) > flags.max_file_size:
-                    raise ValueError(f"File {filename} is too large.")
-                self.fullpath = os.path.abspath(filename)
-                self.__filename = os.path.split(self.fullpath)[1]
-                logging.debug(f'Reading file {self.fullpath}')
-                with open(self.fullpath, 'rb') as f:
-                    self.__rawdata = f.read()
-            else:
-                raise ValueError("No Data was supplied for struct")
 
+        self.__rawdata = self._read_data(filename, data)
+
+        if data is None and filename:
+             self.fullpath = os.path.abspath(filename)
+             self.__filename = os.path.split(self.fullpath)[1]
         else:
-            if len(data) > flags.max_file_size:
-                raise ValueError("Data is too large.")
-            self.__rawdata = data
-            self.__filename = filename if filename is not None else None
+             self.__filename = filename if filename is not None else None
+
         self.level = level
         self.index = index
         self.parent = None
@@ -294,7 +295,6 @@ class Structure(dict):
         self.type_mismatch = self.mime_type == self.magic
         self.__children = None
         self.analyzer = Analyzer.get_analyzer(self.mime_type)(self)
-
     @property
     def realfile(self):
         if os.path.isfile(self.filename):
