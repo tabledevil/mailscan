@@ -477,6 +477,13 @@ class Eml(object):
 
         return output
 
+    def get_csv(self):
+        subject = self.subject[0] if self.subject else ""
+        date = str(self.date)
+        from_ = ";".join(self.froms) if self.froms else ""
+        to = ";".join(self.tos) if self.tos else ""
+        return f'"{self.filename}","{subject}","{date}","{from_}","{to}"'
+
     def __init__(self, filename=None , data=None, hash_attachments=True):
         self.status = "new"
         if filename is None:
@@ -491,13 +498,13 @@ class Eml(object):
         try:
             self.header = self.get_eml().items()
             self.status = "processing_header"
-            self.froms = self.get_header("from")
-            self.tos = self.get_header("To")
-            self.ccs = self.get_header("CC")
-            self.subject = self.get_header("Subject")
-            self.id = self.get_header("Message-ID")
+            self.froms = list(self.get_header("from"))
+            self.tos = list(self.get_header("To"))
+            self.ccs = list(self.get_header("CC"))
+            self.subject = list(self.get_header("Subject"))
+            self.id = list(self.get_header("Message-ID"))
             self.date = self.get_date()
-            self.received = self.get_header("Received")
+            self.received = list(self.get_header("Received"))
             self.status = "processing_attachments"
             self.attachments = []
             self._struct = None
