@@ -19,15 +19,15 @@ class EmailAnalyzer(Analyzer):
         try:
             self.eml = Eml(filename=self.struct.filename, data=self.struct.rawdata)
             self.info = f'{",".join(self.eml.subject)}'
-            summary = ""
+            summary = []
             for f in self.eml.froms:
-                summary += f"From   : {f}\n"
+                summary.append(f"From   : {f}\n")
             for t in self.eml.tos:
-                summary += f"To     : {t}\n"
-                summary += f"Date   : {self.eml.date}\n"
+                summary.append(f"To     : {t}\n")
+                summary.append(f"Date   : {self.eml.date}\n")
             for s in self.eml.subject:
-                summary += f"Subject   : {s}\n"
-            self.reports['summary'] = Report(f'{summary}')
+                summary.append(f"Subject   : {s}\n")
+            self.reports['summary'] = Report("".join(summary))
         except ImportError as e:
             logging.warning(f"Could not parse email due to missing dependency: {e}")
         except Exception as e:
