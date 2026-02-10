@@ -29,13 +29,15 @@ def fdecode(string):
                 pass
 
 
+target_fields = set(field.lower() for field in args.field if field) if args.field is not None else None
+
 for file in args.infile:
     print(file.name)
     msg=email.message_from_binary_file(file)
     file.close()
 
     for (k,v) in msg.items():
-        if args.field is not None and k.lower() not in (field.lower() for field in args.field):
+        if target_fields is not None and k.lower() not in target_fields:
             continue
         for (string,encoding) in email.header.decode_header(v):
             if encoding != None and not encoding == "unknown-8bit":
