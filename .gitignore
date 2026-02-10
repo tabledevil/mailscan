@@ -3,6 +3,7 @@ __pycache__
 #ignore outputs
 sender.txt
 mails.csv
+mailscan.log
 #ignore ide-files
 .idea
 .vscode
