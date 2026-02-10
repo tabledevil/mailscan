@@ -37,7 +37,7 @@ class EmailAnalyzer(Analyzer):
     def extract_parts(self):
         if not hasattr(self, 'eml'):
             return
-        for idx, part in enumerate([x for x in self.eml.flat_struct if x['data']]):
+        for idx, part in enumerate(x for x in self.eml.flat_struct if x['data']):
             self.childitems.append(self.generate_struct(filename=part['filename'], data=part['data'], mime_type=part['content_type'], index=idx))
 
     def analysis(self):
