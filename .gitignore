@@ -4,6 +4,9 @@ __pycache__
 sender.txt
 mails.csv
 mailscan.log
+extract/
+tmp/
+*.tmp
 #ignore ide-files
 .idea
 .vscode
