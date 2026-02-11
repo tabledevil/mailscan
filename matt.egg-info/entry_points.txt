@@ -1,0 +1,2 @@
+[console_scripts]
+matt = matt:main
