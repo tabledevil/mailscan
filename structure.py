@@ -98,22 +98,28 @@ class Analyzer(object):
 
         missing_required = cls._missing_system_dependencies(
             cls.system_dependencies,
-            cls.system_dependencies_check,
+            cls.system_dependencies_check
         )
         if missing_required:
-            return False, missing_required[0]
+            return False, "; ".join(missing_required)
 
-        return True, ""
+        return True, "Available"
 
     @classmethod
     def dependency_status(cls):
+        """
+        Check dependencies for this analyzer.
+        Returns a dict with 'missing_required', 'missing_optional', 'missing_alternatives'.
+        """
         missing_required = []
         missing_optional = []
         missing_alternatives = []
 
+        # Check pip dependencies
         for import_name, package in cls._normalize_pip_dependencies(cls.pip_dependencies):
             if importlib.util.find_spec(import_name) is None:
                 missing_required.append(package)
+
         for import_name, package in cls._normalize_pip_dependencies(cls.optional_pip_dependencies):
             if importlib.util.find_spec(import_name) is None:
                 missing_optional.append(package)
@@ -127,21 +133,18 @@ class Analyzer(object):
                     group_met = True
                     break
             if not group_met:
-                group_desc = " OR ".join([pkg for _, pkg in normalized_group])
-                missing_alternatives.append(f"({group_desc})")
+                    group_desc = " OR ".join([pkg for _, pkg in normalized_group])
+                    missing_alternatives.append(group_desc)
 
-        missing_required.extend(
-            cls._missing_system_dependencies(
-                cls.system_dependencies,
-                cls.system_dependencies_check,
-            )
-        )
-        missing_optional.extend(
-            cls._missing_system_dependencies(
-                cls.optional_system_dependencies,
-                cls.optional_system_dependencies_check,
-            )
-        )
+
+        # Check system dependencies
+        missing_sys = cls._missing_system_dependencies(cls.system_dependencies, cls.system_dependencies_check)
+        for msg in missing_sys:
+            missing_required.append(msg)
+
+        missing_opt_sys = cls._missing_system_dependencies(cls.optional_system_dependencies, cls.optional_system_dependencies_check)
+        for msg in missing_opt_sys:
+            missing_optional.append(msg)
 
         return {
             "missing_required": missing_required,
@@ -191,7 +194,7 @@ class Analyzer(object):
         return Analyzer
 
     def generate_struct(self, data, filename=None, index=0, mime_type=None):
-        return Structure.create(data=data, filename=filename, level=self.struct.level + 1, index=index,mime_type=mime_type)
+        return Structure.create(data=data, filename=filename, level=self.struct.level + 1, index=index,mime_type=mime_type, context=self.struct.context)
 
     @property
     def summary(self):
@@ -232,7 +235,7 @@ class Structure(dict):
         return raw_data
 
     @classmethod
-    def create(cls, filename=None, data=None, mime_type=None, level=0, index=0):
+    def create(cls, filename=None, data=None, mime_type=None, level=0, index=0, context=None):
         # Determine the raw data to calculate the hash
         raw_data = cls._read_data(filename, data)
 
@@ -246,7 +249,7 @@ class Structure(dict):
             return cls._cache[sha256_hash]
 
         # If not in cache, create a new one and cache it
-        new_struct = cls(filename=filename, data=raw_data, mime_type=mime_type, level=level, index=index)
+        new_struct = cls(filename=filename, data=raw_data, mime_type=mime_type, level=level, index=index, context=context)
         cls._cache[sha256_hash] = new_struct
         return new_struct
     def __getattr__(self, key):
@@ -269,7 +272,7 @@ class Structure(dict):
     def __setattr__(self, name, value):
         self[name] = value
 
-    def __init__(self, filename=None, data=None, mime_type=None, level=0, index=0) -> None:
+    def __init__(self, filename=None, data=None, mime_type=None, level=0, index=0, context=None) -> None:
         if flags.debug:
             logging.getLogger() .setLevel(logging.DEBUG)
 
@@ -279,6 +282,12 @@ class Structure(dict):
             return
 
         self.analyzer = None
+
+        if context is None:
+            from Config.passwords import DEFAULT_PASSWORDS
+            self.context = {'passwords': set(DEFAULT_PASSWORDS)}
+        else:
+            self.context = context
 
         self.__rawdata = self._read_data(filename, data)
 
