@@ -107,21 +107,24 @@ class PlainTextAnalyzer(Analyzer):
             return string
         if isinstance(string, bytes):
             try:
-                decoded = string.decode('utf-8')
-                self.reports['encoding'] = Report('utf-8')
+                decoded = string.decode('utf-8-sig')
+                self.reports['encoding'] = Report('utf-8-sig')
                 return decoded
             except UnicodeDecodeError:
                 pass
 
-            encodings = ['utf-8-sig', 'utf-16', 'iso-8859-15']
+            encodings = ['utf-16', 'iso-8859-15']
             guessed_encodings = self.__guess_encoding(string)
             if guessed_encodings:
                 encodings = guessed_encodings + encodings
             for encoding in encodings:
                 try:
-                    return string.decode(encoding, errors='ignore')
-                except UnicodeDecodeError:
+                    return string.decode(encoding)
+                except (UnicodeDecodeError, LookupError):
                     pass
+
+            # Best effort fallback
+            return string.decode('utf-8', errors='replace')
         return ""
 
     def __guess_encoding(self, string):

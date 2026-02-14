@@ -412,19 +412,28 @@ class Eml(object):
                     fulltext+=text
             return fulltext
         if isinstance(string, bytes):
-            encodings = ['utf-8-sig', 'utf-16', 'iso-8859-15']
+            try:
+                return string.decode('utf-8-sig')
+            except UnicodeDecodeError:
+                pass
+
+            encodings = ['utf-16', 'iso-8859-15']
             if chardet:
                 try:
                     detection = chardet.detect(string)
-                    if "encoding" in detection and len(detection["encoding"]) > 2:
+                    if "encoding" in detection and detection["encoding"] and len(detection["encoding"]) > 2:
                         encodings.insert(0,detection["encoding"])
                 except Exception:
                     pass
+
             for encoding in encodings:
                 try:
                     return string.decode(encoding)
-                except UnicodeDecodeError:
+                except (UnicodeDecodeError, LookupError):
                     pass
+
+            # Best effort fallback
+            return string.decode('utf-8', errors='replace')
 
     def __convert_date_tz(self, datetime, tz='UTC'):
         if not timezone:
