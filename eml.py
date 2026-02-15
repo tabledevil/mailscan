@@ -10,6 +10,7 @@ In the Future these objects are supposed to be items in searchable catalogue.
 
 @author tke
 """
+import logging
 import email
 import hashlib
 import inspect
@@ -477,6 +478,13 @@ class Eml(object):
 
         return output
 
+    def get_csv(self):
+        subject = self.subject[0] if self.subject else ""
+        date = str(self.date)
+        from_ = ";".join(self.froms) if self.froms else ""
+        to = ";".join(self.tos) if self.tos else ""
+        return f'"{self.filename}","{subject}","{date}","{from_}","{to}"'
+
     def __init__(self, filename=None , data=None, hash_attachments=True):
         self.status = "new"
         if filename is None:
@@ -491,13 +499,13 @@ class Eml(object):
         try:
             self.header = self.get_eml().items()
             self.status = "processing_header"
-            self.froms = self.get_header("from")
-            self.tos = self.get_header("To")
-            self.ccs = self.get_header("CC")
-            self.subject = self.get_header("Subject")
-            self.id = self.get_header("Message-ID")
+            self.froms = list(self.get_header("from"))
+            self.tos = list(self.get_header("To"))
+            self.ccs = list(self.get_header("CC"))
+            self.subject = list(self.get_header("Subject"))
+            self.id = list(self.get_header("Message-ID"))
             self.date = self.get_date()
-            self.received = self.get_header("Received")
+            self.received = list(self.get_header("Received"))
             self.status = "processing_attachments"
             self.attachments = []
             self._struct = None
@@ -514,23 +522,14 @@ def create_newmail(filename):
 
 def scan_folder(basepath):
     list_of_mail = []
-    base_count = len(basepath.split(os.sep)) - 1
     if os.path.isfile(basepath):
         e = Eml(basepath)
         print(e)
     else:
         with mp.Pool(processes=mp.cpu_count()) as pool:
-
-            for root, dirs, files in os.walk(basepath):
-                path = root.split(os.sep)
-                relpath = os.sep.join(root.split(os.sep)[base_count:])
-                new_mails = pool.map(create_newmail, [root + os.sep + s for s in files])
-                list_of_mail.extend(new_mails)
-
-        pool.close()
-        pool.join()
+            file_gen = (os.path.join(root, s) for root, _, files in os.walk(basepath) for s in files)
+            list_of_mail = list(pool.imap(create_newmail, file_gen))
     return list_of_mail
-
 
 
 if __name__ == '__main__':
