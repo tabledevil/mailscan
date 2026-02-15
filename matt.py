@@ -6,6 +6,7 @@ import structure
 import logging
 import mimetypes
 from Config.config import flags
+from Config.passwords import DEFAULT_PASSWORDS
 from structure import Analyzer
 from Analyzers import *
 import sys
@@ -113,6 +114,9 @@ def main():
     # Configure logging
     setup_logging(verbosity=args.verbosity, debug=args.debug)
 
+    # Initialize shared context for passwords
+    shared_context = {'passwords': set(DEFAULT_PASSWORDS)}
+
     if args.check:
         check_dependencies()
     
@@ -123,12 +127,11 @@ def main():
         sys.exit(1)
 
     for f in args.files:
-        fpath=os.path.join(path,f)
         if not os.path.isfile(f):
             logging.warning(f"skipping {f} : not a file")
             continue
 
-        s = structure.Structure.create(filename=f,mime_type=mimetypes.guess_type(f,strict=False)[0])
+        s = structure.Structure.create(filename=f, mime_type=mimetypes.guess_type(f,strict=False)[0], context=shared_context)
         print(s.get_report(report_format=args.format, verbosity=args.verbosity))
         if args.extract:
             s.extract(basepath=args.out_dir,filenames=args.filenames,recursive=True)

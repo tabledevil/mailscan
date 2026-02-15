@@ -1,0 +1,152 @@
+Metadata-Version: 2.4
+Name: matt
+Version: 0.1.0
+Summary: Mail Analysis and Triage Tool
+Home-page: https://github.com/your/repo
+Author: Your Name
+Author-email: your.email@example.com
+Classifier: Programming Language :: Python :: 3
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Operating System :: OS Independent
+Requires-Python: >=3.6
+Description-Content-Type: text/markdown
+Requires-Dist: chardet
+Requires-Dist: python-dateutil
+Requires-Dist: pytz
+Provides-Extra: pdf
+Requires-Dist: PyPDF2; extra == "pdf"
+Requires-Dist: pdf2image; extra == "pdf"
+Provides-Extra: html
+Requires-Dist: beautifulsoup4; extra == "html"
+Requires-Dist: lxml; extra == "html"
+Provides-Extra: msg
+Requires-Dist: extract-msg; extra == "msg"
+Provides-Extra: 7z
+Requires-Dist: py7zr; extra == "7z"
+Provides-Extra: lang
+Requires-Dist: pycld3; extra == "lang"
+Requires-Dist: fasttext; extra == "lang"
+Requires-Dist: langdetect; extra == "lang"
+Requires-Dist: requests; extra == "lang"
+Provides-Extra: mime
+Requires-Dist: python-magic; extra == "mime"
+Requires-Dist: magika; extra == "mime"
+Provides-Extra: all
+Requires-Dist: PyPDF2; extra == "all"
+Requires-Dist: beautifulsoup4; extra == "all"
+Requires-Dist: extract-msg; extra == "all"
+Requires-Dist: fasttext; extra == "all"
+Requires-Dist: langdetect; extra == "all"
+Requires-Dist: lxml; extra == "all"
+Requires-Dist: magika; extra == "all"
+Requires-Dist: pdf2image; extra == "all"
+Requires-Dist: py7zr; extra == "all"
+Requires-Dist: pycld3; extra == "all"
+Requires-Dist: python-magic; extra == "all"
+Requires-Dist: requests; extra == "all"
+Dynamic: author
+Dynamic: author-email
+Dynamic: classifier
+Dynamic: description
+Dynamic: description-content-type
+Dynamic: home-page
+Dynamic: provides-extra
+Dynamic: requires-dist
+Dynamic: requires-python
+Dynamic: summary
+
+# MATT: Mail Analysis and Triage Tool
+
+MATT is a modular file analysis tool designed to dissect and extract information from various file types, with a primary focus on email files.
+
+## Overall Flow
+
+The system is designed as a modular file analysis tool. The main entry point is `matt.py`, which is a command-line script that takes one or more files as input.
+
+Here's the general flow:
+
+1.  **Initialization:** `matt.py` takes a file path from the command line.
+
+2.  **Structure Creation:** For each file, it creates a `Structure` object (from `structure.py`). The `Structure` object is the central data container for a file and its analysis results. It reads the raw data of the file and determines its MIME type using the `python-magic` library.
+
+3.  **Analyzer Selection:** The `Structure` object then uses the `Analyzer.get_analyzer(mimetype)` method to find a suitable analyzer for the file's MIME type. The system looks through all the available `Analyzer` subclasses (defined in the `Analyzers/` directory) and finds one that lists the file's MIME type in its `compatible_mime_types` list.
+
+4.  **Analysis:** Once the correct analyzer is found, it's instantiated. The analyzer's `analysis()` method is called, which in turn runs various analysis modules. For example, the `EmailAnalyzer` will use the `eml.py` module to parse the email's headers and structure.
+
+5.  **Report Generation:** During analysis, the analyzer populates the `Structure` object with reports and information it discovers. For example, the `EmailAnalyzer` adds reports for the sender, recipient, and subject of the email.
+
+6.  **Handling of Nested Files:** If the analyzer finds nested files (like email attachments or files in a zip archive), it creates new `Structure` objects for each of them. These children are then analyzed recursively in the same way, creating a hierarchical structure.
+
+7.  **Output:** Finally, `matt.py` calls the `get_report()` method on the top-level `Structure` object. This method generates a formatted, indented report of all the information gathered from the file and its children. If the `--extract` flag is used, the `extract()` method is called to save all the parts of the file (e.g., email attachments) to disk.
+
+In essence, the system uses a flexible, modular design where `Structure` objects represent files and `Analyzer` objects are responsible for processing them based on their type. This makes it easy to extend the tool by simply adding new analyzer classes for different file types.
+
+## Usage
+
+To analyze one or more files, run `matt.py` with the file paths as arguments:
+
+```bash
+python3 matt.py <file1> <file2> ...
+```
+
+You can use the `-x` or `--extract` flag to extract all parts of the file (e.g., email attachments) into a directory named `extract` in the current working directory.
+
+```bash
+python3 matt.py -x <file>
+```
+
+## Dependencies
+
+Install the core dependencies (required for basic analysis) with pip:
+
+```bash
+pip install .
+```
+
+If you are installing in an offline environment, you can use:
+
+```bash
+pip install . --no-build-isolation
+```
+
+This project uses the legacy `setup.py` build to avoid build-time downloads in restricted environments.
+
+Optional features are provided via extras. For example:
+
+```bash
+pip install .[all]
+```
+
+Available extras include `pdf`, `html`, `msg`, `7z`, `lang`, and `mime`. You can also check what is missing on your system with:
+
+```bash
+matt --check
+```
+
+For mbox analysis, the standard library `mailbox` module is used and requires no extra dependencies.
+
+**Note:** The `python-magic` library depends on the `libmagic` library. You may need to install it using your system's package manager. For example, on Debian/Ubuntu:
+
+```bash
+sudo apt-get install libmagic1
+```
+
+## Cloud Testing With Sample Files
+
+The repository keeps encrypted sample archives in `testfiles/` so cloud runners can execute reproducible tests without storing extracted payloads in Git.
+
+Run corpus tests:
+
+```bash
+python -m unittest discover -s tests -p "test_*.py"
+```
+
+Optional decryption test (for environments like Jules) requires a secret:
+
+- `SAMPLE_ZIP_PASSWORD`: password for encrypted ZIP samples (commonly `infected`)
+
+Example:
+
+```bash
+SAMPLE_ZIP_PASSWORD=infected python -m unittest discover -s tests -p "test_*.py"
+```

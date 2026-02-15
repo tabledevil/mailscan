@@ -37,7 +37,18 @@ class EmailAnalyzer(Analyzer):
     def extract_parts(self):
         if not hasattr(self, 'eml'):
             return
-        for idx, part in enumerate(x for x in self.eml.flat_struct if x['data']):
+
+        # Collect all parts
+        parts = list(x for x in self.eml.flat_struct if x['data'])
+
+        # Split into text and others
+        text_parts = [p for p in parts if p.get('content_type', '').startswith('text/')]
+        other_parts = [p for p in parts if not p.get('content_type', '').startswith('text/')]
+
+        # Process text parts first to allow password harvesting
+        sorted_parts = text_parts + other_parts
+
+        for idx, part in enumerate(sorted_parts):
             self.childitems.append(self.generate_struct(filename=part['filename'], data=part['data'], mime_type=part['content_type'], index=idx))
 
     def analysis(self):
