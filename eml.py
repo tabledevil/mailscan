@@ -10,6 +10,7 @@ In the Future these objects are supposed to be items in searchable catalogue.
 
 @author tke
 """
+import logging
 import email
 import hashlib
 import inspect
@@ -521,23 +522,14 @@ def create_newmail(filename):
 
 def scan_folder(basepath):
     list_of_mail = []
-    base_count = len(basepath.split(os.sep)) - 1
     if os.path.isfile(basepath):
         e = Eml(basepath)
         print(e)
     else:
         with mp.Pool(processes=mp.cpu_count()) as pool:
-
-            for root, dirs, files in os.walk(basepath):
-                path = root.split(os.sep)
-                relpath = os.sep.join(root.split(os.sep)[base_count:])
-                new_mails = pool.map(create_newmail, [root + os.sep + s for s in files])
-                list_of_mail.extend(new_mails)
-
-        pool.close()
-        pool.join()
+            file_gen = (os.path.join(root, s) for root, _, files in os.walk(basepath) for s in files)
+            list_of_mail = list(pool.imap(create_newmail, file_gen))
     return list_of_mail
-
 
 
 if __name__ == '__main__':
