@@ -1,0 +1,27 @@
+import logging
+from structure import Analyzer, Report
+
+try:
+    from bs4 import BeautifulSoup as bs
+except ImportError:
+    bs = None
+
+class HTMLAnalyzer(Analyzer):
+    compatible_mime_types = ['text/html']
+    description = 'HTML Analyser'
+    optional_pip_dependencies = [('bs4', 'beautifulsoup4'), ('lxml', 'lxml')]
+    extra = "html"
+
+    def analysis(self):
+        super().analysis()
+        if not bs:
+            logging.warning("BeautifulSoup4 is not installed, cannot analyze HTML.")
+            return
+        self.soup = bs(self.struct.rawdata, features="lxml")
+        self.text = self.soup.getText()
+        self.info = len(self.soup.contents)
+
+    def get_childitems(self) -> list():
+        if hasattr(self, 'text'):
+            return [self.generate_struct(data=self.text.encode(), mime_type="text/plain")]
+        return []

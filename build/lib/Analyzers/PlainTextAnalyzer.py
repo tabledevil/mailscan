@@ -76,7 +76,7 @@ class PlainTextAnalyzer(Analyzer):
         language = max(set(predictions), key=predictions.count).replace('__label__', '')
         self.reports['lang_fasttext']=Report(f'{language}')
         return language
-    
+
     def __detect_language_langdetect(self):
         if not detect: return None
         try:
@@ -142,9 +142,6 @@ class PlainTextAnalyzer(Analyzer):
                 words=[word for word in match.group('words').split() if len(word) > 3]
                 if len(words) > 0 :
                     self.reports['possible_passwords'] = Report(",".join(words))
-                    if hasattr(self.struct, 'context') and self.struct.context and 'passwords' in self.struct.context:
-                        self.struct.context['passwords'].update(words)
-                        logging.info(f"Updated shared password list with: {words}")
 
     def decode(self):
         self.text = self.__decode(self.struct.rawdata)

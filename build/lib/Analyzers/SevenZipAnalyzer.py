@@ -25,16 +25,6 @@ class SevenZipAnalyzer(Analyzer):
             logging.warning("py7zr is not installed, cannot analyze 7z files.")
             return
 
-        # Add shared passwords from context
-        local_passwords = list(self.passwords)
-        if hasattr(self.struct, 'context') and self.struct.context and 'passwords' in self.struct.context:
-             for pwd in self.struct.context['passwords']:
-                 if pwd not in local_passwords:
-                     local_passwords.append(pwd)
-
-        # DEBUG LOG
-        # logging.warning(f"7Z PASSWORDS AVAILABLE: {local_passwords}")
-
         with TempFileManager() as temp_manager:
             tmp_file_path = temp_manager.create_temp_file(self.struct.rawdata)
 
@@ -52,22 +42,20 @@ class SevenZipAnalyzer(Analyzer):
                 return
 
             if password_protected:
-                self.try_passwords(tmp_file_path, local_passwords)
+                self.try_passwords(tmp_file_path)
 
-    def try_passwords(self, filepath, password_list):
-        for password in password_list:
+    def try_passwords(self, filepath):
+        for password in self.passwords:
             try:
-                with py7zr.SevenZipFile(filepath, 'r', password=password) as archive:
+                with py7zr.SevenZipFile(filepath, 'r', password=password.encode()) as archive:
                     self.reports['password'] = Report(password)
                     self.extract_files(archive)
-                    return
+                    return # Exit after first successful password
             except lzma.LZMAError:
-                pass
+                logging.debug(f"Wrong password for 7z file: {password}")
             except py7zr.exceptions.Bad7zFile:
-                 pass
-            except Exception as e:
-                 pass
-
+                 logging.warning(f"Bad 7z file with password {password}, could not open.")
+                 return
         logging.warning("Could not guess password for 7z file.")
 
     def extract_files(self, archive):
