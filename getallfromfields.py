@@ -24,7 +24,7 @@ if __name__ == '__main__':
         e=Eml(basepath)
         print(e)
     else:
-        with mp.Pool(processes=4) as pool:
+        with mp.Pool(processes=mp.cpu_count()) as pool:
             for mail in pool.imap(create_newmail, get_files(basepath)):
                 if "done" in mail.status:
                     print(mail.get_csv())
