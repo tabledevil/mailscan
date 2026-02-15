@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import functools
 import importlib
 import importlib.util
 import logging
@@ -148,6 +149,7 @@ def _parse_provider_order(value: Optional[object]) -> Optional[List[str]]:
     return [item.strip() for item in str(value).split(",") if item.strip()]
 
 
+@functools.lru_cache(maxsize=None)
 def _resolve_provider_order() -> List[str]:
     env_value = os.getenv("MAILSCAN_MIME_PROVIDER_ORDER")
     order = _parse_provider_order(getattr(flags, "mime_provider_order", None))
