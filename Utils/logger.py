@@ -1,17 +1,17 @@
+"""Logging setup for MATT."""
+
 import logging
 import sys
-import os
 
-def setup_logging(verbosity=0, debug=False, log_file="mailscan.log"):
-    """
-    Configures the root logger with console and file handlers.
+
+def setup_logging(verbosity=0, debug=False, log_file=None):
+    """Configure the ``matt`` logger with console and optional file handlers.
 
     Args:
-        verbosity (int): Verbosity level (0-5).
-        debug (bool): If True, enables debug logging.
-        log_file (str): Path to log file.
+        verbosity: 0 = WARNING, 1 = INFO, 2+ = DEBUG.
+        debug:     If True, force DEBUG level.
+        log_file:  Path to a log file.  ``None`` disables file logging.
     """
-    # Determine base logging level
     if debug or verbosity >= 2:
         level = logging.DEBUG
     elif verbosity == 1:
@@ -19,39 +19,40 @@ def setup_logging(verbosity=0, debug=False, log_file="mailscan.log"):
     else:
         level = logging.WARNING
 
-    root_logger = logging.getLogger()
-    root_logger.setLevel(logging.DEBUG)  # Set root to DEBUG to allow handlers to filter
+    # Use a named logger so third-party noise (chardet, urllib3, PIL …)
+    # stays at WARNING unless the user explicitly wants root-level debug.
+    matt_logger = logging.getLogger("matt")
+    matt_logger.setLevel(logging.DEBUG)
 
-    # Remove existing handlers
-    if root_logger.handlers:
-        for handler in root_logger.handlers[:]:
-            root_logger.removeHandler(handler)
+    # Remove existing handlers (in case setup_logging is called twice)
+    for handler in matt_logger.handlers[:]:
+        matt_logger.removeHandler(handler)
 
-    # Console Handler (Stderr)
-    console_handler = logging.StreamHandler(sys.stderr)
-    console_handler.setLevel(level)
-
-    # Simpler formatter for console
-    console_formatter = logging.Formatter(
-        '%(asctime)s | %(levelname)-8s | %(name)s | %(message)s',
-        datefmt='%H:%M:%S'
-    )
-    console_handler.setFormatter(console_formatter)
-    root_logger.addHandler(console_handler)
-
-    # File Handler
-    try:
-        # Ensure directory exists? Current dir is assumed writable.
-        file_handler = logging.FileHandler(log_file, mode='a', encoding='utf-8')
-        # File always logs at least INFO, or DEBUG if requested
-        file_level = logging.DEBUG if debug or verbosity >= 1 else logging.INFO
-        file_handler.setLevel(file_level)
-
-        file_formatter = logging.Formatter(
-            '%(asctime)s - %(levelname)s - %(name)s - %(module)s:%(lineno)d - %(message)s'
+    # --- Console handler (stderr) ---
+    console = logging.StreamHandler(sys.stderr)
+    console.setLevel(level)
+    console.setFormatter(
+        logging.Formatter(
+            "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+            datefmt="%H:%M:%S",
         )
-        file_handler.setFormatter(file_formatter)
-        root_logger.addHandler(file_handler)
-    except Exception as e:
-        # Use basic print since logger is not fully set up
-        sys.stderr.write(f"Warning: Failed to setup log file '{log_file}': {e}\n")
+    )
+    matt_logger.addHandler(console)
+
+    # --- File handler (optional) ---
+    if log_file:
+        try:
+            fh = logging.FileHandler(log_file, mode="a", encoding="utf-8")
+            fh.setLevel(logging.DEBUG if debug else logging.INFO)
+            fh.setFormatter(
+                logging.Formatter(
+                    "%(asctime)s - %(levelname)s - %(name)s - %(module)s:%(lineno)d - %(message)s"
+                )
+            )
+            matt_logger.addHandler(fh)
+        except Exception as e:
+            sys.stderr.write(f"Warning: Failed to setup log file '{log_file}': {e}\n")
+
+    # Suppress noisy third-party loggers
+    for noisy in ("chardet", "charset_normalizer", "urllib3", "PIL", "magika"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
