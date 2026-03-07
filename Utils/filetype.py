@@ -43,10 +43,34 @@ class BaseProvider:
 
 class PythonMagicProvider(BaseProvider):
     name = "python_magic"
+    _verified: Optional[bool] = None  # None = untested, True = works, False = broken
+
+    @classmethod
+    def _smoke_test(cls) -> bool:
+        """Run magic.from_buffer in a subprocess to detect segfaults."""
+        if cls._verified is not None:
+            return cls._verified
+        try:
+            result = subprocess.run(
+                [
+                    "python",
+                    "-c",
+                    "import magic; print(magic.from_buffer(b'hello', mime=True))",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            cls._verified = result.returncode == 0
+        except Exception:
+            cls._verified = False
+        return cls._verified
 
     def detect(self, data: bytes, filename: Optional[str] = None) -> DetectionResult:
         if importlib.util.find_spec("magic") is None:
             raise ProviderError("python-magic is not installed")
+        if not self._smoke_test():
+            raise ProviderError("python-magic/libmagic is broken (segfault detected)")
         try:
             magic_module = importlib.import_module("magic")
             mime = magic_module.from_buffer(data, mime=True)
@@ -80,18 +104,18 @@ class FileCommandProvider(BaseProvider):
     def detect(self, data: bytes, filename: Optional[str] = None) -> DetectionResult:
         mime_proc = self._run(["file", "--mime-type", "--brief", "-"], data)
         if mime_proc.returncode != 0:
-            stderr = mime_proc.stderr.decode('utf-8', errors='replace').strip()
+            stderr = mime_proc.stderr.decode("utf-8", errors="replace").strip()
             raise ProviderError(f"file command failed: {stderr or 'unknown error'}")
-        mime = mime_proc.stdout.decode('utf-8', errors='replace').strip()
+        mime = mime_proc.stdout.decode("utf-8", errors="replace").strip()
 
         description = ""
         desc_proc = self._run(["file", "--brief", "-"], data)
         if desc_proc.returncode == 0:
-            description = desc_proc.stdout.decode('utf-8', errors='replace').strip()
+            description = desc_proc.stdout.decode("utf-8", errors="replace").strip()
         else:
             logging.warning(
                 "file command description failed: %s",
-                desc_proc.stderr.decode('utf-8', errors='replace').strip() or "unknown error",
+                desc_proc.stderr.decode("utf-8", errors="replace").strip() or "unknown error",
             )
         return DetectionResult(mime=mime, description=description, provider=self.name)
 
@@ -123,7 +147,7 @@ class MagikaProvider(BaseProvider):
         try:
             prediction = instance.identify_bytes(data)
         except Exception as e:
-             raise ProviderError(f"magika identification failed: {e}")
+            raise ProviderError(f"magika identification failed: {e}")
 
         output = self._read_attr(prediction, "output") or prediction
         mime = self._read_attr(output, "mime_type", "mime")
@@ -136,7 +160,9 @@ class MagikaProvider(BaseProvider):
 
 _PROVIDERS: Dict[str, BaseProvider] = {
     PythonMagicProvider.name: PythonMagicProvider(),
-    FileCommandProvider.name: FileCommandProvider(timeout_s=getattr(flags, "mime_file_command_timeout", 2.0)),
+    FileCommandProvider.name: FileCommandProvider(
+        timeout_s=getattr(flags, "mime_file_command_timeout", 2.0)
+    ),
     MagikaProvider.name: MagikaProvider(),
 }
 
@@ -174,13 +200,10 @@ def get_provider_status(order: Optional[Sequence[str]] = None) -> List[Dict[str,
             reason = ""
             if importlib.util.find_spec("magic") is None:
                 reason = "python-magic is not installed"
+            elif not PythonMagicProvider._smoke_test():
+                reason = "python-magic/libmagic is broken (segfault or import failure)"
             else:
-                # Try to import it to check for libmagic binary
-                try:
-                    importlib.import_module("magic")
-                    available = True
-                except (ImportError, OSError) as e:
-                    reason = f"libmagic issue: {e}"
+                available = True
 
             status.append({"provider": provider_name, "available": available, "reason": reason})
 
@@ -245,11 +268,11 @@ def detect_mime(data: bytes, filename: Optional[str] = None) -> DetectionResult:
             # Downgrade log level to DEBUG if we have other providers to try
             # But we don't know if next ones succeed.
             # However, usually "provider not found" is expected in some envs.
-            logging.debug(message) # CHANGED from warning to debug to reduce noise
+            logging.debug(message)  # CHANGED from warning to debug to reduce noise
             errors.append(message)
         except Exception as exc:
             message = f"{provider_name}: unexpected error {exc}"
-            logging.exception(message) # Keep exception for unexpected ones
+            logging.exception(message)  # Keep exception for unexpected ones
             errors.append(message)
 
     guessed_mime, _ = mimetypes.guess_type(filename or "")

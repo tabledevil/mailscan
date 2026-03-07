@@ -4,9 +4,21 @@ __pycache__
 sender.txt
 mails.csv
 mailscan.log
+extract/
+tmp/
+*.tmp
 #ignore ide-files
 .idea
 .vscode
+#ignore claude settings
+.claude/
+#ignore build artifacts
+build/
+dist/
+*.egg-info/
+*.egg-link
 #ignore testfiles
 *.eml
 test.*
+#ignore the NUL device artifact
+NUL

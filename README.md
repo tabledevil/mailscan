@@ -73,3 +73,23 @@ For mbox analysis, the standard library `mailbox` module is used and requires no
 ```bash
 sudo apt-get install libmagic1
 ```
+
+## Cloud Testing With Sample Files
+
+The repository keeps encrypted sample archives in `testfiles/` so cloud runners can execute reproducible tests without storing extracted payloads in Git.
+
+Run corpus tests:
+
+```bash
+python -m unittest discover -s tests -p "test_*.py"
+```
+
+Optional decryption test (for environments like Jules) requires a secret:
+
+- `SAMPLE_ZIP_PASSWORD`: password for encrypted ZIP samples (commonly `infected`)
+
+Example:
+
+```bash
+SAMPLE_ZIP_PASSWORD=infected python -m unittest discover -s tests -p "test_*.py"
+```

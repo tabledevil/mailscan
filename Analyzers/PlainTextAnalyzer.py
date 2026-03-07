@@ -1,157 +1,291 @@
-import logging
-import os
-import textwrap
-import re
-from structure import Analyzer, Report
+"""Plain-text content analyzer.
 
+Handles encoding detection (charset-normalizer) and language detection (lingua).
+Replaces the old chardet/cchardet + pycld3/fasttext/langdetect stack with
+modern, maintained alternatives that require no model downloads or C extensions.
+
+Fallback chain:
+  - Encoding: charset-normalizer -> chardet -> manual probe
+  - Language: lingua -> (legacy detectors if present) -> None
+"""
+
+import logging
+import re
+import textwrap
+
+from structure import Analyzer, Report, Severity
+
+log = logging.getLogger("matt")
+
+# --- Password broker ---
+try:
+    from Utils.password_broker import PasswordBroker
+
+    _BROKER_AVAILABLE = True
+except ImportError:
+    _BROKER_AVAILABLE = False
+
+# --- IOC extraction ---
+try:
+    from Utils.ioc_extractor import extract_iocs
+
+    _IOC_AVAILABLE = True
+except ImportError:
+    _IOC_AVAILABLE = False
+
+# --- Encoding detection ---
+try:
+    import charset_normalizer
+
+    _CHARSET_NORMALIZER = True
+except ImportError:
+    _CHARSET_NORMALIZER = False
+
+try:
+    import chardet
+except ImportError:
+    chardet = None
+
+# --- Language detection (new: lingua) ---
+try:
+    from lingua import Language, LanguageDetectorBuilder
+
+    # Build detector once (lazy singleton)
+    _lingua_detector = None
+
+    def _get_lingua_detector():
+        global _lingua_detector
+        if _lingua_detector is None:
+            _lingua_detector = (
+                LanguageDetectorBuilder.from_all_languages().with_low_accuracy_mode().build()
+            )
+        return _lingua_detector
+
+    _LINGUA_AVAILABLE = True
+except ImportError:
+    _LINGUA_AVAILABLE = False
+
+# --- Legacy language detectors (graceful fallback) ---
 try:
     import cld3
 except ImportError:
     cld3 = None
 
 try:
-    import fasttext
+    from langdetect import detect as langdetect_detect
+    from langdetect import lang_detect_exception
 except ImportError:
-    fasttext = None
-
-try:
-    from langdetect import detect, lang_detect_exception
-except ImportError:
-    detect = None
+    langdetect_detect = None
     lang_detect_exception = None
 
-try:
-    import cchardet as chardet
-except ImportError:
-    try:
-        import chardet
-    except ImportError:
-        chardet = None
-
-try:
-    import requests
-except ImportError:
-    requests = None
+# Password pattern — matches English and German keywords
+_RE_FIND_PW = re.compile(r"(pw|kennwort|pass(wor[dt])?)\s*[:\-=]?\s*(?P<words>.*)", re.IGNORECASE)
 
 
 class PlainTextAnalyzer(Analyzer):
-    compatible_mime_types = ['text/plain']
-    description = 'Plain Textfile Analyser'
+    compatible_mime_types = ["text/plain"]
+    description = "Plain Textfile Analyser"
     optional_pip_dependencies = [
-        ('cld3', 'pycld3'),
-        ('fasttext', 'fasttext'),
-        ('langdetect', 'langdetect'),
-        ('chardet', 'chardet'),
-        ('requests', 'requests'),
+        ("lingua", "lingua-language-detector"),
     ]
     extra = "lang"
 
-    LANGUAGE_DB = 'lid.176.ftz'
-    LANGUAGE_DB_URL = 'https://dl.fbaipublicfiles.com/fasttext/supervised-models/lid.176.ftz'
-    _fasttext_model = None
+    # ------------------------------------------------------------------
+    # Encoding detection
+    # ------------------------------------------------------------------
+    def _decode(self, raw: bytes) -> str:
+        """Decode raw bytes to str using the best available method."""
+        if isinstance(raw, str):
+            return raw
 
-    def __detect_language_cld3(self):
-        if not cld3: return None
-        resp = cld3.get_language(self.text)
-        self.reports['lang_cld3']=Report(f'{resp.language}@{resp.probability}')
-        return resp.language if resp.is_reliable else ""
-
-    def __detect_language_fasttext(self):
-        if not fasttext: return None
-        if PlainTextAnalyzer._fasttext_model is None:
-            if not os.path.isfile(self.LANGUAGE_DB):
-                if not requests:
-                    logging.warning("requests library not found, cannot download fasttext model.")
-                    return None
-                logging.warning('Language File not Found. Download Starting...')
-                r = requests.get(self.LANGUAGE_DB_URL)
-                with open(self.LANGUAGE_DB, 'wb') as output_file:
-                    output_file.write(r.content)
-            PlainTextAnalyzer._fasttext_model = fasttext.load_model(self.LANGUAGE_DB)
-        model = PlainTextAnalyzer._fasttext_model
-        # Suppressing fasttext warning about loading model from disk
-        predictions, _ = model.predict(self.text.replace('\n', ' ').splitlines())
-        predictions = [p[0] for p in predictions if p]
-        if not predictions: return None
-        language = max(set(predictions), key=predictions.count).replace('__label__', '')
-        self.reports['lang_fasttext']=Report(f'{language}')
-        return language
-    
-    def __detect_language_langdetect(self):
-        if not detect: return None
+        # Fast path: try UTF-8 first (most common)
         try:
-            language = detect(self.text)
-        except lang_detect_exception.LangDetectException as e:
-            language = f"[{e}]"
-        self.reports['lang_langdetect']=Report(f'{language}')
-        return language
+            decoded = raw.decode("utf-8")
+            self.reports["encoding"] = Report("utf-8")
+            return decoded
+        except UnicodeDecodeError:
+            pass
 
-    def detect_lang(self):
-        resp = None
-        detectors = [self.__detect_language_cld3, self.__detect_language_fasttext, self.__detect_language_langdetect]
-        for detector in detectors:
+        # charset-normalizer (preferred)
+        if _CHARSET_NORMALIZER:
+            result = charset_normalizer.from_bytes(raw).best()
+            if result is not None:
+                encoding = result.encoding
+                self.reports["encoding"] = Report(encoding)
+                return str(result)
+
+        # chardet fallback
+        if chardet is not None:
+            detection = chardet.detect(raw)
+            enc = detection.get("encoding")
+            if enc:
+                self.reports["encoding"] = Report(enc)
+                try:
+                    return raw.decode(enc, errors="replace")
+                except (UnicodeDecodeError, LookupError):
+                    pass
+
+        # Last resort: try common encodings
+        for enc in ("utf-8-sig", "utf-16", "iso-8859-15", "windows-1252"):
             try:
-                resp = detector()
-                if resp: break
-            except Exception as e:
-                logging.debug(f"Language detector {detector.__name__} failed: {e}")
-
-        if resp is None:
-            # Downgraded from warning to debug/info to reduce noise
-            logging.info('No language Detection module installed or working. [pycld3, fasttext, langdetect]')
-        self.lang=resp
-        self.reports['language'] = Report(resp)
-
-    def __decode(self, string):
-        if isinstance(string, str):
-            return string
-        if isinstance(string, bytes):
-            try:
-                decoded = string.decode('utf-8')
-                self.reports['encoding'] = Report('utf-8')
+                decoded = raw.decode(enc, errors="replace")
+                self.reports["encoding"] = Report(enc)
                 return decoded
-            except UnicodeDecodeError:
+            except (UnicodeDecodeError, LookupError):
                 pass
 
-            encodings = ['utf-8-sig', 'utf-16', 'iso-8859-15']
-            guessed_encodings = self.__guess_encoding(string)
-            if guessed_encodings:
-                encodings = guessed_encodings + encodings
-            for encoding in encodings:
-                try:
-                    return string.decode(encoding, errors='ignore')
-                except UnicodeDecodeError:
-                    pass
-        return ""
+        # Give up — force decode
+        self.reports["encoding"] = Report("utf-8 (forced)")
+        return raw.decode("utf-8", errors="replace")
 
-    def __guess_encoding(self, string):
-        if not chardet:
-            logging.warning('Missing module chardet')
-            return []
-        detection = chardet.detect(string)
-        if "encoding" in detection and detection['encoding'] is not None:
-            self.reports['encoding']=Report(detection["encoding"])
-            return [detection["encoding"]]
-        return []
+    # ------------------------------------------------------------------
+    # Language detection
+    # ------------------------------------------------------------------
+    def _detect_language(self) -> str | None:
+        """Detect the language of self.text using the best available detector."""
+        if not self.text or len(self.text.strip()) < 10:
+            return None
 
-    def scan4passwords(self):
-        if len(self.text) > 0:
-            _RE_FIND_PW = re.compile(r'''(pw|kennwort|pass(wor[dt])?)(?P<words>.*)''', re.IGNORECASE)
-            match = _RE_FIND_PW.search(self.text)
-            if match:
-                words=[word for word in match.group('words').split() if len(word) > 3]
-                if len(words) > 0 :
-                    self.reports['possible_passwords'] = Report(",".join(words))
+        # 1) lingua (preferred)
+        if _LINGUA_AVAILABLE:
+            try:
+                detector = _get_lingua_detector()
+                lang = detector.detect_language_of(self.text)
+                if lang is not None:
+                    iso = lang.iso_code_639_1.name.lower()
+                    self.reports["lang_lingua"] = Report(
+                        f"{lang.name} ({iso})",
+                        label="lang_lingua",
+                        verbosity=2,
+                    )
+                    return iso
+            except Exception as e:
+                log.debug(f"lingua detection failed: {e}")
 
-    def decode(self):
-        self.text = self.__decode(self.struct.rawdata)
+        # 2) cld3 fallback
+        if cld3 is not None:
+            try:
+                resp = cld3.get_language(self.text)
+                if resp and resp.is_reliable:
+                    self.reports["lang_cld3"] = Report(
+                        f"{resp.language}@{resp.probability:.2f}",
+                        label="lang_cld3",
+                        verbosity=2,
+                    )
+                    return resp.language
+            except Exception as e:
+                log.debug(f"cld3 detection failed: {e}")
 
+        # 3) langdetect fallback
+        if langdetect_detect is not None:
+            try:
+                language = langdetect_detect(self.text)
+                self.reports["lang_langdetect"] = Report(
+                    language, label="lang_langdetect", verbosity=2
+                )
+                return language
+            except Exception as e:
+                log.debug(f"langdetect detection failed: {e}")
+
+        log.debug("No language detection module available or working")
+        return None
+
+    # ------------------------------------------------------------------
+    # Password scanning
+    # ------------------------------------------------------------------
+    def _scan_passwords(self):
+        """Look for password hints in the text body."""
+        if not self.text:
+            return
+
+        match = _RE_FIND_PW.search(self.text)
+        if match:
+            words = [w for w in match.group("words").split() if len(w) > 3]
+            if words:
+                self.reports["possible_passwords"] = Report(
+                    ",".join(words),
+                    label="possible_passwords",
+                    severity=Severity.HIGH,
+                    verbosity=0,
+                )
+                if _BROKER_AVAILABLE:
+                    for word in words:
+                        PasswordBroker.register_password(word, source_struct=self.struct)
+
+    # ------------------------------------------------------------------
+    # IOC extraction
+    # ------------------------------------------------------------------
+    def _extract_iocs(self):
+        """Run IOC extraction on decoded text."""
+        if not _IOC_AVAILABLE or not self.text:
+            return
+
+        try:
+            iocs = extract_iocs(self.text)
+            if iocs.has_findings:
+                parts = iocs.summary_parts()
+                summary_text = ", ".join(parts)
+
+                # Build detailed report
+                detail_lines = []
+                if iocs.ipv4:
+                    detail_lines.append(f"IPv4: {', '.join(iocs.ipv4)}")
+                if iocs.ipv6:
+                    detail_lines.append(f"IPv6: {', '.join(iocs.ipv6)}")
+                if iocs.urls:
+                    detail_lines.append(f"URLs: {', '.join(iocs.urls)}")
+                if iocs.emails:
+                    detail_lines.append(f"Emails: {', '.join(iocs.emails)}")
+                if iocs.domains:
+                    detail_lines.append(f"Domains: {', '.join(iocs.domains)}")
+                if iocs.md5:
+                    detail_lines.append(f"MD5: {', '.join(iocs.md5)}")
+                if iocs.sha1:
+                    detail_lines.append(f"SHA1: {', '.join(iocs.sha1)}")
+                if iocs.sha256:
+                    detail_lines.append(f"SHA256: {', '.join(iocs.sha256)}")
+                if iocs.passwords:
+                    detail_lines.append(f"Passwords: {', '.join(iocs.passwords)}")
+                    if _BROKER_AVAILABLE:
+                        for pw in iocs.passwords:
+                            PasswordBroker.register_password(pw, source_struct=self.struct)
+
+                self.reports["iocs"] = Report(
+                    "\n".join(detail_lines),
+                    short=summary_text,
+                    label="iocs",
+                    severity=Severity.MEDIUM if (iocs.urls or iocs.ipv4) else Severity.INFO,
+                    verbosity=1,
+                )
+
+                # Store IOC result on struct for upstream consumers (e.g. password retry)
+                self._ioc_result = iocs
+        except Exception as e:
+            log.debug(f"IOC extraction failed: {e}")
+
+    # ------------------------------------------------------------------
+    # Main analysis
+    # ------------------------------------------------------------------
     def analysis(self):
         self.text = ""
-        self.lang = ""
-        self.modules['encoding'] = self.decode
-        self.modules['language'] = self.detect_lang
-        self.modules['passwords'] = self.scan4passwords
+        self.lang = None
+        self._ioc_result = None
+
+        self.modules["encoding"] = self._do_decode
+        self.modules["language"] = self._do_language
+        self.modules["passwords"] = self._scan_passwords
+        self.modules["iocs"] = self._extract_iocs
         super().analysis()
+
         self.info = f"language:{self.lang}"
-        self.reports['summary'] = Report(self.text, short=textwrap.shorten(self.text, width=100))
+        self.reports["summary"] = Report(
+            self.text,
+            short=textwrap.shorten(self.text, width=100) if self.text else "",
+        )
+
+    def _do_decode(self):
+        self.text = self._decode(self.struct.rawdata)
+
+    def _do_language(self):
+        self.lang = self._detect_language()
+        self.reports["language"] = Report(self.lang)

@@ -1,0 +1,37 @@
+From MAILER-DAEMON Tue Feb  3 12:07:25 2026
+From: alice@example.com
+To: bob@example.com
+Subject: Hello Bob
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+MIME-Version: 1.0
+
+Hi Bob,
+
+This is a test email.
+
+From MAILER-DAEMON Tue Feb  3 12:07:25 2026
+From: carol@example.com
+To: dave@example.com
+Subject: Report with attachment
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="===============3905784720596591391=="
+
+--===============3905784720596591391==
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+Hi Dave,
+
+Please see the attached report.
+
+--===============3905784720596591391==
+Content-Type: text/plain
+Content-Transfer-Encoding: base64
+Content-Disposition: attachment; filename="report.txt"
+MIME-Version: 1.0
+
+UmVwb3J0IGRhdGE6IDEyMzQ1Cg==
+
+--===============3905784720596591391==--
+
