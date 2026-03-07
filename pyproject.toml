@@ -1,0 +1,84 @@
+[build-system]
+requires = ["setuptools>=68.0", "setuptools-scm>=8.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "matt"
+version = "0.2.0"
+description = "MATT — Mail Analysis and Triage Tool"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    { name = "MATT Contributors" },
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Security",
+    "Topic :: Communications :: Email",
+]
+
+dependencies = [
+    "charset-normalizer>=3.0",
+    "python-dateutil>=2.8",
+    "pytz",
+    "rich>=13.0",
+]
+
+[project.optional-dependencies]
+pdf = ["PyPDF2", "pdf2image"]
+html = ["justhtml>=1.0"]
+msg = ["extract-msg"]
+7z = ["py7zr"]
+lang = ["lingua-language-detector>=2.0"]
+mime = ["magika"]
+tui = ["textual>=0.40"]
+yara = ["yara-python"]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov",
+    "ruff",
+]
+all = [
+    "matt[pdf,html,msg,7z,lang,mime,tui,yara]",
+]
+
+[project.scripts]
+matt = "matt:main"
+
+[tool.setuptools]
+py-modules = [
+    "matt",
+    "structure",
+    "reporting",
+    "eml",
+    "attest",
+    "getallfromfields",
+    "mail2timeline",
+    "mailattachments",
+    "maildump",
+    "mailexport",
+    "mailfrom",
+    "mailheader",
+]
+
+[tool.setuptools.packages.find]
+include = ["Analyzers*", "Config*", "Utils*", "renderers*"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = ["E501"]  # line length handled by formatter
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
