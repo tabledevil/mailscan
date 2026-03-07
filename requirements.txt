@@ -1,3 +1,4 @@
-chardet
-python-dateutil
+charset-normalizer>=3.0
+python-dateutil>=2.8
 pytz
+rich>=13.0
