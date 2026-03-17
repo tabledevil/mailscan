@@ -19,6 +19,10 @@ analyzers_list = [
     "OfficeRelationshipAnalyzer",
     "OfficeXMLAnalyzer",
     "VBAProjectAnalyzer",
+    "RTFAnalyzer",
+    "ImageAnalyzer",
+    "ICSAnalyzer",
+    "RARAnalyzer",
 ]
 
 # We need the Analyzer base class to filter subclasses properly.
