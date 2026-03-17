@@ -29,6 +29,22 @@ try:
 except ImportError:
     _IOC_AVAILABLE = False
 
+# Try to import VBA extractor
+try:
+    from Utils.vba_extractor import extract_vba_from_ole_data, scan_vba_code
+
+    _VBA_AVAILABLE = True
+except ImportError:
+    _VBA_AVAILABLE = False
+
+# Try to import OLE Package parser
+try:
+    from Utils.ole_package import parse_embedded_object
+
+    _OLEPACKAGE_AVAILABLE = True
+except ImportError:
+    _OLEPACKAGE_AVAILABLE = False
+
 # OOXML relationship namespace
 _RELS_NS = {"r": "http://schemas.openxmlformats.org/package/2006/relationships"}
 
@@ -292,15 +308,59 @@ class OfficeDocumentAnalyzer(Analyzer):
                     )
 
     # ------------------------------------------------------------------
-    # VBA detection
+    # VBA detection and decompilation
     # ------------------------------------------------------------------
     def _analyze_vba(self):
         vba_files = [f for f in self._namelist if "vbaProject.bin" in f]
-        if vba_files:
-            self.reports["vba_macros"] = Report(
-                f"Document contains VBA macros ({', '.join(vba_files)}).",
-                severity=Severity.CRITICAL,
-            )
+        if not vba_files:
+            return
+
+        self.reports["vba_macros"] = Report(
+            f"Document contains VBA macros ({', '.join(vba_files)}).",
+            severity=Severity.CRITICAL,
+        )
+
+        if not _VBA_AVAILABLE:
+            return
+
+        # Extract and decompile each vbaProject.bin
+        for vba_path in vba_files:
+            try:
+                vba_data = self._zip.read(vba_path)
+                modules = extract_vba_from_ole_data(vba_data)
+
+                for mod in modules:
+                    code = mod["code"]
+                    name = mod["name"]
+
+                    # Report the decompiled source (truncated for display)
+                    display_code = code[:2000] + "..." if len(code) > 2000 else code
+                    self.reports[f"vba_source_{vba_path}_{name}"] = Report(
+                        display_code,
+                        short=f"VBA module: {name} ({len(code)} chars)",
+                        label=f"VBA:{name}",
+                    )
+
+                    # Report suspicious patterns found in the code
+                    for matched, category, sev_str in mod["findings"]:
+                        sev = Severity.CRITICAL if sev_str == "CRITICAL" else Severity.HIGH
+                        key = f"vba_suspicious_{name}_{category}_{matched}"
+                        self.reports[key] = Report(
+                            f"VBA module '{name}': {category} — {matched}",
+                            severity=sev,
+                        )
+
+                    # Emit decompiled source as child for IOC extraction
+                    self.childitems.append(
+                        self.generate_struct(
+                            data=code.encode("utf-8"),
+                            filename=f"vba_source_{name}.vba",
+                            mime_type="text/plain",
+                            index=len(self.childitems),
+                        )
+                    )
+            except Exception as e:
+                log.debug(f"VBA extraction failed for {vba_path}: {e}")
 
     # ------------------------------------------------------------------
     # Metadata extraction from docProps/core.xml and docProps/app.xml
@@ -496,8 +556,8 @@ class OfficeDocumentAnalyzer(Analyzer):
                not filepath.endswith(".xml") and not filepath.endswith(".rels"):
                 emit = True
 
-            # VBA project binaries
-            if "vbaProject.bin" in filepath:
+            # VBA project binaries — only emit as child if we couldn't decompile
+            if "vbaProject.bin" in filepath and not _VBA_AVAILABLE:
                 emit = True
 
             # Orphan detection — skip infrastructure files
@@ -516,6 +576,33 @@ class OfficeDocumentAnalyzer(Analyzer):
             if emit:
                 try:
                     child_data = self._zip.read(filepath)
+
+                    # Try to unwrap OLE Package objects from embeddings
+                    if _OLEPACKAGE_AVAILABLE and "/embeddings/" in filepath:
+                        pkg = parse_embedded_object(child_data)
+                        if pkg and pkg.payload:
+                            pkg_fname = pkg.filename or os.path.basename(filepath)
+                            if pkg.is_dangerous:
+                                self.reports[f"dangerous_embed_{filepath}"] = Report(
+                                    f"Embedded object contains dangerous file: "
+                                    f"{pkg.filename} (from {filepath})",
+                                    severity=Severity.CRITICAL,
+                                )
+                            else:
+                                self.reports[f"package_{filepath}"] = Report(
+                                    f"OLE Package unwrapped: {pkg.filename} "
+                                    f"({len(pkg.payload)} bytes, source: {pkg.source_path})",
+                                    label=f"package:{filepath}",
+                                )
+                            # Emit the unwrapped payload instead of the raw OLE
+                            child_struct = self.generate_struct(
+                                filename=pkg_fname, data=pkg.payload, index=idx,
+                            )
+                            child_struct.parent = self.struct
+                            self.childitems.append(child_struct)
+                            idx += 1
+                            continue
+
                     child_struct = self.generate_struct(
                         filename=filepath, data=child_data, index=idx,
                     )

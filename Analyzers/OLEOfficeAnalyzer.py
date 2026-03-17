@@ -26,6 +26,22 @@ try:
 except ImportError:
     _IOC_AVAILABLE = False
 
+# Try to import VBA extractor
+try:
+    from Utils.vba_extractor import extract_vba_from_ole_data, scan_vba_code
+
+    _VBA_AVAILABLE = True
+except ImportError:
+    _VBA_AVAILABLE = False
+
+# Try to import OLE Package parser
+try:
+    from Utils.ole_package import parse_embedded_object
+
+    _OLEPACKAGE_AVAILABLE = True
+except ImportError:
+    _OLEPACKAGE_AVAILABLE = False
+
 # OLE2 file magic bytes
 _OLE_MAGIC = b"\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1"
 
@@ -252,48 +268,64 @@ class OLEOfficeAnalyzer(Analyzer):
                 pass
 
     # ------------------------------------------------------------------
-    # VBA macro detection
+    # VBA macro detection and decompilation
     # ------------------------------------------------------------------
     def _analyze_vba(self):
         has_vba = False
 
         for parts in self._streams:
-            # Check if any path component indicates VBA
             for part in parts:
                 if part.lower() in _VBA_STREAM_NAMES or part in _VBA_PATH_PARTS:
                     has_vba = True
                     break
-
-            # Also check for streams named like VBA modules
             full_path = "/".join(parts)
             if full_path.lower().endswith("vbaproject.bin"):
                 has_vba = True
 
-        if has_vba:
-            self.reports["vba_macros"] = Report(
-                "Document contains VBA macros",
-                severity=Severity.CRITICAL,
+        if not has_vba:
+            return
+
+        self.reports["vba_macros"] = Report(
+            "Document contains VBA macros",
+            severity=Severity.CRITICAL,
+        )
+
+        if not _VBA_AVAILABLE:
+            return
+
+        # The whole OLE file IS the VBA container — pass raw data
+        modules = extract_vba_from_ole_data(self.struct.rawdata)
+
+        for mod in modules:
+            code = mod["code"]
+            name = mod["name"]
+
+            # Report decompiled source
+            display_code = code[:2000] + "..." if len(code) > 2000 else code
+            self.reports[f"vba_source_{name}"] = Report(
+                display_code,
+                short=f"VBA module: {name} ({len(code)} chars)",
+                label=f"VBA:{name}",
             )
 
-            # Try to extract VBA stream data as children for deeper analysis
-            for parts in self._streams:
-                full_path = "/".join(parts)
-                # Extract actual VBA code streams (not dir or project metadata)
-                is_vba_container = any(p in _VBA_PATH_PARTS or p.lower() in _VBA_STREAM_NAMES for p in parts)
-                is_metadata = parts[-1].lower() in {"dir", "project", "projectwm", "_vba_project"}
-                if is_vba_container and not is_metadata:
-                    try:
-                        data = self._ole.openstream(parts).read()
-                        if len(data) > 0:
-                            self.childitems.append(
-                                self.generate_struct(
-                                    data=data,
-                                    filename=full_path.replace("/", "_"),
-                                    index=len(self.childitems),
-                                )
-                            )
-                    except Exception as e:
-                        log.debug(f"Could not extract VBA stream {full_path}: {e}")
+            # Report suspicious patterns
+            for matched, category, sev_str in mod["findings"]:
+                sev = Severity.CRITICAL if sev_str == "CRITICAL" else Severity.HIGH
+                key = f"vba_suspicious_{name}_{category}_{matched}"
+                self.reports[key] = Report(
+                    f"VBA module '{name}': {category} — {matched}",
+                    severity=sev,
+                )
+
+            # Emit decompiled source as child for IOC extraction
+            self.childitems.append(
+                self.generate_struct(
+                    data=code.encode("utf-8"),
+                    filename=f"vba_source_{name}.vba",
+                    mime_type="text/plain",
+                    index=len(self.childitems),
+                )
+            )
 
     # ------------------------------------------------------------------
     # Metadata extraction
@@ -356,7 +388,7 @@ class OLEOfficeAnalyzer(Analyzer):
                 )
 
     # ------------------------------------------------------------------
-    # Embedded OLE objects — extract for child analysis
+    # Embedded OLE objects — extract and unwrap for child analysis
     # ------------------------------------------------------------------
     def _analyze_embedded_objects(self):
         extracted_paths = set()
@@ -379,13 +411,7 @@ class OLEOfficeAnalyzer(Analyzer):
                     if len(data) > 0:
                         embedded_count += 1
                         extracted_paths.add(full_path)
-                        self.childitems.append(
-                            self.generate_struct(
-                                data=data,
-                                filename=f"embedded_{full_path.replace('/', '_')}",
-                                index=len(self.childitems),
-                            )
-                        )
+                        self._emit_embedded(data, full_path)
                 except Exception as e:
                     log.debug(f"Could not extract embedded object {full_path}: {e}")
 
@@ -393,7 +419,6 @@ class OLEOfficeAnalyzer(Analyzer):
         for parts in self._all_entries:
             full_path = "/".join(parts)
             if "objectpool" in full_path.lower() and self._ole.get_type(parts) == 1:
-                # It's a storage — extract its child streams
                 try:
                     for stream_parts in self._streams:
                         child_path = "/".join(stream_parts)
@@ -404,13 +429,7 @@ class OLEOfficeAnalyzer(Analyzer):
                             if len(data) > 0:
                                 embedded_count += 1
                                 extracted_paths.add(child_path)
-                                self.childitems.append(
-                                    self.generate_struct(
-                                        data=data,
-                                        filename=f"objpool_{child_path.replace('/', '_')}",
-                                        index=len(self.childitems),
-                                    )
-                                )
+                                self._emit_embedded(data, child_path)
                 except Exception as e:
                     log.debug(f"Could not extract ObjectPool contents: {e}")
 
@@ -419,6 +438,42 @@ class OLEOfficeAnalyzer(Analyzer):
                 f"{embedded_count} embedded OLE object(s) extracted for analysis",
                 severity=Severity.HIGH,
             )
+
+    def _emit_embedded(self, data, source_path):
+        """Emit an embedded object as a child, unwrapping OLE Package if possible."""
+        if _OLEPACKAGE_AVAILABLE:
+            pkg = parse_embedded_object(data)
+            if pkg and pkg.payload:
+                pkg_fname = pkg.filename or os.path.basename(source_path)
+                if pkg.is_dangerous:
+                    self.reports[f"dangerous_embed_{source_path}"] = Report(
+                        f"Embedded object contains dangerous file: "
+                        f"{pkg.filename} (from {source_path})",
+                        severity=Severity.CRITICAL,
+                    )
+                else:
+                    self.reports[f"package_{source_path}"] = Report(
+                        f"OLE Package unwrapped: {pkg.filename} "
+                        f"({len(pkg.payload)} bytes, source: {pkg.source_path})",
+                        label=f"package:{source_path}",
+                    )
+                self.childitems.append(
+                    self.generate_struct(
+                        data=pkg.payload,
+                        filename=pkg_fname,
+                        index=len(self.childitems),
+                    )
+                )
+                return
+
+        # No Package unwrapping — emit raw data
+        self.childitems.append(
+            self.generate_struct(
+                data=data,
+                filename=f"embedded_{source_path.replace('/', '_')}",
+                index=len(self.childitems),
+            )
+        )
 
     # ------------------------------------------------------------------
     # Encryption detection
