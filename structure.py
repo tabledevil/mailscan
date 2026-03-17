@@ -441,7 +441,17 @@ class Structure(dict):
 
         self.__children = None
         # A1: pass self to get_analyzer for content-based probing
-        self.analyzer = Analyzer.get_analyzer(self.mime_type, struct=self)(self)
+        analyzer_cls = Analyzer.get_analyzer(self.mime_type, struct=self)
+        self.analyzer = analyzer_cls(self)
+
+        # If the analyzer declared failure, try its fallback
+        if getattr(self.analyzer, 'success', None) is False:
+            fallback_cls = getattr(analyzer_cls, 'fallback_analyzer', None)
+            if fallback_cls is not None:
+                log.info(
+                    f"{analyzer_cls.__name__} failed, falling back to {fallback_cls.__name__}"
+                )
+                self.analyzer = fallback_cls(self)
 
     @property
     def realfile(self):
