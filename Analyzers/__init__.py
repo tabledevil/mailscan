@@ -16,6 +16,7 @@ analyzers_list = [
     "MsgAnalyzer",
     "MboxAnalyzer",
     "OfficeDocumentAnalyzer",
+    "OLEOfficeAnalyzer",
     "OfficeRelationshipAnalyzer",
     "OfficeXMLAnalyzer",
     "VBAProjectAnalyzer",
