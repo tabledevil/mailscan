@@ -9,6 +9,7 @@ No external dependencies beyond olefile (for OLE container parsing).
 
 import io
 import logging
+import math
 import re
 import struct
 
@@ -84,11 +85,7 @@ def _decompress_stream(compressed: bytes) -> bytes:
 
                         # Calculate bit sizes based on current decompressed position
                         difference = len(output) - chunk_start
-                        if difference > 0:
-                            import math
-                            bit_count = max(4, int(math.ceil(math.log2(difference))) if difference > 1 else 4)
-                        else:
-                            bit_count = 4
+                        bit_count = max((difference - 1).bit_length(), 4) if difference > 1 else 4
 
                         length_mask = 0xFFFF >> bit_count
                         offset_mask = ~length_mask & 0xFFFF
