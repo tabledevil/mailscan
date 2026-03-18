@@ -20,6 +20,7 @@ class VBAProjectAnalyzer(Analyzer):
 
     compatible_mime_types = ["application/vnd.ms-office.vbaProject"]
     description = "VBA Macro Project Analyzer"
+    specificity = 25
     pip_dependencies = ["oletools"]
 
     @classmethod

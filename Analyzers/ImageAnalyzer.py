@@ -29,6 +29,7 @@ class ImageAnalyzer(Analyzer):
         "image/webp",
     ]
     description = "Image Analyser"
+    specificity = 20
     optional_pip_dependencies = [("PIL", "Pillow")]
 
     # EXIF tags that may reveal sensitive information

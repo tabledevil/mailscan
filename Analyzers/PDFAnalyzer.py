@@ -17,6 +17,7 @@ except ImportError:
 class PDFAnalyzer(Analyzer):
     compatible_mime_types = ['application/pdf']
     description = 'PDF Analyser'
+    specificity = 20
     optional_pip_dependencies = ['PyPDF2', 'pdf2image']
     optional_system_dependencies = ['pdftoppm']
     extra = "pdf"

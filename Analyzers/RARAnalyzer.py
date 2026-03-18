@@ -26,6 +26,7 @@ class RARAnalyzer(Analyzer):
         "application/vnd.rar",
     ]
     description = "RAR Archive Analyser"
+    specificity = 10
     optional_pip_dependencies = [("rarfile", "rarfile")]
     optional_system_dependencies = ["unrar"]
     extra = "rar"

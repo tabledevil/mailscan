@@ -85,6 +85,7 @@ _RE_FIND_PW = re.compile(r"(pw|kennwort|pass(wor[dt])?)\s*[:\-=]?\s*(?P<words>.*
 class PlainTextAnalyzer(Analyzer):
     compatible_mime_types = ["text/plain"]
     description = "Plain Textfile Analyser"
+    specificity = 5
     optional_pip_dependencies = [
         ("lingua", "lingua-language-detector"),
     ]

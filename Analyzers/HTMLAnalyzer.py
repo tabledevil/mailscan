@@ -29,6 +29,7 @@ except ImportError:
 class HTMLAnalyzer(Analyzer):
     compatible_mime_types = ["text/html"]
     description = "HTML Analyser"
+    specificity = 15
     optional_pip_dependencies = [("justhtml", "justhtml")]
     extra = "html"
 

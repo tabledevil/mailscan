@@ -19,6 +19,7 @@ class RTFAnalyzer(Analyzer):
         "text/rtf",
     ]
     description = "RTF Analyser"
+    specificity = 20
 
     # RTF control words associated with exploit techniques
     SUSPICIOUS_CONTROL_WORDS = {

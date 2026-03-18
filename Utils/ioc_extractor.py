@@ -319,3 +319,67 @@ def extract_iocs(
     result.passwords = _dedup(pw_filtered)
 
     return result
+
+
+# ------------------------------------------------------------------
+# IOC merge and defang helpers
+# ------------------------------------------------------------------
+
+
+def merge_ioc_dicts(dicts: list[dict]) -> IOCResult:
+    """Merge multiple IOC dicts (from ``IOCResult.to_dict()``) into one.
+
+    Deduplicates values across all dicts while preserving first-seen order.
+    """
+    merged = IOCResult()
+    for d in dicts:
+        merged.ipv4.extend(d.get("ipv4", []))
+        merged.ipv6.extend(d.get("ipv6", []))
+        merged.urls.extend(d.get("urls", []))
+        merged.emails.extend(d.get("emails", []))
+        merged.domains.extend(d.get("domains", []))
+        merged.md5.extend(d.get("md5", []))
+        merged.sha1.extend(d.get("sha1", []))
+        merged.sha256.extend(d.get("sha256", []))
+        merged.passwords.extend(d.get("passwords", []))
+    # Deduplicate
+    merged.ipv4 = _dedup(merged.ipv4)
+    merged.ipv6 = _dedup(merged.ipv6)
+    merged.urls = _dedup(merged.urls)
+    merged.emails = _dedup(merged.emails)
+    merged.domains = _dedup(merged.domains)
+    merged.md5 = _dedup(merged.md5)
+    merged.sha1 = _dedup(merged.sha1)
+    merged.sha256 = _dedup(merged.sha256)
+    merged.passwords = _dedup(merged.passwords)
+    return merged
+
+
+def defang_ioc_data(data: dict) -> dict:
+    """Return a copy of an IOC summary dict with all values defanged.
+
+    Applies common defanging transformations:
+    - ``http`` -> ``hxxp``
+    - ``.`` in IPs/domains -> ``[.]``
+    - ``@`` in emails -> ``[@]``
+    """
+    out: dict = {}
+    for key, values in data.items():
+        if not isinstance(values, list):
+            out[key] = values
+            continue
+        defanged = []
+        for v in values:
+            v = str(v)
+            if key in ("ipv4", "ipv6"):
+                v = v.replace(".", "[.]")
+            elif key == "domains":
+                v = v.replace(".", "[.]")
+            elif key == "urls":
+                v = v.replace("http://", "hxxp://").replace("https://", "hxxps://")
+                v = v.replace("ftp://", "fxp://")
+            elif key == "emails":
+                v = v.replace("@", "[@]")
+            defanged.append(v)
+        out[key] = defanged
+    return out

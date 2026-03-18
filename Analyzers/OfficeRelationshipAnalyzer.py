@@ -7,6 +7,7 @@ class OfficeRelationshipAnalyzer(Analyzer):
     """
     compatible_mime_types = ['application/vnd.openxmlformats-package.relationships+xml', 'application/xml']
     description = "Office Relationship File (.rels) Analyzer"
+    specificity = 25
 
     def analysis(self):
         # Only run on .rels files, even if mime is generic application/xml

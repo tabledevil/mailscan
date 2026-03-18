@@ -11,6 +11,7 @@ class OfficeXMLAnalyzer(Analyzer):
     """
     compatible_mime_types = ['application/xml', 'text/xml']
     description = "Office XML Content Analyzer"
+    specificity = 25
 
     def analysis(self):
         super().analysis()

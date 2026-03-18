@@ -12,6 +12,10 @@ import importlib.util
 import shutil
 import subprocess
 from Utils.filetype import detect_mime
+from Utils.advanced_analysis import (
+    entropy_assessment, fuzzy_hashes, lookup_virustotal,
+    mitre_attack_techniques, scan_yara,
+)
 
 log = logging.getLogger("matt")
 
@@ -38,6 +42,7 @@ class Report:
         label="",
         severity=Severity.INFO,
         verbosity=0,
+        order=50,
         content_type="text/plain",
         data=None,
         replaces=None,
@@ -53,6 +58,7 @@ class Report:
         else:
             self.severity = severity
         self.verbosity = verbosity
+        self.order = order
         self.content_type = content_type
         self.data = data
         self.replaces = replaces
@@ -75,6 +81,7 @@ class Report:
             "severity": self.severity.name,
             "rank": self.rank,
             "verbosity": self.verbosity,
+            "order": self.order,
             "content_type": self.content_type,
             "data": self.data,
             "replaces": self.replaces,
@@ -99,14 +106,24 @@ class Analyzer:
     optional_system_dependencies_check = {}
     required_alternatives = []
     extra = None
+    specificity = 0  # Override in subclasses: 5=generic, 10=container, 20=format, 25=sub-analyzer
 
-    def __init__(self, struct) -> None:
+    # A2: Dangerous extensions
+    _DANGEROUS_CRITICAL_EXTS = {".exe", ".dll", ".com", ".scr", ".msi"}
+    _DANGEROUS_HIGH_EXTS = {".js", ".hta", ".vbs", ".ps1", ".bat", ".cmd", ".wsf", ".lnk", ".jar", ".pif"}
+
+    def __init__(self, struct, *, _run_analysis=True) -> None:
         self.struct = struct
         self.childitems = []
         self.reports = {}
         self.modules = {}
         self.info = ""
-        self.analysis()
+        if _run_analysis:
+            struct.analyzer = self
+            self._report_archive_context()
+            self._report_exiftool()
+            self._check_dangerous_extension()
+            self.analysis()
 
     def run_modules(self):
         for module in self.modules:
@@ -122,6 +139,173 @@ class Analyzer:
     def analysis(self):
         self.run_modules()
 
+    def finalize_analysis(self):
+        self._report_entropy()
+        self._report_fuzzy_hashes()
+        self._report_yara_matches()
+        self._report_virustotal()
+        self._report_mitre_attack()
+
+    def _report_archive_context(self):
+        meta = getattr(self.struct, "metadata", None)
+        if not meta:
+            return
+        parts = []
+        if "archive_modified" in meta:
+            parts.append(f"Modified in archive: {meta['archive_modified']}")
+        if "archive_compress_method" in meta:
+            parts.append(f"Compression: {meta['archive_compress_method']}")
+        if "archive_create_system" in meta:
+            parts.append(f"Packed on: {meta['archive_create_system']}")
+        if "archive_create_version" in meta:
+            parts.append(f"Packer ZIP version: {meta['archive_create_version']}")
+        if "archive_unix_permissions" in meta:
+            parts.append(f"Unix permissions: {meta['archive_unix_permissions']}")
+        if "archive_encrypted" in meta and meta["archive_encrypted"]:
+            parts.append("Was encrypted in archive")
+        if parts:
+            self.reports["_archive_context"] = Report(
+                "\n".join(parts),
+                short=f"From {meta.get('archive_type', 'archive')}",
+                label="archive", severity=Severity.INFO,
+                verbosity=1, order=5, data=dict(meta),
+            )
+
+    def _report_exiftool(self):
+        if not shutil.which("exiftool"):
+            return
+        mime = getattr(self.struct, "mime_type", "") or ""
+        if mime.startswith(("text/", "message/", "application/xml", "application/json", "application/mbox")):
+            return
+        try:
+            import json as _json
+            result = subprocess.run(
+                ["exiftool", "-json", "-"],
+                input=self.struct.rawdata,
+                capture_output=True, timeout=10,
+            )
+            if result.returncode == 0:
+                parsed = _json.loads(result.stdout)
+                if parsed and isinstance(parsed, list):
+                    info = parsed[0]
+                    skip = {"SourceFile", "ExifToolVersion", "FileName", "Directory", "FileSize",
+                            "FileModifyDate", "FileAccessDate", "FileInodeChangeDate",
+                            "FilePermissions", "FileType", "FileTypeExtension", "MIMEType", "Error"}
+                    entries = [(k, str(v)) for k, v in info.items() if k not in skip and v]
+                    if entries:
+                        max_key = min(max(len(k) for k, _ in entries), 24)
+                        lines = []
+                        for k, v in entries:
+                            if len(k) > max_key:
+                                lines.append(f"{k}: {v}")
+                            else:
+                                lines.append(f"{k:<{max_key}} : {v}")
+                        self.reports["_file_exiftool"] = Report(
+                            "\n".join(lines), short=f"{len(lines)} EXIF field(s)",
+                            label="exiftool", severity=Severity.INFO, verbosity=2, order=15,
+                        )
+        except Exception:
+            pass
+
+    def _check_dangerous_extension(self):
+        import os as _os
+        filenames_to_check = []
+        fn = getattr(self.struct, "_Structure__filename", None)
+        if fn:
+            filenames_to_check.append(fn)
+        meta = getattr(self.struct, "metadata", None)
+        if meta:
+            afn = meta.get("archive_filename")
+            if afn and afn not in filenames_to_check:
+                filenames_to_check.append(afn)
+        for filename in filenames_to_check:
+            parts = filename.rsplit(".", 2)
+            if len(parts) >= 3:
+                last_ext = "." + parts[-1].lower()
+                second_ext = "." + parts[-2].lower()
+                known_exts = (
+                    self._DANGEROUS_CRITICAL_EXTS | self._DANGEROUS_HIGH_EXTS
+                    | {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+                       ".txt", ".zip", ".rar", ".7z", ".jpg", ".png", ".gif"}
+                )
+                if last_ext in known_exts and second_ext in known_exts:
+                    self.reports["double_extension"] = Report(
+                        f"Double extension: {filename}", short=f"Double ext: {filename}",
+                        label="double_ext", severity=Severity.HIGH, verbosity=0, order=27,
+                    )
+            _, ext = _os.path.splitext(filename)
+            ext_lower = ext.lower()
+            if ext_lower in self._DANGEROUS_CRITICAL_EXTS:
+                self.reports["dangerous_extension"] = Report(
+                    f"Dangerous file type: {ext_lower} ({filename})", short=f"Dangerous: {ext_lower}",
+                    label="dangerous_ext", severity=Severity.CRITICAL, verbosity=0, order=28,
+                )
+                break
+            elif ext_lower in self._DANGEROUS_HIGH_EXTS:
+                self.reports["dangerous_extension"] = Report(
+                    f"Dangerous file type: {ext_lower} ({filename})", short=f"Dangerous: {ext_lower}",
+                    label="dangerous_ext", severity=Severity.HIGH, verbosity=0, order=28,
+                )
+                break
+
+    def _report_entropy(self):
+        assessment = entropy_assessment(self.struct.rawdata, getattr(self.struct, "mime_type", ""))
+        severity = Severity[assessment["severity"]]
+        self.reports["entropy"] = Report(
+            f"Shannon entropy: {assessment['entropy']:.2f}", short=assessment["summary"],
+            label="entropy", severity=severity, verbosity=1, order=16, data=assessment,
+        )
+
+    def _report_fuzzy_hashes(self):
+        hashes = fuzzy_hashes(self.struct.rawdata)
+        if not hashes:
+            return
+        lines = [f"{name}: {value}" for name, value in hashes.items()]
+        self.reports["fuzzy_hash"] = Report(
+            "\n".join(lines), short=", ".join(sorted(hashes)),
+            label="fuzzy_hash", severity=Severity.INFO, verbosity=2, order=17, data=hashes,
+        )
+
+    def _report_yara_matches(self):
+        matches = scan_yara(self.struct.rawdata)
+        if not matches:
+            return
+        lines = []
+        for match in matches:
+            tags = f" tags={','.join(match['tags'])}" if match.get("tags") else ""
+            lines.append(f"{match['rule']}{tags}".strip())
+        self.reports["yara"] = Report(
+            "\n".join(lines),
+            short=", ".join(m["rule"] for m in matches[:3]) + (f" (+{len(matches) - 3} more)" if len(matches) > 3 else ""),
+            label="yara", severity=Severity.HIGH, verbosity=0, order=26, data={"matches": matches},
+        )
+
+    def _report_virustotal(self):
+        vt = lookup_virustotal(self.struct.sha256)
+        if not vt:
+            return
+        hits = vt["malicious"] + vt["suspicious"]
+        severity = Severity.INFO if hits == 0 else Severity.HIGH
+        text = (
+            f"VirusTotal: malicious={vt['malicious']}, suspicious={vt['suspicious']}, "
+            f"harmless={vt['harmless']}, undetected={vt['undetected']}"
+        )
+        self.reports["virustotal"] = Report(
+            text, short=f"VT {hits} hit(s)", label="virustotal",
+            severity=severity, verbosity=0, order=29, data=vt,
+        )
+
+    def _report_mitre_attack(self):
+        techniques = mitre_attack_techniques(self.struct, self)
+        if not techniques:
+            return
+        lines = [f"{item['id']} {item['name']} ({item['reason']})" for item in techniques]
+        self.reports["mitre_attack"] = Report(
+            "\n".join(lines), short=", ".join(item["id"] for item in techniques),
+            label="mitre_attack", severity=Severity.INFO, verbosity=1, order=91,
+            data={"techniques": techniques},
+        )
+
     # ------------------------------------------------------------------
     # A1: Content-based probe for ambiguous MIME types
     # ------------------------------------------------------------------
@@ -130,6 +314,17 @@ class Analyzer:
         """Override in subclasses to do content-based matching when the MIME
         type alone is ambiguous (e.g. application/octet-stream).  The base
         implementation always returns False."""
+        return False
+
+    @classmethod
+    def can_analyze(cls, struct) -> bool:
+        if struct.mime_type in cls.compatible_mime_types:
+            return True
+        try:
+            if cls.can_handle(struct):
+                return True
+        except Exception:
+            pass
         return False
 
     @classmethod
@@ -245,75 +440,60 @@ class Analyzer:
         return missing
 
     # ------------------------------------------------------------------
-    # A1: Improved analyzer dispatch with can_handle() fallback
+    # Multi-dispatch: all matching analyzers contribute
     # ------------------------------------------------------------------
     @staticmethod
-    def get_analyzer(mimetype, struct=None):
-        """Find the best analyzer for the given MIME type.
+    def run_all_analyzers(struct):
+        """Run all applicable analyzers on *struct* and merge results.
 
-        1. Try content-based probing (``can_handle``) — allows specialized
-           analyzers to claim files that share a MIME with a generic handler
-           (e.g. OOXML documents detected as ``application/zip``).
-        2. Try exact MIME type match (first available wins).
-        3. If MIME is ambiguous (``application/octet-stream``), probe each
-           analyzer via ``can_handle(struct)`` as a final fallback.
-        4. Fall back to the generic ``Analyzer`` base class.
+        Multi-dispatch: all matching analyzers contribute. Highest specificity
+        is primary, others are contributors whose reports merge if non-colliding.
         """
-        ambiguous_types = {"application/octet-stream"}
+        candidates = []
+        for cls in Analyzer.__subclasses__():
+            try:
+                if cls.can_analyze(struct):
+                    available, reason = cls.is_available()
+                    if available:
+                        candidates.append(cls)
+                    else:
+                        log.debug(f"{cls.__name__} matched but unavailable: {reason}")
+            except Exception as e:
+                log.debug(f"{cls.__name__}.can_analyze() failed: {e}")
 
-        # Pass 1: content-based probing — a specialized analyzer that
-        # positively identifies the content always wins over a generic
-        # MIME match.  This lets e.g. OfficeDocumentAnalyzer claim a
-        # file detected as application/zip.  Only probes analyzers that
-        # actually override can_handle() (the base returns False).
-        if struct is not None:
-            for analyser in Analyzer.__subclasses__():
-                # Skip analyzers that don't override can_handle
-                if analyser.can_handle is Analyzer.can_handle:
-                    continue
-                try:
-                    if analyser.can_handle(struct):
-                        available, reason = analyser.is_available()
-                        if not available:
-                            log.warning(
-                                f"Analyzer {analyser.__name__} matched content but is not available: {reason}"
-                            )
-                            continue
-                        return analyser
-                except Exception as e:
-                    log.debug(f"can_handle() failed for {analyser.__name__}: {e}")
+        if not candidates:
+            primary = Analyzer(struct)
+            primary.finalize_analysis()
+            return primary
 
-        # Pass 2: exact MIME match
-        for analyser in Analyzer.__subclasses__():
-            if mimetype in analyser.compatible_mime_types:
-                available, reason = analyser.is_available()
-                if not available:
-                    log.warning(
-                        f"Analyzer {analyser.__name__} is not available: {reason}"
-                    )
-                    continue
-                return analyser
+        candidates.sort(key=lambda c: c.specificity)
+        primary_cls = candidates[-1]
+        contributors = candidates[:-1]
 
-        # Pass 3: content-based probing for truly ambiguous types
-        # (when no exact MIME match and struct available)
-        if mimetype in ambiguous_types and struct is not None:
-            # Already probed in Pass 1, no need to repeat
-            pass
+        primary = primary_cls(struct)
 
-        return Analyzer
+        for cls in contributors:
+            try:
+                contributor = cls(struct, _run_analysis=False)
+                contributor.analysis()
+                for key, report in contributor.reports.items():
+                    if key not in primary.reports and report.label != "error":
+                        primary.reports[key] = report
+            except Exception as e:
+                log.debug(f"Contributor {cls.__name__} failed: {e}")
 
-    def generate_struct(self, data, filename=None, index=0, mime_type=None):
+        primary.finalize_analysis()
+        return primary
+
+    def generate_struct(self, data, filename=None, index=0, mime_type=None, parent=None, metadata=None):
         return Structure.create(
-            data=data,
-            filename=filename,
-            level=self.struct.level + 1,
-            index=index,
-            mime_type=mime_type,
+            data=data, filename=filename, level=self.struct.level + 1,
+            index=index, mime_type=mime_type, parent=parent, metadata=metadata,
         )
 
     @property
     def summary(self):
-        reports = sorted(self.reports.values(), key=lambda r: r.rank)
+        reports = sorted(self.reports.values(), key=lambda r: (r.rank, r.order))
         return reports
 
     @property
@@ -367,7 +547,7 @@ class Structure(dict):
     # Factory (with SHA-256 dedup cache)
     # ------------------------------------------------------------------
     @classmethod
-    def create(cls, filename=None, data=None, mime_type=None, level=0, index=0):
+    def create(cls, filename=None, data=None, mime_type=None, level=0, index=0, parent=None, metadata=None):
         # Read data once
         raw_data = cls._read_data(filename, data)
 
@@ -388,6 +568,8 @@ class Structure(dict):
             mime_type=mime_type,
             level=level,
             index=index,
+            parent=parent,
+            metadata=metadata,
         )
         cls._cache[sha256_hash] = new_struct
         return new_struct
@@ -411,16 +593,19 @@ class Structure(dict):
     # A2: __init__ uses data directly — no second _read_data call
     # ------------------------------------------------------------------
     def __init__(
-        self, filename=None, data=None, mime_type=None, level=0, index=0
+        self, filename=None, data=None, mime_type=None, level=0, index=0,
+        parent=None, metadata=None,
     ) -> None:
         if level > flags.max_analysis_depth:
             log.warning(
                 f"Max analysis depth reached ({flags.max_analysis_depth}), stopping analysis."
             )
+            self.metadata = metadata or {}
             self.analyzer = Analyzer(self)
             return
 
         self.analyzer = None
+        self.metadata = metadata or {}
 
         # A2: Use data directly when provided (create() always passes it)
         if data is not None:
@@ -436,7 +621,7 @@ class Structure(dict):
 
         self.level = level
         self.index = index
-        self.parent = None
+        self.parent = parent
 
         # Determine MIME type
         if mime_type is not None:
@@ -456,18 +641,7 @@ class Structure(dict):
             self.type_mismatch = False
 
         self.__children = None
-        # A1: pass self to get_analyzer for content-based probing
-        analyzer_cls = Analyzer.get_analyzer(self.mime_type, struct=self)
-        self.analyzer = analyzer_cls(self)
-
-        # If the analyzer declared failure, try its fallback
-        if getattr(self.analyzer, 'success', None) is False:
-            fallback_cls = getattr(analyzer_cls, 'fallback_analyzer', None)
-            if fallback_cls is not None:
-                log.info(
-                    f"{analyzer_cls.__name__} failed, falling back to {fallback_cls.__name__}"
-                )
-                self.analyzer = fallback_cls(self)
+        self.analyzer = Analyzer.run_all_analyzers(self)
 
     @property
     def realfile(self):
@@ -480,7 +654,8 @@ class Structure(dict):
         if self.__filename is not None:
             return self.__filename
         else:
-            return f"{self.md5[:8]}.{self.magic}"
+            ext = mimetypes.guess_extension(self.magic, strict=False) or ".bin"
+            return f"{self.md5[:8]}{ext}"
 
     @property
     def has_filename(self):
@@ -534,6 +709,15 @@ class Structure(dict):
     @property
     def has_children(self):
         return len(self.get_children()) > 0
+
+    @property
+    def max_severity(self):
+        severity = Severity.INFO
+        for report in self.analyzer.summary:
+            severity = min(severity, report.severity)
+        for child in self.get_children():
+            severity = min(severity, child.max_severity)
+        return severity
 
     @property
     def sanitized_filename(self):
