@@ -32,7 +32,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-office = ["olefile>=0.46"]
+office = ["olefile>=0.46", "oletools>=0.60"]
 pdf = ["PyPDF2", "pdf2image"]
 html = ["justhtml>=1.0"]
 msg = ["extract-msg"]
