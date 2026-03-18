@@ -17,6 +17,7 @@ class ICSAnalyzer(Analyzer):
         "application/ics",
     ]
     description = "ICS Calendar Analyser"
+    specificity = 20
 
     # URL pattern for extracting links from calendar data
     URL_PATTERN = re.compile(

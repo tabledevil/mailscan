@@ -37,10 +37,12 @@ class Flags:
 
     # --- YARA ---
     yara_rules_dir: Optional[str] = None
+    vt_api_key: Optional[str] = None
 
     # --- Output ---
     default_verbosity: int = 0
     default_format: str = "rich"
+    defang: bool = False
 
     # -----------------------------------------------------------------
     # Helpers

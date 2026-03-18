@@ -154,6 +154,7 @@ class OLEOfficeAnalyzer(Analyzer):
     ]
 
     description = "OLE Office Document Analyzer (.doc/.xls/.ppt)"
+    specificity = 10
     pip_dependencies = ["olefile"]
 
     @classmethod

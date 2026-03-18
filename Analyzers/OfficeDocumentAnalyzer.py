@@ -94,6 +94,7 @@ class OfficeDocumentAnalyzer(Analyzer):
     ]
 
     description = "Office Document Analyzer (DOCX/XLSX/PPTX)"
+    specificity = 20
 
     # If we fail, let ZipAnalyzer have a go
     fallback_analyzer = None  # resolved lazily to avoid circular import

@@ -40,6 +40,7 @@ msg = ["extract-msg"]
 lang = ["lingua-language-detector>=2.0"]
 mime = ["magika"]
 tui = ["textual>=0.40"]
+fuzzy = ["ssdeep", "py-tlsh"]
 yara = ["yara-python"]
 dev = [
     "pytest>=7.0",
@@ -47,7 +48,7 @@ dev = [
     "ruff",
 ]
 all = [
-    "matt[office,pdf,html,msg,7z,lang,mime,tui,yara]",
+    "matt[office,pdf,html,msg,7z,lang,mime,fuzzy,tui,yara]",
 ]
 
 [project.scripts]

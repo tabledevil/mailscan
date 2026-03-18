@@ -13,6 +13,7 @@ except ImportError:
 class SevenZipAnalyzer(Analyzer):
     compatible_mime_types = ['application/x-7z-compressed']
     description = "7Z-File analyser"
+    specificity = 10
     passwords = ["infected", "Infected", "iNFECTED", "INFECTED"]
 
     # py7zr is required for this analyzer to work at all

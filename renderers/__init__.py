@@ -15,6 +15,10 @@ import abc
 import logging
 from typing import TYPE_CHECKING
 
+from Utils.advanced_analysis import collect_timeline_events, enrich_iocs
+from Utils.ioc_extractor import merge_ioc_dicts, defang_ioc_data
+from Config.config import flags
+
 if TYPE_CHECKING:
     from structure import Structure
 
@@ -59,6 +63,8 @@ class Renderer(abc.ABC):
 
     def render(self, root: "Structure", verbosity: int = 0) -> str:
         """Public entry point: build report tree, then format it."""
+        self._ioc_summary = self._collect_ioc_summary(root)
+        self._timeline = collect_timeline_events(root)
         tree = self._build_tree(root, verbosity)
         return self._render(tree, verbosity)
 
@@ -103,6 +109,7 @@ class Renderer(abc.ABC):
                     "label": r.label or "",
                     "severity": r.severity.name,
                     "severity_value": int(r.severity),
+                    "order": r.order,
                     "content_type": r.content_type,
                     "data": r.data,
                 }
@@ -113,6 +120,63 @@ class Renderer(abc.ABC):
         ]
 
         return ReportNode(info, reports, children)
+
+    # ------------------------------------------------------------------
+    # IOC summary collection
+    # ------------------------------------------------------------------
+
+    def _collect_ioc_summary(self, root):
+        """Walk the struct tree, collect all 'iocs' reports, merge, and enrich."""
+        ioc_dicts = []
+
+        def walk(struct):
+            for report in struct.analyzer.summary:
+                if report.label == "iocs" and isinstance(report.data, dict):
+                    ioc_dicts.append(report.data)
+            for child in struct.get_children():
+                walk(child)
+
+        walk(root)
+        if not ioc_dicts:
+            return None
+        summary = merge_ioc_dicts(ioc_dicts).to_dict()
+        summary["passwords"] = []
+        has_findings = any(values for key, values in summary.items() if key != "passwords")
+        if not has_findings:
+            return None
+        if flags.defang:
+            summary = defang_ioc_data(summary)
+            summary["passwords"] = []
+        summary["enrichment"] = enrich_iocs(summary)
+        return summary
+
+    def format_ioc_summary_lines(self):
+        """Return formatted lines for the IOC summary section."""
+        if not self._ioc_summary:
+            return []
+        data = self._ioc_summary
+        ip_values = data.get("ipv4", []) + data.get("ipv6", [])
+        sections = [
+            ("IPs", ip_values), ("Domains", data.get("domains", [])),
+            ("URLs", data.get("urls", [])), ("Emails", data.get("emails", [])),
+            ("MD5", data.get("md5", [])), ("SHA1", data.get("sha1", [])),
+            ("SHA256", data.get("sha256", [])),
+        ]
+        lines = ["=== IOC SUMMARY ==="]
+        for label, values in sections:
+            if values:
+                lines.append(f"{label:<7}: {', '.join(values)}")
+        enrichment = data.get("enrichment", {})
+        if enrichment:
+            lines.append("")
+            lines.append("--- VT Enrichment ---")
+            for ioc_value, vt in enrichment.items():
+                hits = vt.get("malicious", 0) + vt.get("suspicious", 0)
+                if hits > 0:
+                    lines.append(f"  {ioc_value}: {hits} hit(s) (malicious={vt['malicious']}, suspicious={vt['suspicious']})")
+                else:
+                    lines.append(f"  {ioc_value}: clean")
+        return lines
 
 
 # ------------------------------------------------------------------
@@ -165,3 +229,4 @@ def _ensure_loaded():
     from renderers import json_renderer  # noqa: F401
     from renderers import markdown_renderer  # noqa: F401
     from renderers import html_renderer  # noqa: F401
+    from renderers import timeline_renderer  # noqa: F401

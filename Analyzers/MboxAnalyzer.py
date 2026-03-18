@@ -10,6 +10,7 @@ from structure import Analyzer
 class MboxAnalyzer(Analyzer):
     compatible_mime_types = ['application/mbox']
     description = "Mbox mailbox analyzer"
+    specificity = 20
 
     def analysis(self):
         super().analysis()

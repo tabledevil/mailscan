@@ -9,6 +9,7 @@ from Utils.password_broker import PasswordBroker
 class ZipAnalyzer(Analyzer):
     compatible_mime_types = ["application/zip", "application/x-zip-compressed"]
     description = "ZIP-File analyser"
+    specificity = 10
     passwords = ["infected", "Infected", "iNFECTED", "INFECTED"]
 
     def analysis(self):

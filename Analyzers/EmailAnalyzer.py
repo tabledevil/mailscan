@@ -30,6 +30,7 @@ class EmailAnalyzer(Analyzer):
     # A1: removed 'application/octet-stream' — use can_handle() instead
     compatible_mime_types = ["message/rfc822"]
     description = "Email analyser"
+    specificity = 20
     pip_dependencies = [
         ("dateutil", "python-dateutil"),
         ("pytz", "pytz"),
