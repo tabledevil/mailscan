@@ -17,7 +17,7 @@ class OfficeXMLAnalyzer(Analyzer):
 
         # Context-aware check: Only run on XMLs from known Office containers.
         # This check is done by name to avoid circular import dependencies.
-        if not self.struct.parent or not self.struct.parent.analyzer.__class__.__name__ in ['DocxAnalyzer']:
+        if not self.struct.parent or not self.struct.parent.analyzer.__class__.__name__ in ['DocxAnalyzer', 'OfficeDocumentAnalyzer']:
             return
 
         self.info = "Scanning Office XML for suspicious content."
