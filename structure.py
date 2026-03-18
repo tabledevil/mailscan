@@ -251,27 +251,26 @@ class Analyzer:
     def get_analyzer(mimetype, struct=None):
         """Find the best analyzer for the given MIME type.
 
-        1. Try exact MIME type match (first available wins).
-        2. If MIME is ambiguous (application/octet-stream), probe each analyzer
-           via ``can_handle(struct)`` for content-based matching.
-        3. Fall back to the generic ``Analyzer`` base class.
+        1. Try content-based probing (``can_handle``) — allows specialized
+           analyzers to claim files that share a MIME with a generic handler
+           (e.g. OOXML documents detected as ``application/zip``).
+        2. Try exact MIME type match (first available wins).
+        3. If MIME is ambiguous (``application/octet-stream``), probe each
+           analyzer via ``can_handle(struct)`` as a final fallback.
+        4. Fall back to the generic ``Analyzer`` base class.
         """
         ambiguous_types = {"application/octet-stream"}
 
-        # Pass 1: exact MIME match
-        for analyser in Analyzer.__subclasses__():
-            if mimetype in analyser.compatible_mime_types:
-                available, reason = analyser.is_available()
-                if not available:
-                    log.warning(
-                        f"Analyzer {analyser.__name__} is not available: {reason}"
-                    )
-                    continue
-                return analyser
-
-        # Pass 2: content-based probing for ambiguous types
-        if mimetype in ambiguous_types and struct is not None:
+        # Pass 1: content-based probing — a specialized analyzer that
+        # positively identifies the content always wins over a generic
+        # MIME match.  This lets e.g. OfficeDocumentAnalyzer claim a
+        # file detected as application/zip.  Only probes analyzers that
+        # actually override can_handle() (the base returns False).
+        if struct is not None:
             for analyser in Analyzer.__subclasses__():
+                # Skip analyzers that don't override can_handle
+                if analyser.can_handle is Analyzer.can_handle:
+                    continue
                 try:
                     if analyser.can_handle(struct):
                         available, reason = analyser.is_available()
@@ -283,6 +282,23 @@ class Analyzer:
                         return analyser
                 except Exception as e:
                     log.debug(f"can_handle() failed for {analyser.__name__}: {e}")
+
+        # Pass 2: exact MIME match
+        for analyser in Analyzer.__subclasses__():
+            if mimetype in analyser.compatible_mime_types:
+                available, reason = analyser.is_available()
+                if not available:
+                    log.warning(
+                        f"Analyzer {analyser.__name__} is not available: {reason}"
+                    )
+                    continue
+                return analyser
+
+        # Pass 3: content-based probing for truly ambiguous types
+        # (when no exact MIME match and struct available)
+        if mimetype in ambiguous_types and struct is not None:
+            # Already probed in Pass 1, no need to repeat
+            pass
 
         return Analyzer
 
@@ -441,7 +457,17 @@ class Structure(dict):
 
         self.__children = None
         # A1: pass self to get_analyzer for content-based probing
-        self.analyzer = Analyzer.get_analyzer(self.mime_type, struct=self)(self)
+        analyzer_cls = Analyzer.get_analyzer(self.mime_type, struct=self)
+        self.analyzer = analyzer_cls(self)
+
+        # If the analyzer declared failure, try its fallback
+        if getattr(self.analyzer, 'success', None) is False:
+            fallback_cls = getattr(analyzer_cls, 'fallback_analyzer', None)
+            if fallback_cls is not None:
+                log.info(
+                    f"{analyzer_cls.__name__} failed, falling back to {fallback_cls.__name__}"
+                )
+                self.analyzer = fallback_cls(self)
 
     @property
     def realfile(self):

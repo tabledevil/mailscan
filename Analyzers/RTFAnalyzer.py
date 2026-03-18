@@ -47,6 +47,11 @@ class RTFAnalyzer(Analyzer):
         "00021401": "Windows Shell Link (.lnk)",
         "f20da720": "OLE Package object",
         "00020906": "Microsoft Word Document (embedded)",
+        "3050f4d8": "MSHTML (CVE-2021-40444)",
+        "d27cdb6e": "Shockwave Flash Object",
+        "00000309": "Composite Moniker (CVE-2017-8570)",
+        "06290bd3": "Script Moniker (CVE-2017-8570)",
+        "d5de8d20": "Shell.Explorer / WebBrowser control",
     }
 
     def analysis(self):
@@ -54,6 +59,8 @@ class RTFAnalyzer(Analyzer):
         self.modules["detect_suspicious_words"] = self._detect_suspicious_control_words
         self.modules["detect_ole_objects"] = self._detect_ole_objects
         self.modules["detect_obfuscation"] = self._detect_obfuscation
+        self.modules["detect_template_injection"] = self._detect_template_injection
+        self.modules["detect_fonttbl_exploit"] = self._detect_fonttbl_exploit
         self.modules["extract_text"] = self._extract_text
         super().analysis()
 
@@ -176,6 +183,55 @@ class RTFAnalyzer(Analyzer):
                 short=f"{len(findings)} obfuscation indicator(s)",
                 label="Obfuscation indicators",
                 severity=Severity.MEDIUM,
+            )
+
+    def _detect_template_injection(self):
+        """Detect RTF template injection via {\\*\\template} control word."""
+        data = self.struct.rawdata
+        # Match {\*\template <url_or_path>}
+        pattern = re.compile(
+            rb"\{\s*\\\*\s*\\template\s+([^}]+)\}",
+            re.IGNORECASE | re.DOTALL,
+        )
+        for m in pattern.finditer(data):
+            target = m.group(1).strip()
+            try:
+                target_str = target.decode("ascii", errors="replace")
+            except Exception:
+                target_str = repr(target)
+            self.reports["rtf_template_injection"] = Report(
+                f"RTF template injection: {{\\*\\template}} points to external resource: "
+                f"{target_str[:200]}",
+                severity=Severity.CRITICAL,
+            )
+
+    def _detect_fonttbl_exploit(self):
+        """Detect CVE-2023-21716 — deeply nested font definitions in \\fonttbl."""
+        data = self.struct.rawdata
+        # Find the \fonttbl group
+        fonttbl_match = re.search(rb"\\fonttbl\b", data)
+        if not fonttbl_match:
+            return
+
+        # Measure nesting depth within the font table group
+        start = fonttbl_match.start()
+        depth = 0
+        max_depth = 0
+        for i in range(start, min(start + 50000, len(data))):
+            if data[i:i + 1] == b"{":
+                depth += 1
+                max_depth = max(max_depth, depth)
+            elif data[i:i + 1] == b"}":
+                depth -= 1
+                if depth <= 0:
+                    break
+
+        if max_depth > 10:
+            sev = Severity.CRITICAL if max_depth > 50 else Severity.HIGH
+            self.reports["fonttbl_nesting"] = Report(
+                f"Deeply nested font table ({max_depth} levels) — "
+                f"possible CVE-2023-21716 exploit attempt",
+                severity=sev,
             )
 
     def _extract_text(self):
