@@ -153,13 +153,52 @@ class OfficeDocumentAnalyzer(Analyzer):
         self._referenced_targets = set()
 
         # Run all analysis modules
+        self._analyze_content_types()
         self._analyze_structure()
         self._analyze_relationships()
         self._analyze_xml_content()
         self._analyze_vba()
         self._analyze_metadata()
         self._extract_text_and_iocs()
+        self._detect_hyperlink_abuse()
+        self._detect_svg_scripts()
         self._detect_orphans_and_emit_children()
+
+    # ------------------------------------------------------------------
+    # Content-Type validation — flag VBA in non-macro extensions
+    # ------------------------------------------------------------------
+    def _analyze_content_types(self):
+        if "[Content_Types].xml" not in self._namelist:
+            return
+        try:
+            raw = self._zip.read("[Content_Types].xml").decode("utf-8", errors="ignore")
+            root = ET.fromstring(raw.encode("utf-8"))
+        except Exception:
+            return
+
+        has_vba_content_type = False
+        for elem in root:
+            ct = elem.get("ContentType", "")
+            if "vbaProject" in ct or "macroEnabled" in ct.lower():
+                has_vba_content_type = True
+                break
+
+        if has_vba_content_type:
+            fname = (self.struct.filename or "").lower()
+            non_macro_exts = (".docx", ".xlsx", ".pptx", ".dotx", ".xltx", ".potx", ".ppsx")
+            if any(fname.endswith(ext) for ext in non_macro_exts):
+                self.reports["content_type_mismatch"] = Report(
+                    f"VBA/macro content type found in non-macro extension ({fname}). "
+                    "File may have been renamed to bypass security controls.",
+                    severity=Severity.CRITICAL,
+                )
+
+        # Check for DOCTYPE/entity declarations (XML bomb indicators)
+        if "<!DOCTYPE" in raw or "<!ENTITY" in raw:
+            self.reports["content_types_xxe"] = Report(
+                "DOCTYPE or ENTITY declaration in [Content_Types].xml — possible XXE or XML bomb",
+                severity=Severity.CRITICAL,
+            )
 
     # ------------------------------------------------------------------
     # Structural analysis (ActiveX dirs, OLE objects, embedded fonts)
@@ -222,20 +261,43 @@ class OfficeDocumentAnalyzer(Analyzer):
                 if target_mode == "External":
                     rel_type_suffix = rel_type.split("/")[-1]
                     key = f"ext_rel_{rels_path}_{rel.get('Id', '')}"
+                    target_lower = target.lower()
 
                     if "attachedTemplate" in rel_type:
                         self.reports[key] = Report(
                             f"Remote Template Injection detected. Target: {target}",
                             severity=Severity.CRITICAL,
                         )
-                    elif target.startswith("file://"):
+                    elif target_lower.startswith("mhtml:"):
                         self.reports[key] = Report(
-                            f"Potential NTLM hash leak via file:// link. Target: {target}",
+                            f"MHTML scheme in external reference — possible CVE-2021-40444 vector. "
+                            f"Target: {target}",
+                            severity=Severity.CRITICAL,
+                        )
+                    elif target_lower.startswith("ms-msdt:"):
+                        self.reports[key] = Report(
+                            f"ms-msdt: protocol handler — Follina exploit (CVE-2022-30190). "
+                            f"Target: {target}",
+                            severity=Severity.CRITICAL,
+                        )
+                    elif target.startswith("file://") or target.startswith("\\\\"):
+                        self.reports[key] = Report(
+                            f"Potential NTLM hash leak via file/UNC path. Target: {target}",
                             severity=Severity.CRITICAL,
                         )
                     elif "altChunk" in rel_type:
                         self.reports[key] = Report(
                             f"External altChunk can import external content. Target: {target}",
+                            severity=Severity.HIGH,
+                        )
+                    elif "oleObject" in rel_type:
+                        self.reports[key] = Report(
+                            f"External OLE object link (possible CVE-2017-0199). Target: {target}",
+                            severity=Severity.CRITICAL,
+                        )
+                    elif rel_type_suffix in ("frame", "subDocument"):
+                        self.reports[key] = Report(
+                            f"External {rel_type_suffix} — can load remote content. Target: {target}",
                             severity=Severity.HIGH,
                         )
                     else:
@@ -264,13 +326,21 @@ class OfficeDocumentAnalyzer(Analyzer):
             except Exception:
                 continue
 
-            # Line-based scans: DDE, XXE
+            # Line-based scans: DDE, XXE, XML bombs
+            entity_count = 0
             for line_num, line in enumerate(content.splitlines(), 1):
                 if "<!ENTITY" in line:
+                    entity_count += 1
                     key = f"xxe_{xml_path}_{line_num}"
                     self.reports[key] = Report(
                         f"Potential XXE injection in {xml_path} line {line_num}: {line.strip()[:120]}",
                         severity=Severity.CRITICAL,
+                    )
+                if "<!DOCTYPE" in line:
+                    key = f"doctype_{xml_path}_{line_num}"
+                    self.reports[key] = Report(
+                        f"DOCTYPE declaration in {xml_path} — not expected in OOXML",
+                        severity=Severity.HIGH,
                     )
                 for pattern, desc in suspicious_patterns.items():
                     if re.search(pattern, line, re.IGNORECASE):
@@ -279,6 +349,14 @@ class OfficeDocumentAnalyzer(Analyzer):
                             f"Suspicious string ({desc}) in {xml_path} line {line_num}: {line.strip()[:120]}",
                             severity=Severity.CRITICAL,
                         )
+
+            # XML bomb detection: multiple nested entity definitions
+            if entity_count > 3:
+                self.reports[f"xml_bomb_{xml_path}"] = Report(
+                    f"Possible XML bomb (Billion Laughs) in {xml_path}: "
+                    f"{entity_count} entity definitions found",
+                    severity=Severity.CRITICAL,
+                )
 
             # XML-parsed checks: suspicious tags
             try:
@@ -531,6 +609,82 @@ class OfficeDocumentAnalyzer(Analyzer):
         except Exception:
             pass
         return texts
+
+    # ------------------------------------------------------------------
+    # Hyperlink abuse — dangerous protocol handlers in links
+    # ------------------------------------------------------------------
+    def _detect_hyperlink_abuse(self):
+        """Detect hyperlinks using dangerous protocol handlers."""
+        _DANGEROUS_PROTOCOLS = {
+            "ms-msdt:": "Follina exploit (CVE-2022-30190)",
+            "ms-excel:": "Excel protocol handler abuse",
+            "ms-word:": "Word protocol handler abuse",
+            "mhtml:": "MHTML handler (CVE-2021-40444)",
+            "cid:": "Content-ID reference",
+        }
+        w_ns = _WORD_NS["w"]
+
+        for filepath in self._namelist:
+            if not filepath.endswith(".xml"):
+                continue
+            try:
+                raw = self._zip.read(filepath)
+                root = ET.fromstring(raw)
+            except Exception:
+                continue
+
+            # Word hyperlinks: <w:hyperlink r:id="..." /> and inline
+            for hl in root.iter(f"{{{w_ns}}}hyperlink"):
+                # Check w:anchor and r:id (the target is in .rels, already scanned)
+                pass
+
+            # Look for hyperlink targets directly in XML (PowerPoint, Excel)
+            # Also detect file:// with ! (CVE-2024-21413 MonikerLink)
+            content = raw.decode("utf-8", errors="ignore")
+            # Match href="..." or Target="..." patterns containing protocols
+            for m in re.finditer(r'(?:href|Target)\s*=\s*"([^"]+)"', content):
+                url = m.group(1)
+                url_lower = url.lower()
+
+                for proto, desc in _DANGEROUS_PROTOCOLS.items():
+                    if url_lower.startswith(proto):
+                        key = f"hyperlink_abuse_{filepath}_{proto}"
+                        self.reports[key] = Report(
+                            f"Dangerous hyperlink protocol ({desc}): {url[:200]}",
+                            severity=Severity.CRITICAL,
+                        )
+                        break
+
+                # CVE-2024-21413: file:// with ! to bypass Protected View
+                if url_lower.startswith("file://") and "!" in url:
+                    self.reports[f"monikerlink_{filepath}"] = Report(
+                        f"MonikerLink attack (CVE-2024-21413): file:// URL with '!' "
+                        f"bypasses Protected View. URL: {url[:200]}",
+                        severity=Severity.CRITICAL,
+                    )
+
+    # ------------------------------------------------------------------
+    # SVG script detection in embedded media files
+    # ------------------------------------------------------------------
+    def _detect_svg_scripts(self):
+        """Detect JavaScript in embedded SVG files (SVG smuggling)."""
+        svg_files = [f for f in self._namelist if f.lower().endswith(".svg")]
+        for svg_path in svg_files:
+            try:
+                content = self._zip.read(svg_path).decode("utf-8", errors="ignore")
+                if re.search(r"<script[\s>]", content, re.IGNORECASE):
+                    self.reports[f"svg_script_{svg_path}"] = Report(
+                        f"SVG file contains <script> tag (SVG smuggling): {svg_path}",
+                        severity=Severity.CRITICAL,
+                    )
+                # Also check for event handlers (onload, onclick, etc.)
+                if re.search(r'\bon\w+\s*=', content, re.IGNORECASE):
+                    self.reports[f"svg_event_{svg_path}"] = Report(
+                        f"SVG file contains event handler attributes: {svg_path}",
+                        severity=Severity.HIGH,
+                    )
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # Orphan detection + child emission (combined to avoid duplication)

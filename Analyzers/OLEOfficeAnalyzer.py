@@ -47,16 +47,44 @@ _OLE_MAGIC = b"\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1"
 
 # Well-known dangerous CLSIDs (lowercase, with dashes)
 _DANGEROUS_CLSIDS = {
+    # Standard Office document types
     "00020906-0000-0000-c000-000000000046": "Microsoft Word Document",
     "00020900-0000-0000-c000-000000000046": "Microsoft Word 6.0-7.0 Document",
     "00020820-0000-0000-c000-000000000046": "Microsoft Excel Worksheet",
     "00020810-0000-0000-c000-000000000046": "Microsoft Excel 5.0/95 Worksheet",
     "64818d10-4f9b-11cf-86ea-00aa00b929e8": "Microsoft PowerPoint Presentation",
+    "d5cdd505-2e9c-101b-9397-08002b2cf9ae": "DocumentSummaryInformation",
+    # Exploit-associated CLSIDs
     "0002ce02-0000-0000-c000-000000000046": "Equation Editor 3.0 (CVE-2017-11882)",
     "0003000c-0000-0000-c000-000000000046": "OLE Package object",
     "f20da720-c02f-11ce-927b-0800095ae340": "OLE Package (alternate)",
     "00021401-0000-0000-c000-000000000046": "Windows Shell Link (.lnk)",
-    "d5cdd505-2e9c-101b-9397-08002b2cf9ae": "DocumentSummaryInformation",
+    # MSHTML / browser controls
+    "3050f4d8-98b5-11cf-bb82-00aa00bdce0b": "MSHTML (CVE-2021-40444 related)",
+    "25336920-03f9-11cf-8fd0-00aa00686f13": "MSHTML (HTMLDocument)",
+    "d5de8d20-5bb8-11d1-a1e3-00a0c90f2731": "Shell.Explorer / WebBrowser control",
+    # Flash (end-of-life but still seen in legacy attacks)
+    "d27cdb6e-ae6d-11cf-96b8-444553540000": "Shockwave Flash Object",
+    # Moniker CLSIDs (CVE-2017-8570, CVE-2017-8759)
+    "00000309-0000-0000-c000-000000000046": "Composite Moniker (CVE-2017-8570)",
+    "06290bd3-48aa-11d2-8432-006008c3fbfc": "Script Moniker (CVE-2017-8570)",
+    "ecabafc6-7f19-11d2-978e-0000f8757e2a": "New Moniker",
+    # Scripting engines
+    "0002e005-0000-0000-c000-000000000046": "Outlook DataObject",
+    "f4754c9b-64f5-4b40-8af4-679732ac0607": "Equation Editor (alternate CLSID)",
+}
+
+# CLSIDs that indicate critical severity (exploit vectors)
+_CRITICAL_CLSIDS = {
+    "0002ce02-0000-0000-c000-000000000046",  # Equation Editor
+    "f4754c9b-64f5-4b40-8af4-679732ac0607",  # Equation Editor alt
+    "00021401-0000-0000-c000-000000000046",  # Shell Link
+    "3050f4d8-98b5-11cf-bb82-00aa00bdce0b",  # MSHTML
+    "25336920-03f9-11cf-8fd0-00aa00686f13",  # MSHTML alt
+    "d5de8d20-5bb8-11d1-a1e3-00a0c90f2731",  # WebBrowser
+    "00000309-0000-0000-c000-000000000046",  # Composite Moniker
+    "06290bd3-48aa-11d2-8432-006008c3fbfc",  # Script Moniker
+    "d27cdb6e-ae6d-11cf-96b8-444553540000",  # Flash
 }
 
 # CLSIDs that identify document type
@@ -242,9 +270,9 @@ class OLEOfficeAnalyzer(Analyzer):
                     label += f" ({desc})"
                 self.reports["root_clsid"] = Report(label)
 
-                if clsid_lower in _DANGEROUS_CLSIDS and "equation" in _DANGEROUS_CLSIDS[clsid_lower].lower():
-                    self.reports["equation_editor"] = Report(
-                        "Equation Editor CLSID detected — associated with CVE-2017-11882 exploit",
+                if clsid_lower in _CRITICAL_CLSIDS:
+                    self.reports["dangerous_root_clsid"] = Report(
+                        f"Dangerous root CLSID: {_DANGEROUS_CLSIDS.get(clsid_lower, clsid_lower)}",
                         severity=Severity.CRITICAL,
                     )
         except Exception:
@@ -259,7 +287,7 @@ class OLEOfficeAnalyzer(Analyzer):
                     clsid_lower = clsid.lower()
                     if clsid_lower in _DANGEROUS_CLSIDS:
                         desc = _DANGEROUS_CLSIDS[clsid_lower]
-                        sev = Severity.CRITICAL if "equation" in desc.lower() or "shell link" in desc.lower() else Severity.MEDIUM
+                        sev = Severity.CRITICAL if clsid_lower in _CRITICAL_CLSIDS else Severity.MEDIUM
                         self.reports[f"clsid_{path}"] = Report(
                             f"Storage '{path}' has CLSID {clsid} ({desc})",
                             severity=sev,
