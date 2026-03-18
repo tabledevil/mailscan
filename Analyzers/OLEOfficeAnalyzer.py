@@ -28,7 +28,7 @@ except ImportError:
 
 # Try to import VBA extractor
 try:
-    from Utils.vba_extractor import extract_vba_from_ole_data, scan_vba_code
+    from Utils.vba_extractor import extract_vba_from_ole_data
 
     _VBA_AVAILABLE = True
 except ImportError:
