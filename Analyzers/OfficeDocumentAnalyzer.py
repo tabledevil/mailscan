@@ -14,6 +14,7 @@ import io
 import logging
 import os
 import re
+import struct as struct_mod
 import xml.etree.ElementTree as ET
 import zipfile
 
@@ -62,6 +63,30 @@ _APP_NS = {
 _WORD_NS = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
 _EXCEL_NS = {"s": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
 _PPT_NS = {"a": "http://schemas.openxmlformats.org/drawingml/2006/main"}
+
+
+def _clsid_str_to_bytes(clsid_str):
+    """Convert a CLSID string (e.g. '0002ce02-0000-...') to its little-endian binary form."""
+    parts = clsid_str.split("-")
+    # GUID binary: Data1 (LE 32), Data2 (LE 16), Data3 (LE 16), Data4 (8 bytes big-endian)
+    d1 = int(parts[0], 16)
+    d2 = int(parts[1], 16)
+    d3 = int(parts[2], 16)
+    d4 = bytes.fromhex(parts[3] + parts[4])
+    return struct_mod.pack("<IHH", d1, d2, d3) + d4
+
+
+def _measure_xml_depth(root):
+    """Iteratively measure maximum nesting depth of an ElementTree."""
+    max_depth = 0
+    stack = [(root, 1)]
+    while stack:
+        elem, depth = stack.pop()
+        if depth > max_depth:
+            max_depth = depth
+        for child in elem:
+            stack.append((child, depth + 1))
+    return max_depth
 
 
 class OfficeDocumentAnalyzer(Analyzer):
@@ -150,6 +175,17 @@ class OfficeDocumentAnalyzer(Analyzer):
 
         self.info = f"Office document — {len(self._namelist)} internal parts"
 
+        # Path traversal check
+        traversal_paths = [
+            n for n in self._namelist
+            if ".." in n.replace("\\", "/").split("/")
+        ]
+        if traversal_paths:
+            self.reports["zip_path_traversal"] = Report(
+                f"Path traversal in OOXML archive: {', '.join(traversal_paths[:10])}",
+                severity=Severity.CRITICAL,
+            )
+
         # Collect all referenced targets from .rels files
         self._referenced_targets = set()
 
@@ -159,6 +195,7 @@ class OfficeDocumentAnalyzer(Analyzer):
         self._analyze_relationships()
         self._analyze_xml_content()
         self._analyze_vba()
+        self._check_embedded_clsids()
         self._analyze_metadata()
         self._extract_text_and_iocs()
         self._detect_hyperlink_abuse()
@@ -201,6 +238,95 @@ class OfficeDocumentAnalyzer(Analyzer):
                 severity=Severity.CRITICAL,
             )
 
+        # --- Content_Types cross-validation ---
+        ct_ns = root.tag.split("}")[0] + "}" if "}" in root.tag else ""
+        override_parts = {}  # PartName -> list of ContentTypes
+        default_exts = set()
+
+        for elem in root:
+            tag = elem.tag.replace(ct_ns, "")
+            if tag == "Override":
+                pn = elem.get("PartName", "")
+                ct = elem.get("ContentType", "")
+                override_parts.setdefault(pn, []).append(ct)
+            elif tag == "Default":
+                ext = elem.get("Extension", "").lower()
+                if ext:
+                    default_exts.add(ext)
+
+        # 2a — Phantom parts: Override for PartNames not in ZIP
+        phantoms = [
+            pn for pn in override_parts
+            if pn.lstrip("/") not in self._namelist
+        ]
+        if phantoms:
+            self.reports["phantom_content_parts"] = Report(
+                f"Content_Types declares parts not in archive: "
+                f"{', '.join(phantoms[:10])}",
+                severity=Severity.MEDIUM,
+            )
+
+        # 2b — Undeclared parts: ZIP entries with no matching declaration
+        override_normalized = {pn.lstrip("/") for pn in override_parts}
+        skip_patterns = (".rels", "[Content_Types].xml")
+        undeclared = []
+        for name in self._namelist:
+            if name.endswith("/"):
+                continue
+            if any(name.endswith(sp) for sp in skip_patterns):
+                continue
+            if name == "[Content_Types].xml":
+                continue
+            if name in override_normalized:
+                continue
+            ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+            if ext and ext in default_exts:
+                continue
+            undeclared.append(name)
+        if undeclared:
+            self.reports["undeclared_parts"] = Report(
+                f"ZIP entries with no Content_Types declaration: "
+                f"{', '.join(undeclared[:10])}",
+                severity=Severity.MEDIUM,
+            )
+
+        # 2c — Conflicting overrides: same PartName, different ContentTypes
+        conflicts = {
+            pn: cts for pn, cts in override_parts.items()
+            if len(set(cts)) > 1
+        }
+        if conflicts:
+            details = "; ".join(
+                f"{pn}: {', '.join(cts)}" for pn, cts in conflicts.items()
+            )
+            self.reports["content_type_conflict"] = Report(
+                f"Conflicting Content_Type overrides: {details}",
+                severity=Severity.HIGH,
+            )
+
+        # 2d — Non-standard content types
+        _KNOWN_CT_PREFIXES = (
+            "application/vnd.openxmlformats-",
+            "application/vnd.ms-",
+            "application/xml",
+            "application/zip",
+            "application/octet-stream",
+            "image/",
+            "audio/",
+            "video/",
+            "text/",
+        )
+        unusual = []
+        for pn, cts in override_parts.items():
+            for ct in cts:
+                if not any(ct.startswith(p) for p in _KNOWN_CT_PREFIXES):
+                    unusual.append(f"{pn}: {ct}")
+        if unusual:
+            self.reports["unusual_content_type"] = Report(
+                f"Non-standard content types: {'; '.join(unusual[:10])}",
+                severity=Severity.LOW,
+            )
+
     # ------------------------------------------------------------------
     # Structural analysis (ActiveX dirs, OLE objects, embedded fonts)
     # ------------------------------------------------------------------
@@ -231,6 +357,7 @@ class OfficeDocumentAnalyzer(Analyzer):
     # ------------------------------------------------------------------
     def _analyze_relationships(self):
         rels_files = [f for f in self._namelist if f.endswith(".rels")]
+        all_rel_types = set()  # Collect all Type URIs for nonstandard check
 
         for rels_path in rels_files:
             try:
@@ -248,6 +375,8 @@ class OfficeDocumentAnalyzer(Analyzer):
                 target = rel.get("Target", "")
                 target_mode = rel.get("TargetMode", "Internal")
                 rel_type = rel.get("Type", "")
+                if rel_type:
+                    all_rel_types.add(rel_type)
 
                 # Track referenced internal targets for orphan detection
                 if target_mode != "External" and target:
@@ -307,6 +436,34 @@ class OfficeDocumentAnalyzer(Analyzer):
                             severity=Severity.HIGH,
                         )
 
+        # 3a — Dangling references: internal targets not in the ZIP
+        dangling = [
+            t for t in self._referenced_targets
+            if t not in self._namelist and t.lstrip("/") not in self._namelist
+        ]
+        if dangling:
+            self.reports["dangling_references"] = Report(
+                f"Relationship targets not found in archive: "
+                f"{', '.join(dangling[:10])}",
+                severity=Severity.MEDIUM,
+            )
+
+        # 3b — Non-standard relationship types
+        _KNOWN_REL_PREFIXES = (
+            "http://schemas.openxmlformats.org/",
+            "http://schemas.microsoft.com/",
+            "http://purl.oclc.org/",
+        )
+        nonstandard = {
+            rt for rt in all_rel_types
+            if not any(rt.startswith(p) for p in _KNOWN_REL_PREFIXES)
+        }
+        if nonstandard:
+            self.reports["nonstandard_rel_type"] = Report(
+                f"Non-standard relationship types: {'; '.join(sorted(nonstandard)[:10])}",
+                severity=Severity.LOW,
+            )
+
     # ------------------------------------------------------------------
     # XML content analysis (absorbs OfficeXMLAnalyzer)
     # ------------------------------------------------------------------
@@ -359,7 +516,7 @@ class OfficeDocumentAnalyzer(Analyzer):
                     severity=Severity.CRITICAL,
                 )
 
-            # XML-parsed checks: suspicious tags
+            # XML-parsed checks: suspicious tags, depth, mc:AlternateContent
             try:
                 root = ET.fromstring(content.encode("utf-8"))
                 ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
@@ -373,10 +530,41 @@ class OfficeDocumentAnalyzer(Analyzer):
                             f"Suspicious tag '{tag}' ({desc}) found in {xml_path}.",
                             severity=Severity.HIGH,
                         )
+
+                # 4a — Deep nesting detection
+                depth = _measure_xml_depth(root)
+                if depth > 50:
+                    self.reports[f"deep_nesting_{xml_path}"] = Report(
+                        f"Excessive XML nesting depth ({depth} levels) in {xml_path} "
+                        f"— possible parser confusion attack",
+                        severity=Severity.MEDIUM,
+                    )
+
+                # 4c — Excessive mc:AlternateContent
+                mc_ns = "http://schemas.openxmlformats.org/markup-compatibility/2006"
+                mc_count = len(root.findall(f".//{{{mc_ns}}}AlternateContent"))
+                if mc_count > 10:
+                    self.reports[f"mc_heavy_{xml_path}"] = Report(
+                        f"{mc_count} mc:AlternateContent elements in {xml_path} "
+                        f"— may hide content from parsers",
+                        severity=Severity.MEDIUM,
+                    )
             except ET.ParseError:
                 pass
 
-            # Custom XML payload detection
+            # 4b — Large inline blobs (base64-like strings)
+            # Skip customXml/ files — they have a dedicated lower-threshold check below
+            if "customXml" not in xml_path:
+                blob_match = re.search(r"[A-Za-z0-9+/=]{500,}", content)
+                if blob_match:
+                    excerpt = blob_match.group(0)[:75]
+                    self.reports[f"large_blob_{xml_path}"] = Report(
+                        f"Large base64-like blob ({len(blob_match.group(0))} chars) in {xml_path}. "
+                        f"Excerpt: {excerpt}...",
+                        severity=Severity.MEDIUM,
+                    )
+
+            # Custom XML payload detection (lower threshold for customXml/)
             if "customXml" in xml_path:
                 match = re.search(r"[A-Za-z0-9+/=]{50,}", content)
                 if match:
@@ -440,6 +628,44 @@ class OfficeDocumentAnalyzer(Analyzer):
                     )
             except Exception as e:
                 log.debug(f"VBA extraction failed for {vba_path}: {e}")
+
+    # ------------------------------------------------------------------
+    # Embedded object CLSID scan
+    # ------------------------------------------------------------------
+    def _check_embedded_clsids(self):
+        """Scan files in /embeddings/ and /activeX/ for known dangerous CLSIDs."""
+        from Analyzers.OLEOfficeAnalyzer import _DANGEROUS_CLSIDS, _CRITICAL_CLSIDS
+
+        # Pre-compute binary representations of critical CLSIDs
+        clsid_map = {}
+        for clsid_str in _CRITICAL_CLSIDS:
+            try:
+                clsid_map[_clsid_str_to_bytes(clsid_str)] = (
+                    clsid_str,
+                    _DANGEROUS_CLSIDS.get(clsid_str, clsid_str),
+                )
+            except (ValueError, struct_mod.error):
+                continue
+
+        target_files = [
+            f for f in self._namelist
+            if ("/embeddings/" in f or "/activeX/" in f)
+            and not f.endswith(".xml") and not f.endswith(".rels")
+            and not f.endswith("/")
+        ]
+
+        for filepath in target_files:
+            try:
+                data = self._zip.read(filepath)
+            except Exception:
+                continue
+            for clsid_bytes, (clsid_str, desc) in clsid_map.items():
+                if clsid_bytes in data:
+                    self.reports[f"embedded_clsid_{filepath}"] = Report(
+                        f"Dangerous CLSID in {filepath}: {desc} ({clsid_str})",
+                        severity=Severity.CRITICAL,
+                    )
+                    break  # one finding per file is enough
 
     # ------------------------------------------------------------------
     # Metadata extraction from docProps/core.xml and docProps/app.xml
