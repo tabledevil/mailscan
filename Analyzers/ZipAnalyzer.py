@@ -1,7 +1,7 @@
 import logging
 import zipfile
 import io
-from structure import Analyzer, Report
+from structure import Analyzer, Report, Severity
 from Config.config import flags
 from Utils.password_broker import PasswordBroker
 
@@ -47,6 +47,29 @@ class ZipAnalyzer(Analyzer):
                         "Zip bomb detected: total uncompressed size is too large."
                     )
                     return
+
+                # Path traversal checks (Zip Slip)
+                traversal_paths = []
+                absolute_paths = []
+                for f in zip_file.infolist():
+                    name = f.filename.replace("\\", "/")
+                    if ".." in name.split("/"):
+                        traversal_paths.append(f.filename)
+                    elif name.startswith("/"):
+                        absolute_paths.append(f.filename)
+                if traversal_paths:
+                    self.reports["path_traversal"] = Report(
+                        f"ZIP path traversal (Zip Slip) detected: "
+                        f"{', '.join(traversal_paths[:10])}",
+                        severity=Severity.CRITICAL,
+                    )
+                    return
+                if absolute_paths:
+                    self.reports["absolute_path"] = Report(
+                        f"ZIP contains absolute paths: "
+                        f"{', '.join(absolute_paths[:10])}",
+                        severity=Severity.HIGH,
+                    )
 
                 is_encrypted = any(f.flag_bits & 0x1 for f in zip_file.infolist())
 
