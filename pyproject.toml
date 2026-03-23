@@ -42,13 +42,14 @@ mime = ["magika"]
 tui = ["textual>=0.40"]
 fuzzy = ["ssdeep", "py-tlsh"]
 yara = ["yara-python"]
+js = ["jsbeautifier>=1.14"]
 dev = [
     "pytest>=7.0",
     "pytest-cov",
     "ruff",
 ]
 all = [
-    "matt[office,pdf,html,msg,7z,lang,mime,fuzzy,tui,yara]",
+    "matt[office,pdf,html,msg,7z,lang,mime,fuzzy,tui,yara,js]",
 ]
 
 [project.scripts]

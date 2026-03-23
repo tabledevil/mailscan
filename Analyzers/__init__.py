@@ -24,6 +24,7 @@ analyzers_list = [
     "ImageAnalyzer",
     "ICSAnalyzer",
     "RARAnalyzer",
+    "ScriptAnalyzer",
 ]
 
 # We need the Analyzer base class to filter subclasses properly.

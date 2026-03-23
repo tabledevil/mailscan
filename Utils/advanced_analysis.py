@@ -362,6 +362,20 @@ def mitre_attack_techniques(struct, analyzer) -> list[dict]:
         if filename.endswith((".bat", ".cmd")) or "cmd.exe invocation" in behavior_text:
             add("T1059.003", "Command and Scripting Interpreter: Windows Command Shell", "Batch or command shell payload")
 
+    # General behavior-based techniques (not gated to a specific analyzer)
+    if "download cradle" in behavior_text or "ingress tool transfer" in behavior_text:
+        add("T1105", "Ingress Tool Transfer", "Download cradle detected")
+    if "obfuscation score" in behavior_text and ("high" in behavior_text or "critical" in behavior_text):
+        add("T1027", "Obfuscated Files or Information", "Heavy obfuscation detected")
+    if "registry" in behavior_text and "run" in behavior_text:
+        add("T1547.001", "Boot or Logon Autostart Execution: Registry Run Keys", "Registry persistence")
+    if "scheduled task" in behavior_text or "schtasks" in behavior_text:
+        add("T1053", "Scheduled Task/Job", "Task scheduler persistence")
+    if "mshta" in behavior_text:
+        add("T1218.005", "System Binary Proxy Execution: Mshta", "Mshta execution")
+    if "rundll32" in behavior_text:
+        add("T1218.011", "System Binary Proxy Execution: Rundll32", "Rundll32 execution")
+
     return techniques
 
 
