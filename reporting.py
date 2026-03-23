@@ -15,6 +15,8 @@ class ReportManager:
                 "size": structure_item.size,
                 "filename": structure_item.filename if structure_item.has_filename else None,
                 "md5": structure_item.md5,
+                "sha1": structure_item.sha1,
+                "sha256": structure_item.sha256,
                 "analyzer_info": structure_item.analyzer.info,
             },
             "reports": [report.to_dict() for report in structure_item.analyzer.summary if report.verbosity <= self.verbosity],
@@ -43,6 +45,8 @@ class ReportManager:
         if node['info']['filename']:
             yield f"filename : {node['info']['filename']}\n"
         yield f"md5      : {node['info']['md5']}\n"
+        yield f"sha1     : {node['info']['sha1']}\n"
+        yield f"sha256   : {node['info']['sha256']}\n"
 
         for report in node['reports']:
             label = report['label'] or ''
@@ -73,6 +77,8 @@ class ReportManager:
         if node['info']['filename']:
             yield f"{content_prefix}filename : {node['info']['filename']}\n"
         yield f"{content_prefix}md5      : {node['info']['md5']}\n"
+        yield f"{content_prefix}sha1     : {node['info']['sha1']}\n"
+        yield f"{content_prefix}sha256   : {node['info']['sha256']}\n"
 
         for report in node['reports']:
             label = report['label'] or ''

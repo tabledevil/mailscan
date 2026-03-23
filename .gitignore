@@ -22,3 +22,6 @@ dist/
 test.*
 #ignore the NUL device artifact
 NUL
+.beta-test-*
+.beta-test-headers-*
+.beta-test-route-*
