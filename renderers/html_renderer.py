@@ -40,6 +40,16 @@ h1 { font-size: 1.4em; border-bottom: 2px solid #1976d2; padding-bottom: 0.3em; 
                   font-weight: 700; color: #fff; margin-right: 0.4em; vertical-align: middle; }
 .report-text { white-space: pre-wrap; word-break: break-word; }
 img.preview { max-width: 600px; max-height: 400px; border: 1px solid #bdbdbd; margin-top: 0.3em; }
+.hop-table { border-collapse: collapse; width: 100%; font-size: 0.85em; margin: 0.5em 0; }
+.hop-table th { background: #e3f2fd; padding: 0.4em 0.6em; text-align: left; border-bottom: 2px solid #1976d2; }
+.hop-table td { padding: 0.4em 0.6em; border-bottom: 1px solid #e0e0e0; vertical-align: top; }
+.hop-table tr:hover { background: #f5f5f5; }
+.hop-inferred { background: #fff3e0; font-style: italic; color: #795548; }
+.tls-yes { color: #2e7d32; font-weight: 600; }
+.tls-no { color: #c62828; font-weight: 700; }
+.delta-neg { color: #c62828; font-weight: 700; }
+.delta-high { color: #f9a825; }
+.hop-footer { font-size: 0.85em; color: #616161; padding: 0.3em 0.6em; }
 """
 
 
@@ -90,7 +100,9 @@ class HtmlRenderer(Renderer):
             )
             label = html.escape(report["label"])
 
-            if report["content_type"] == "image/png" and report.get("data"):
+            if report["content_type"] == "application/x-matt-hops":
+                self._render_hop_table(report, parts)
+            elif report["content_type"] == "image/png" and report.get("data"):
                 parts.append(
                     f'<div class="report">{badge}'
                     f'<span class="report-label">{label}</span>: '
@@ -113,3 +125,91 @@ class HtmlRenderer(Renderer):
             self._render_node(child, parts)
 
         parts.append("</div>")
+
+    @staticmethod
+    def _render_hop_table(report: dict, parts: list[str]):
+        """Render mail route hops as an HTML table."""
+        hops = report.get("data", {}).get("hops", [])
+        if not hops:
+            text = html.escape(str(report.get("text", "")))
+            parts.append(f'<div class="report"><span class="report-label">mail_route</span>: '
+                         f'<span class="report-text">{text}</span></div>')
+            return
+
+        parts.append('<div class="report"><span class="report-label">mail_route</span>')
+        parts.append('<table class="hop-table">')
+        parts.append('<tr><th>#</th><th>Server (by)</th><th>From</th>'
+                     '<th>Proto</th><th>TLS</th><th>Timestamp</th><th>Delta</th></tr>')
+
+        for hop in hops:
+            num = hop["hop"]
+
+            # Server
+            by = html.escape(hop["by_hostname"])
+            by_ip = html.escape(hop.get("by_ip", ""))
+            by_cell = by
+            if by_ip and by_ip != by:
+                by_cell += f' <span style="color:#757575">[{by_ip}]</span>'
+            srv = html.escape(hop.get("server_type", ""))
+            if srv:
+                by_cell += f'<br><span style="color:#757575;font-style:italic">{srv}</span>'
+
+            # From
+            from_name = html.escape(hop.get("from_name", "?"))
+            from_ip = html.escape(hop.get("from_ip", ""))
+            from_cell = from_name
+            if from_ip and from_ip != from_name:
+                from_cell += f' <span style="color:#757575">[{from_ip}]</span>'
+            ann = hop.get("annotations", [])
+            if ann:
+                from_cell += f' <span style="color:#757575;font-style:italic">({", ".join(html.escape(a) for a in ann)})</span>'
+
+            # TLS
+            tls_val = html.escape(hop.get("tls") or hop.get("cipher", ""))
+            if tls_val:
+                tls_cell = f'<span class="tls-yes">{tls_val}</span>'
+            elif hop.get("no_tls"):
+                tls_cell = '<span class="tls-no">NONE</span>'
+            else:
+                tls_cell = ""
+
+            # Timestamp
+            ts = html.escape(hop.get("timestamp", ""))
+            ts_cell = ts
+            if hop.get("tz_changed"):
+                prev = html.escape(hop.get("prev_tz", ""))
+                cur = html.escape(hop.get("tz_offset", ""))
+                ts_cell += f'<br><span style="color:#f9a825">{prev} &rarr; {cur}</span>'
+
+            # Delta
+            delta_s = hop.get("delta_seconds")
+            delta_d = html.escape(hop.get("delta_display", ""))
+            if delta_d:
+                if delta_s is not None and delta_s < 0:
+                    delta_cell = f'<span class="delta-neg">{delta_d}</span>'
+                elif delta_s is not None and delta_s > 300:
+                    delta_cell = f'<span class="delta-high">+{delta_d}</span>'
+                else:
+                    delta_cell = f'+{delta_d}'
+            else:
+                delta_cell = ""
+
+            parts.append(f'<tr><td>{num}</td><td>{by_cell}</td><td>{from_cell}</td>'
+                         f'<td>{html.escape(hop.get("protocol", ""))}</td>'
+                         f'<td>{tls_cell}</td><td>{ts_cell}</td><td>{delta_cell}</td></tr>')
+
+            # Inferred hops
+            for inf in hop.get("inferred_after", []):
+                inf_label = html.escape(inf.get("label", ""))
+                parts.append(f'<tr class="hop-inferred"><td>~</td>'
+                             f'<td colspan="6">[inferred] {inf_label}</td></tr>')
+
+        parts.append('</table>')
+
+        # Footer
+        if hops:
+            last_hop = hops[-1]
+            for item in last_hop.get("footer", []):
+                parts.append(f'<div class="hop-footer">{html.escape(item.get("label", ""))}</div>')
+
+        parts.append('</div>')

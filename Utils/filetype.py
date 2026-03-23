@@ -240,6 +240,34 @@ def get_provider_status(order: Optional[Sequence[str]] = None) -> List[Dict[str,
     return status
 
 
+def detect_all_providers(data: bytes, filename: Optional[str] = None) -> List[Dict[str, str]]:
+    """Run all available MIME detection providers and return their results.
+
+    Returns a list of dicts with keys: provider, mime, description, error.
+    Each provider is tried regardless of whether others succeeded.
+    """
+    order = _resolve_provider_order()
+    results = []
+    for provider_name in order:
+        provider = _PROVIDERS.get(provider_name)
+        if provider is None:
+            results.append({"provider": provider_name, "mime": "", "description": "", "error": "unknown provider"})
+            continue
+        try:
+            result = provider.detect(data, filename=filename)
+            results.append({
+                "provider": result.provider,
+                "mime": result.mime,
+                "description": result.description,
+                "error": "",
+            })
+        except ProviderError as exc:
+            results.append({"provider": provider_name, "mime": "", "description": "", "error": str(exc)})
+        except Exception as exc:
+            results.append({"provider": provider_name, "mime": "", "description": "", "error": str(exc)})
+    return results
+
+
 def detect_mime(data: bytes, filename: Optional[str] = None) -> DetectionResult:
     errors: List[str] = []
     order = _resolve_provider_order()
