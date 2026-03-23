@@ -171,39 +171,71 @@ class Analyzer:
                 verbosity=1, order=5, data=dict(meta),
             )
 
+    # Fields to skip from exiftool output (filesystem artifacts from stdin pipe)
+    _EXIFTOOL_SKIP_FIELDS = {
+        "SourceFile", "FileName", "Directory", "FileSize", "FilePermissions",
+        "FileModifyDate", "FileAccessDate", "FileInodeChangeDate",
+    }
+    _EXIFTOOL_SKIP_GROUPS = {"ExifTool"}
+
     def _report_exiftool(self):
         if not shutil.which("exiftool"):
-            return
-        mime = getattr(self.struct, "mime_type", "") or ""
-        if mime.startswith(("text/", "message/", "application/xml", "application/json", "application/mbox")):
             return
         try:
             import json as _json
             result = subprocess.run(
-                ["exiftool", "-json", "-"],
+                ["exiftool", "-groupNames", "-json", "-"],
                 input=self.struct.rawdata,
                 capture_output=True, timeout=10,
             )
-            if result.returncode == 0:
-                parsed = _json.loads(result.stdout)
-                if parsed and isinstance(parsed, list):
-                    info = parsed[0]
-                    skip = {"SourceFile", "ExifToolVersion", "FileName", "Directory", "FileSize",
-                            "FileModifyDate", "FileAccessDate", "FileInodeChangeDate",
-                            "FilePermissions", "FileType", "FileTypeExtension", "MIMEType", "Error"}
-                    entries = [(k, str(v)) for k, v in info.items() if k not in skip and v]
-                    if entries:
-                        max_key = min(max(len(k) for k, _ in entries), 24)
-                        lines = []
-                        for k, v in entries:
-                            if len(k) > max_key:
-                                lines.append(f"{k}: {v}")
-                            else:
-                                lines.append(f"{k:<{max_key}} : {v}")
-                        self.reports["_file_exiftool"] = Report(
-                            "\n".join(lines), short=f"{len(lines)} EXIF field(s)",
-                            label="exiftool", severity=Severity.INFO, verbosity=2, order=15,
-                        )
+            if result.returncode != 0:
+                return
+            parsed = _json.loads(result.stdout)
+            if not parsed or not isinstance(parsed, list):
+                return
+            raw = parsed[0]
+
+            # Build grouped dict: {"File": {...}, "FlashPix": {...}, ...}
+            grouped = {}
+            for raw_key, val in raw.items():
+                if ":" not in raw_key:
+                    continue
+                group, _, field = raw_key.partition(":")
+                if group in self._EXIFTOOL_SKIP_GROUPS:
+                    continue
+                if field in self._EXIFTOOL_SKIP_FIELDS:
+                    continue
+                # Normalize value: skip empty/None, join lists
+                if val is None or val == "" or val == "Unknown":
+                    continue
+                if isinstance(val, list):
+                    val = ", ".join(str(v) for v in val if v)
+                    if not val:
+                        continue
+                else:
+                    val = str(val)
+                grouped.setdefault(group, {})[field] = val
+
+            if not grouped:
+                return
+
+            # Build flat text for non-Rich renderers
+            lines = []
+            for group_name, fields in grouped.items():
+                lines.append(f"[{group_name}]")
+                max_key = min(max((len(k) for k in fields), default=0), 24)
+                for k, v in fields.items():
+                    if len(k) > max_key:
+                        lines.append(f"  {k}: {v}")
+                    else:
+                        lines.append(f"  {k:<{max_key}} : {v}")
+
+            total_fields = sum(len(f) for f in grouped.values())
+            self.reports["_file_exiftool"] = Report(
+                "\n".join(lines), short=f"{total_fields} exiftool field(s)",
+                label="exiftool", severity=Severity.INFO, verbosity=2, order=15,
+                data=grouped,
+            )
         except Exception:
             pass
 

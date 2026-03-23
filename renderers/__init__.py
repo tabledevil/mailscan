@@ -78,14 +78,60 @@ class Renderer(abc.ABC):
     # ------------------------------------------------------------------
 
     def _build_tree(self, struct: "Structure", verbosity: int) -> ReportNode:
+        # Collect magic/detection details
+        magic_info = {}
+        try:
+            det = struct.magic_detection
+            magic_info["magic_mime"] = det.mime
+            magic_info["magic_description"] = det.description
+            magic_info["magic_provider"] = det.provider
+        except Exception:
+            pass
+
+        # Run all file type providers for comprehensive detection
+        all_detections = []
+        try:
+            from Utils.filetype import detect_all_providers
+            all_detections = detect_all_providers(struct.rawdata, filename=struct.filename if struct.has_filename else None)
+        except Exception:
+            pass
+
+        # Extract exiftool filetype from the exiftool report if it was produced
+        # (search all reports regardless of verbosity — filetype belongs in type panel)
+        exiftool_filetype = {}
+        for r in struct.analyzer.summary:
+            if r.label == "exiftool" and isinstance(r.data, dict):
+                file_group = r.data.get("File", {})
+                if file_group.get("FileType"):
+                    exiftool_filetype["filetype"] = file_group["FileType"]
+                if file_group.get("FileTypeExtension"):
+                    exiftool_filetype["extension"] = file_group["FileTypeExtension"]
+                if file_group.get("MIMEType"):
+                    exiftool_filetype["mime"] = file_group["MIMEType"]
+                break
+
+        # Block entropy map
+        entropy_map = []
+        try:
+            from Utils.advanced_analysis import block_entropy
+            entropy_map = block_entropy(struct.rawdata, num_blocks=64)
+        except Exception:
+            pass
+
         info = {
             "index": struct.index,
             "mime_type": struct.mime_type,
             "size": struct.size,
             "filename": struct.filename if struct.has_filename else None,
             "md5": struct.md5,
+            "sha1": struct.sha1,
+            "sha256": struct.sha256,
             "analyzer_name": type(struct.analyzer).__name__,
             "analyzer_info": struct.analyzer.info,
+            "all_detections": all_detections,
+            "exiftool_filetype": exiftool_filetype,
+            "entropy_map": entropy_map,
+            **magic_info,
         }
 
         # Gather reports that pass the verbosity filter
@@ -114,6 +160,12 @@ class Renderer(abc.ABC):
                     "data": r.data,
                 }
             )
+
+        # Truncate large text content at low verbosity
+        if verbosity < 2:
+            for report in reports:
+                if report["content_type"] == "text/plain" and isinstance(report["text"], str) and len(report["text"]) > 2048:
+                    report["text"] = report["text"][:2048] + f"\n... [truncated, {len(report['text'])} chars total]"
 
         children = [
             self._build_tree(child, verbosity) for child in struct.get_children()
