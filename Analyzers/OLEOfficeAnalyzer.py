@@ -241,6 +241,7 @@ class OLEOfficeAnalyzer(Analyzer):
         self.reports["streams"] = Report(
             "\n".join(stream_paths) if stream_paths else "(empty)",
             label="OLE streams",
+            verbosity=3,
         )
 
         # Flag suspicious streams
