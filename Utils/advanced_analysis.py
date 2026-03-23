@@ -46,6 +46,25 @@ def shannon_entropy(data: bytes) -> float:
     return -sum((count / total) * math.log2(count / total) for count in counts.values())
 
 
+def block_entropy(data: bytes, num_blocks: int = 64) -> list[float]:
+    """Compute Shannon entropy for each block of data.
+
+    Returns a list of entropy values (0.0-8.0), one per block.
+    Useful for visualizing entropy distribution across a file.
+    """
+    if not data or num_blocks < 1:
+        return []
+    block_size = max(1, len(data) // num_blocks)
+    result = []
+    for i in range(0, len(data), block_size):
+        chunk = data[i:i + block_size]
+        if chunk:
+            result.append(shannon_entropy(chunk))
+        if len(result) >= num_blocks:
+            break
+    return result
+
+
 def entropy_assessment(data: bytes, mime_type: str | None = None) -> dict:
     entropy = shannon_entropy(data)
     size = len(data)
