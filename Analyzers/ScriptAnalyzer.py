@@ -49,6 +49,7 @@ class ScriptAnalyzer(Analyzer):
     description = "JavaScript/Script Analyser"
     specificity = 20
     optional_pip_dependencies = [("jsbeautifier", "jsbeautifier")]
+    optional_system_dependencies = ["box-js"]
     extra = "js"
 
     # Extensions recognized for content probing
@@ -107,6 +108,8 @@ class ScriptAnalyzer(Analyzer):
         self.modules["extract_base64"] = self._extract_base64
         self.modules["beautify"] = self._beautify
         self.modules["detect_jse"] = self._detect_jse
+        self.modules["deobfuscate"] = self._deobfuscate
+        self.modules["dynamic_analysis"] = self._dynamic
         super().analysis()
 
     def _identify(self):
@@ -380,3 +383,149 @@ class ScriptAnalyzer(Analyzer):
                 mime_type="application/javascript",
             )
         )
+
+    def _deobfuscate(self):
+        """Run JStillery / de4js deobfuscation and re-scan for threats."""
+        if not hasattr(self, "_source"):
+            return
+
+        from Utils.js_tools import (
+            jstillery_available, run_jstillery,
+            de4js_available, run_de4js,
+        )
+
+        deobfuscated = None
+        tool_name = None
+
+        # Try JStillery first (AST-based, higher quality)
+        if jstillery_available():
+            deobfuscated = run_jstillery(self._source)
+            if deobfuscated:
+                tool_name = "JStillery"
+
+        # Try de4js if JStillery didn't produce results
+        if not deobfuscated and de4js_available():
+            deobfuscated = run_de4js(self._source)
+            if deobfuscated:
+                tool_name = "de4js"
+
+        if not deobfuscated:
+            return
+
+        self.reports["deobfuscated"] = Report(
+            f"Deobfuscated by {tool_name} ({len(deobfuscated)} chars)",
+            short=f"Deobfuscated via {tool_name}",
+            label="deobfuscated", severity=Severity.INFO, verbosity=1, order=71,
+        )
+
+        # Re-scan deobfuscated source for threats the static pass missed
+        new_findings = detect_threat_patterns(deobfuscated)
+        existing_patterns = {r.label.split(":")[-1] for k, r in self.reports.items()
+                            if k.startswith("threat_")}
+
+        for finding in new_findings:
+            if finding["pattern"] not in existing_patterns:
+                idx = len([k for k in self.reports if k.startswith("threat_")])
+                sev = getattr(Severity, finding["severity"])
+                self.reports[f"threat_{idx}"] = Report(
+                    f"[post-deobfuscation] {finding['description']}\n"
+                    f"  Context: ...{finding['context']}...",
+                    short=f"[deobf] {finding['description']}",
+                    label=f"threat:{finding['pattern']}",
+                    severity=sev, verbosity=0, order=30 + idx,
+                )
+
+        # Re-check kill chain with combined findings
+        all_findings = detect_threat_patterns(self._source) + new_findings
+        if "kill_chain" not in self.reports and detect_kill_chain(all_findings):
+            self.reports["kill_chain"] = Report(
+                "Kill chain detected (post-deobfuscation): download + write + execute",
+                short="Kill chain: download + write + execute",
+                label="kill_chain", severity=Severity.CRITICAL, verbosity=0, order=25,
+            )
+
+        # Emit deobfuscated source as child (text/plain to avoid re-trigger)
+        self.childitems.append(self.generate_struct(
+            data=deobfuscated.encode("utf-8"),
+            filename="deobfuscated.js", mime_type="text/plain",
+        ))
+
+    def _dynamic(self):
+        """Run box-js dynamic analysis."""
+        from Utils.js_tools import boxjs_available, run_boxjs
+
+        if not boxjs_available():
+            return
+
+        result = run_boxjs(self.struct.rawdata)
+        if not result:
+            return
+
+        # --- URLs ---
+        urls = result.get("urls", [])
+        active_urls = result.get("active_urls", [])
+        if urls:
+            sev = Severity.CRITICAL if active_urls else Severity.HIGH
+            url_text = "\n".join(
+                f"  {'[ACTIVE] ' if u in active_urls else ''}{u}" for u in urls
+            )
+            self.reports["boxjs_urls"] = Report(
+                f"box-js: {len(urls)} URL(s) requested"
+                f" ({len(active_urls)} delivering payloads)\n{url_text}",
+                short=f"box-js: {len(urls)} URL(s), {len(active_urls)} active",
+                label="boxjs_urls", severity=sev, verbosity=0, order=26,
+                data={"urls": urls, "active_urls": active_urls},
+            )
+
+        # --- IOCs ---
+        iocs = result.get("ioc", [])
+        if iocs:
+            ioc_text = "\n".join(f"  {ioc}" for ioc in iocs[:20])
+            self.reports["boxjs_iocs"] = Report(
+                f"box-js: {len(iocs)} IOC(s)\n{ioc_text}",
+                short=f"box-js: {len(iocs)} IOC(s)",
+                label="boxjs_iocs", severity=Severity.HIGH, verbosity=0, order=27,
+                data={"iocs": iocs},
+            )
+
+        # --- Snippets (executed code: JS, cmd, PowerShell) ---
+        snippets = result.get("snippets", [])
+        if snippets:
+            for i, snippet in enumerate(snippets[:10]):
+                snip_text = snippet if isinstance(snippet, str) else str(snippet)
+                if len(snip_text) > 20:
+                    self.childitems.append(self.generate_struct(
+                        data=snip_text.encode("utf-8"),
+                        filename=f"boxjs_snippet_{i}.txt",
+                        mime_type="text/plain",
+                    ))
+            self.reports["boxjs_snippets"] = Report(
+                f"box-js: {len(snippets)} code snippet(s) executed",
+                short=f"box-js: {len(snippets)} snippet(s)",
+                label="boxjs_snippets", severity=Severity.MEDIUM, verbosity=1, order=28,
+            )
+
+        # --- Resources (files written to disk) ---
+        resources = result.get("resources", [])
+        if resources:
+            res_lines = []
+            for res in resources[:10]:
+                if isinstance(res, dict):
+                    res_lines.append(
+                        f"  {res.get('filename', '?')} ({res.get('type', 'unknown')})"
+                    )
+                else:
+                    res_lines.append(f"  {res}")
+            self.reports["boxjs_resources"] = Report(
+                f"box-js: {len(resources)} file(s) written\n" + "\n".join(res_lines),
+                short=f"box-js: {len(resources)} file(s) written",
+                label="boxjs_resources", severity=Severity.HIGH, verbosity=0, order=29,
+                data={"resources": resources},
+            )
+
+        # --- Extracted payloads as children ---
+        for payload in result.get("payloads", []):
+            self.childitems.append(self.generate_struct(
+                data=payload["data"],
+                filename=payload["filename"],
+            ))
