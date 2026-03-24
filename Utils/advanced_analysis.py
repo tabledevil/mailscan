@@ -46,21 +46,35 @@ def shannon_entropy(data: bytes) -> float:
     return -sum((count / total) * math.log2(count / total) for count in counts.values())
 
 
+_MIN_BLOCK_SIZE = 1024  # 1 KB — minimum for stable Shannon entropy readings
+
+
 def block_entropy(data: bytes, num_blocks: int = 64) -> list[float]:
     """Compute Shannon entropy for each block of data.
 
     Returns a list of entropy values (0.0-8.0), one per block.
     Useful for visualizing entropy distribution across a file.
+
+    Block size is capped at a minimum of 1024 bytes to ensure stable
+    entropy readings (256-byte alphabet needs ~4x samples).  Files
+    smaller than 1024 bytes return an empty list (use overall entropy).
     """
     if not data or num_blocks < 1:
         return []
-    block_size = max(1, len(data) // num_blocks)
+    size = len(data)
+    if size < _MIN_BLOCK_SIZE:
+        return []
+    # Derive block count: at most num_blocks, but never smaller than 1 KB each
+    actual_blocks = min(num_blocks, size // _MIN_BLOCK_SIZE)
+    if actual_blocks < 1:
+        return []
+    block_size = size // actual_blocks
     result = []
-    for i in range(0, len(data), block_size):
+    for i in range(0, size, block_size):
         chunk = data[i:i + block_size]
         if chunk:
             result.append(shannon_entropy(chunk))
-        if len(result) >= num_blocks:
+        if len(result) >= actual_blocks:
             break
     return result
 
