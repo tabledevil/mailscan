@@ -1,0 +1,17 @@
+.git
+samples/
+build/
+dist/
+*.egg-info/
+__pycache__/
+*.pyc
+.idea/
+.vscode/
+.claude/
+.pytest_cache/
+.beta-test-*
+extract/
+*.eml
+NUL
+Dockerfile
+.dockerignore
