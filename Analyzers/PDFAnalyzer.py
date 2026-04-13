@@ -48,17 +48,24 @@ class PDFAnalyzer(Analyzer):
 
 
     def get_text(self):
-        if hasattr(self,"pdfobj"):
-            text = ""
+        if hasattr(self, "pdfobj"):
+            text_parts = []
             for page in range(self.page_count):
                 try:
                     page_object = self.pdfobj.pages[page]
-                    text += page_object.extract_text()
+                    extracted_text = page_object.extract_text()
+                    if extracted_text:
+                        text_parts.append(extracted_text)
                 except Exception as e:
                     logging.warning(f"Could not extract text from page {page}: {e}")
+            text = "".join(text_parts)
             if len(text) > 0:
-                self.childitems.append(self.generate_struct(data=text.encode(), mime_type="text/plain"))
-                self.reports['text'] = Report(text, short=textwrap.shorten(text, width=100))
+                self.childitems.append(
+                    self.generate_struct(data=text.encode(), mime_type="text/plain")
+                )
+                self.reports["text"] = Report(
+                    text, short=textwrap.shorten(text, width=100)
+                )
 
     def getAttachments(self):
         if not hasattr(self, 'pdfobj'):
