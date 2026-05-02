@@ -280,6 +280,60 @@ def _strip_pdf_noise(data: bytes) -> bytes:
     return data
 
 
+# ---- /ObjStm decompression ------------------------------------
+#
+# Modern PDFs (Ghostscript, qpdf, pdftk, Acrobat by default) wrap most
+# of their objects in compressed object streams. A naive byte-scan only
+# sees the encrypted-looking compressed payload; the actual /JavaScript
+# / /Launch / /OpenAction markers inside are invisible.
+#
+# Origami's parser decompresses /ObjStm transparently, so pdfcop's
+# walker sees through it. To match that coverage natively, we find each
+# ``<< /Type /ObjStm … /Filter /FlateDecode >> stream … endstream``
+# pair, FlateDecode the payload, and *append* the decoded bytes to the
+# scan input so all the same regexes catch markers regardless of where
+# they live.
+
+_RE_OBJSTM_STREAM = re.compile(
+    # Stream dict containing /Type /ObjStm, ending with `stream\n…endstream`.
+    # Use non-greedy to stop at the first endstream after each match.
+    rb"<<[^>]*?/Type\s*/ObjStm[^>]*?>>\s*stream\r?\n(.*?)\r?\nendstream",
+    re.DOTALL,
+)
+
+
+def _decompress_objstms(rawdata: bytes) -> bytes:
+    """Return the concatenated FlateDecode'd payload of every /ObjStm
+    stream in the document, as one bytes blob suitable for appending to
+    the scan input. Returns ``b""`` when no /ObjStm exists or zlib fails.
+
+    Note: real PDF /ObjStm streams may also use /Predictor / multi-filter
+    chains. We handle the common case (single FlateDecode) since that's
+    what every mainstream producer emits; chained or predictor-equipped
+    streams degrade gracefully (no marker visibility loss vs the old
+    behavior — markers in such streams were already invisible)."""
+    if b"/ObjStm" not in rawdata:
+        return b""
+    import zlib
+    chunks: list[bytes] = []
+    for m in _RE_OBJSTM_STREAM.finditer(rawdata):
+        compressed = m.group(1)
+        try:
+            decoded = zlib.decompress(compressed)
+        except zlib.error:
+            # Try raw deflate (no zlib header) as a fallback — some
+            # producers emit raw streams.
+            try:
+                decoded = zlib.decompress(compressed, -15)
+            except zlib.error:
+                continue
+        chunks.append(decoded)
+    if not chunks:
+        return b""
+    # Separator helps avoid markers spanning concat boundaries.
+    return b"\n%MATT-OBJSTM-DECODED%\n" + b"\n".join(chunks)
+
+
 # Action: /S /<Name>   (with optional whitespace, allowing for indirect
 # references in between via the /Type /Action key).
 _RE_ACTION_S = re.compile(rb"/S\s*/([A-Za-z][A-Za-z0-9]*)")
@@ -306,6 +360,13 @@ def scan(rawdata: bytes) -> list[Finding]:
     occurrences are collapsed into ``count``)."""
     if not rawdata or rawdata[:5] not in (b"%PDF-", b"\xef\xbb\xbf%PDF"):
         return []
+
+    # Decompress any /ObjStm streams and append their payload — markers
+    # hidden in compressed object streams are otherwise invisible to the
+    # byte-level regex scan.
+    objstm_decoded = _decompress_objstms(rawdata)
+    if objstm_decoded:
+        rawdata = rawdata + objstm_decoded
 
     cleaned = _strip_pdf_noise(rawdata)
 
