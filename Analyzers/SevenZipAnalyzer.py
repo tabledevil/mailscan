@@ -1,5 +1,5 @@
 import logging
-from structure import Analyzer, Report
+from structure import Analyzer, Report, Severity
 from Config.config import flags
 from Utils.temp_manager import TempFileManager
 import lzma
@@ -92,5 +92,22 @@ class SevenZipAnalyzer(Analyzer):
             filelist = [f.filename for f in archive.list()]
             self.info = f'{len(filelist)} compressed file(s)'
             self.reports['summary'] = Report('\n'.join(filelist))
+
+            # Compression ratio
+            if self.struct.size > 0 and total_uncompressed_size > 0:
+                ratio = total_uncompressed_size / self.struct.size
+                severity = (
+                    Severity.MEDIUM if ratio > 100
+                    else Severity.LOW if ratio > 20
+                    else Severity.INFO
+                )
+                self.reports['compression_ratio'] = Report(
+                    f"{ratio:.1f}:1 "
+                    f"({total_uncompressed_size:,} / {self.struct.size:,} bytes)",
+                    short=f"{ratio:.1f}:1",
+                    label='compression_ratio',
+                    severity=severity,
+                    verbosity=0,
+                )
         except Exception as e:
             logging.error(f"Failed to extract files from 7z archive: {e}")

@@ -25,12 +25,36 @@ _SEVERITY_COLOURS = {
     "INFO": "#757575",
 }
 
+# Severity int (CRITICAL=0 … INFO=4) -> CSS colour for node-header tinting.
+_SEVERITY_BORDER = {
+    0: "#d32f2f",
+    1: "#e64a19",
+    2: "#f9a825",
+    3: "#1976d2",
+    4: "#bdbdbd",
+}
+
+
+def _tree_max_severity(node) -> int:
+    """Walk children to find the worst severity in the subtree (lower = worse)."""
+    worst = node.max_severity
+    for child in node.children:
+        worst = min(worst, _tree_max_severity(child))
+    return worst
+
 _CSS = """\
 :root { font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; font-size: 14px; }
 body { margin: 2em; background: #fafafa; color: #212121; }
 h1 { font-size: 1.4em; border-bottom: 2px solid #1976d2; padding-bottom: 0.3em; }
 .node { margin-left: 1.5em; border-left: 2px solid #e0e0e0; padding-left: 1em; margin-bottom: 0.8em; }
+.node-sev-0 { border-left-color: #d32f2f; }
+.node-sev-1 { border-left-color: #e64a19; }
+.node-sev-2 { border-left-color: #f9a825; }
+.node-sev-3 { border-left-color: #1976d2; }
 .node-header { font-weight: 600; font-size: 0.95em; margin-bottom: 0.3em; }
+.node-sev-badge { display: inline-block; padding: 0 0.4em; border-radius: 3px; font-size: 0.7em;
+                  font-weight: 700; color: #fff; margin-left: 0.6em; vertical-align: middle; }
+.hash { font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 0.8em; color: #424242; }
 .meta { color: #616161; font-size: 0.85em; }
 .meta span { margin-right: 1.2em; }
 .md5 { font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 0.85em; color: #424242; }
@@ -70,15 +94,24 @@ class HtmlRenderer(Renderer):
         return "\n".join(parts)
 
     def _render_node(self, node: ReportNode, parts: list[str], root: bool = False):
-        cls = "node" if not root else "node" + " root"
+        sev = _tree_max_severity(node)
+        sev_name = {0: "CRITICAL", 1: "HIGH", 2: "MEDIUM", 3: "LOW", 4: "INFO"}[sev]
+        sev_class = f"node-sev-{sev}" if sev <= 3 else ""
+        cls = " ".join(c for c in ["node", "root" if root else "", sev_class] if c)
         parts.append(f'<div class="{cls}">')
 
         mime = html.escape(str(node.info["mime_type"] or ""))
         size = node.info["size"]
         idx = html.escape(str(node.info["index"]))
+        sev_badge = ""
+        if sev <= 2:  # only MEDIUM or worse warrants a header badge
+            sev_badge = (
+                f'<span class="node-sev-badge" '
+                f'style="background:{_SEVERITY_BORDER[sev]}">{sev_name}</span>'
+            )
         parts.append(
             f'<div class="node-header">{idx} &raquo; {mime} '
-            f'<span class="meta">({size} bytes)</span></div>'
+            f'<span class="meta">({size} bytes)</span>{sev_badge}</div>'
         )
 
         info = html.escape(str(node.info["analyzer_info"] or ""))
@@ -89,7 +122,14 @@ class HtmlRenderer(Renderer):
             parts.append(f'<div class="meta"><span>Filename: {fn}</span></div>')
 
         md5 = html.escape(str(node.info["md5"] or ""))
-        parts.append(f'<div class="meta"><span class="md5">MD5: {md5}</span></div>')
+        sha1 = html.escape(str(node.info.get("sha1") or ""))
+        sha256 = html.escape(str(node.info.get("sha256") or ""))
+        hash_parts = [f'<span class="hash">MD5: {md5}</span>']
+        if sha1:
+            hash_parts.append(f'<span class="hash">SHA1: {sha1}</span>')
+        if sha256:
+            hash_parts.append(f'<span class="hash">SHA256: {sha256}</span>')
+        parts.append(f'<div class="meta">{" ".join(hash_parts)}</div>')
 
         for report in node.reports:
             sev = report["severity"]

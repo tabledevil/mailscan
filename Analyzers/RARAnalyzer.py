@@ -65,6 +65,23 @@ class RARAnalyzer(Analyzer):
 
             # RAR bomb detection
             total_uncompressed = sum(f.file_size for f in file_list)
+
+            # Compression ratio
+            if self.struct.size > 0 and total_uncompressed > 0:
+                ratio = total_uncompressed / self.struct.size
+                severity = (
+                    Severity.MEDIUM if ratio > 100
+                    else Severity.LOW if ratio > 20
+                    else Severity.INFO
+                )
+                self.reports["compression_ratio"] = Report(
+                    f"{ratio:.1f}:1 "
+                    f"({total_uncompressed:,} / {self.struct.size:,} bytes)",
+                    short=f"{ratio:.1f}:1",
+                    label="compression_ratio",
+                    severity=severity,
+                    verbosity=0,
+                )
             if (
                 self.struct.size > 0
                 and total_uncompressed / self.struct.size > flags.max_compression_ratio

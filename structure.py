@@ -145,6 +145,18 @@ class Analyzer:
         self._report_yara_matches()
         self._report_virustotal()
         self._report_mitre_attack()
+        self._fill_report_labels()
+
+    def _fill_report_labels(self):
+        """Backfill `Report.label` from the `self.reports` dict key when an
+        analyzer omitted `label=`. Renderers read `report.label` directly,
+        so leaving it empty produced bare `:` separators in HTML/markdown."""
+        for key, report in self.reports.items():
+            if report is None:
+                continue
+            if not getattr(report, "label", ""):
+                # Strip leading underscore used to mark internal reports
+                report.label = key.lstrip("_")
 
     def _report_archive_context(self):
         meta = getattr(self.struct, "metadata", None)
@@ -675,6 +687,147 @@ class Structure(dict):
         self.__children = None
         self.analyzer = Analyzer.run_all_analyzers(self)
 
+        # Root-only post-pass: aggregate IOCs found across the entire tree.
+        # Children rarely have `parent` set (most analyzers don't thread it),
+        # so we use level==0 as the authoritative "this is the user's input".
+        if level == 0:
+            self._build_ioc_aggregate()
+            self._build_capability_hints()
+
+    def _build_ioc_aggregate(self):
+        """Walk the analyzed tree and union all per-analyzer IOC results into
+        a single root-level report. Display text is defanged so analysts can
+        paste it without triggering link previews."""
+        try:
+            from Utils.ioc_extractor import IOCResult, extract_iocs, defang
+        except ImportError:
+            return
+
+        agg = IOCResult()
+
+        def visit(struct):
+            analyzer = getattr(struct, "analyzer", None)
+            if analyzer is not None:
+                # Per-analyzer cached IOCResult (PlainText, OLE, OfficeDoc)
+                cached = getattr(analyzer, "_ioc_result", None)
+                if cached is not None:
+                    agg.merge(cached)
+                # Also harvest IOCs from any text-like report payloads on
+                # this node so we catch hops, summaries, etc.
+                for report in getattr(analyzer, "reports", {}).values():
+                    text = getattr(report, "text", None)
+                    if isinstance(text, str) and text:
+                        try:
+                            agg.merge(extract_iocs(text))
+                        except Exception:
+                            pass
+            for child in struct.get_children() if hasattr(struct, "get_children") else []:
+                visit(child)
+
+        try:
+            visit(self)
+        except Exception:
+            return
+
+        if not agg.has_findings:
+            return
+
+        lines = []
+        if agg.urls:
+            lines.append("URLs:    " + ", ".join(defang(u) for u in agg.urls))
+        if agg.ipv4:
+            lines.append("IPv4:    " + ", ".join(defang(ip) for ip in agg.ipv4))
+        if agg.ipv6:
+            lines.append("IPv6:    " + ", ".join(agg.ipv6))
+        if agg.domains:
+            lines.append("Domains: " + ", ".join(defang(d) for d in agg.domains))
+        if agg.emails:
+            lines.append("Emails:  " + ", ".join(defang(e) for e in agg.emails))
+        if agg.md5:
+            lines.append("MD5:     " + ", ".join(agg.md5))
+        if agg.sha1:
+            lines.append("SHA1:    " + ", ".join(agg.sha1))
+        if agg.sha256:
+            lines.append("SHA256:  " + ", ".join(agg.sha256))
+        if agg.passwords:
+            lines.append("Passwords: " + ", ".join(agg.passwords))
+
+        severity = Severity.MEDIUM if (agg.urls or agg.ipv4) else Severity.INFO
+        summary = ", ".join(agg.summary_parts())
+        if self.analyzer is not None:
+            self.analyzer.reports["iocs_aggregate"] = Report(
+                "\n".join(lines),
+                short=summary,
+                label="iocs_aggregate",
+                severity=severity,
+                order=95,
+                data=agg.to_dict(),
+            )
+
+    def _build_capability_hints(self):
+        """Emit INFO reports listing optional analysis capabilities (YARA,
+        VirusTotal) that were skipped because they're not configured. Helps
+        the analyst notice "I could enable this" without having to hunt
+        through ``--check`` output."""
+        try:
+            from Config.config import flags as _flags
+            import os as _os
+        except ImportError:
+            return
+
+        hints = []
+
+        # YARA — emit hint when no rules dir is configured AND no yara reports
+        # fired anywhere (i.e. it's not just that no rules matched — it's that
+        # the subsystem couldn't run).
+        yara_dir = getattr(_flags, "yara_rules_dir", None)
+        if not yara_dir and not self._tree_has_report("yara"):
+            hints.append(
+                "YARA: no rules dir configured "
+                "(set --yara-rules-dir or flags.yara_rules_dir to enable scanning)"
+            )
+
+        # VirusTotal — only hint when no API key AND no virustotal reports.
+        vt_key = (getattr(_flags, "vt_api_key", None)
+                  or _os.environ.get("VT_API_KEY")
+                  or _os.environ.get("VIRUSTOTAL_API_KEY"))
+        if not vt_key and not self._tree_has_report("virustotal"):
+            hints.append(
+                "VirusTotal: no API key "
+                "(set VT_API_KEY env var or flags.vt_api_key for hash/IOC enrichment)"
+            )
+
+        if not hints or self.analyzer is None:
+            return
+
+        self.analyzer.reports["capability_hints"] = Report(
+            "\n".join(hints),
+            short=f"{len(hints)} optional check(s) skipped",
+            label="capability_hints",
+            severity=Severity.INFO,
+            verbosity=1,  # hide at default verbosity — opt-in info
+            order=98,
+        )
+
+    def _tree_has_report(self, label: str) -> bool:
+        """True if any node in this subtree has a report with the given label."""
+        analyzer = getattr(self, "analyzer", None)
+        if analyzer is not None:
+            for r in getattr(analyzer, "reports", {}).values():
+                if getattr(r, "label", "") == label:
+                    return True
+        try:
+            children = self.get_children()
+        except Exception:
+            return False
+        for child in children:
+            try:
+                if child._tree_has_report(label):
+                    return True
+            except Exception:
+                continue
+        return False
+
     @property
     def realfile(self):
         if self.__filename and os.path.isfile(self.__filename):
@@ -761,7 +914,17 @@ class Structure(dict):
 
     @property
     def generated_filename(self):
-        ext = mimetypes.guess_extension(self.magic, strict=False) or ".bin"
+        # Prefer the extension from the original filename when present —
+        # MIME-derived extensions lose intent (e.g. SWIFT...JS detected as
+        # text/plain would otherwise be saved as .txt).
+        original = getattr(self, "_Structure__filename", None) or self.filename
+        ext = ""
+        if original:
+            _, raw_ext = os.path.splitext(original)
+            if raw_ext and len(raw_ext) <= 8:
+                ext = raw_ext.lower()
+        if not ext:
+            ext = mimetypes.guess_extension(self.magic, strict=False) or ".bin"
         return f"{self.md5}{ext}"
 
     @property

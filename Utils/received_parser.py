@@ -325,6 +325,20 @@ def build_hop_display_data(hops: list[ReceivedHop], gateway_findings: list[dict]
         # Self-loop: from and by are the same host
         if from_str.lower().rstrip(".") == by_str.lower().rstrip("."):
             annotations.append("self-loop")
+        # Well-known relay annotations (Microsoft 365, Google, Mimecast, …).
+        # Cheap pattern match — no I/O.
+        try:
+            from Utils.relay_cache import RelayCache
+            for lab in RelayCache.annotate(by_str, by_ip):
+                if lab not in annotations:
+                    annotations.append(lab)
+            for lab in RelayCache.annotate(from_str, from_ip):
+                if lab not in annotations and lab not in ("internal", "self-loop"):
+                    annotations.append(f"from:{lab}")
+            # Record sightings (persisted) — cheap, async on disk.
+            RelayCache.observe(by_str, by_ip)
+        except Exception as e:
+            log.debug("relay_cache annotate failed: %s", e)
 
         tz_changed = bool(prev_tz and tz_offset and tz_offset != prev_tz)
         no_tls = not hop.has_tls and hop.from_display != "?" and "self-loop" not in annotations
