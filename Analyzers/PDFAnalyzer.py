@@ -183,27 +183,288 @@ class PDFAnalyzer(Analyzer):
                 data={"count": emitted},
             )
 
+    @staticmethod
+    def _walk_name_tree(node, _seen=None):
+        """Yield ``(name, value)`` pairs from a PDF name tree, descending
+        through hierarchical ``/Kids`` nodes. Handles the three valid
+        shapes:
+
+          * leaf with ``/Names`` (flat array of [name, value, name, value …])
+          * branch with ``/Kids`` (array of refs to sub-trees)
+          * combined (some real-world PDFs put both)
+        """
+        if _seen is None:
+            _seen = set()
+        try:
+            from PyPDF2.generic import IndirectObject
+            if isinstance(node, IndirectObject):
+                if node.idnum in _seen:
+                    return
+                _seen.add(node.idnum)
+                node = node.get_object()
+            if not hasattr(node, "get"):
+                return
+            names = node.get("/Names")
+            if names:
+                for i in range(0, len(names) - 1, 2):
+                    yield names[i], names[i + 1]
+            kids = node.get("/Kids")
+            if kids:
+                for kid in kids:
+                    yield from PDFAnalyzer._walk_name_tree(kid, _seen)
+        except Exception as e:
+            logging.debug("name-tree walk failed: %s", e)
+
+    @staticmethod
+    def _filespec_payload(fs_dict):
+        """Extract the payload bytes from a /Filespec dict's /EF stream.
+        Returns ``(name, bytes)`` or ``None``."""
+        try:
+            from PyPDF2.generic import IndirectObject
+            if isinstance(fs_dict, IndirectObject):
+                fs_dict = fs_dict.get_object()
+            ef = fs_dict.get("/EF") if hasattr(fs_dict, "get") else None
+            if not ef:
+                return None
+            # /F is the canonical key; /UF (unicode) and /DOS / /Mac / /Unix
+            # are platform-specific siblings — try them in order.
+            for key in ("/F", "/UF", "/DOS", "/Mac", "/Unix"):
+                stream = ef.get(key) if hasattr(ef, "get") else None
+                if stream is None:
+                    continue
+                if isinstance(stream, IndirectObject):
+                    stream = stream.get_object()
+                if hasattr(stream, "get_data"):
+                    name = (fs_dict.get("/F") or fs_dict.get("/UF")
+                            or "embedded.bin")
+                    return str(name), stream.get_data()
+        except Exception as e:
+            logging.debug("filespec payload extract failed: %s", e)
+        return None
+
     def getAttachments(self):
+        """Recursively harvest every embedded file from a PDF.
+
+        Covers four embedding paths:
+          1. ``/Catalog/Names/EmbeddedFiles`` (flat OR hierarchical name tree)
+          2. ``/Catalog/AF`` (Associated Files — PDF/A-3, PDF/UA)
+          3. ``/Page/Annots`` with ``/Subtype /FileAttachment`` and ``/FS``
+          4. ``/Catalog/AF`` per-page (some PDFs duplicate associated
+             files at page granularity)
+        """
         if not hasattr(self, 'pdfobj'):
             return
-        try:
-            catalog = self.pdfobj.trailer["/Root"]
-            if '/Names' not in catalog or '/EmbeddedFiles' not in catalog['/Names'] or '/Names' not in catalog['/Names']['/EmbeddedFiles']:
-                return
 
-            fileNames = catalog['/Names']['/EmbeddedFiles']['/Names']
-            attachments = {}
-            for i in range(0, len(fileNames), 2):
-                name = fileNames[i]
-                fDict = fileNames[i+1].get_object()
-                if '/EF' in fDict and '/F' in fDict['/EF']:
-                    fData = fDict['/EF']['/F'].get_data()
-                    attachments[name] = fData
-            self.embedded_files = attachments
-            for name, data in attachments.items():
-                self.childitems.append(self.generate_struct(data=data, filename=name))
+        seen_payload_keys: set[tuple] = set()
+        attachments: list[tuple[str, bytes, str]] = []  # (name, data, source)
+
+        def emit(name: str, data: bytes, source: str) -> None:
+            if not data:
+                return
+            key = (len(data), data[:64])
+            if key in seen_payload_keys:
+                return
+            seen_payload_keys.add(key)
+            attachments.append((name, data, source))
+
+        try:
+            from PyPDF2.generic import IndirectObject as _Ind
+            catalog = self.pdfobj.trailer["/Root"]
+            if isinstance(catalog, _Ind):
+                catalog = catalog.get_object()
+
+            def _resolve(o):
+                while isinstance(o, _Ind):
+                    o = o.get_object()
+                return o
+
+            # 1. Names tree — full recursive walk (handles flat + Kids)
+            try:
+                names_dict = _resolve(catalog.get("/Names"))
+                if names_dict is not None:
+                    ef_tree = _resolve(names_dict.get("/EmbeddedFiles"))
+                    if ef_tree is not None:
+                        for name, value in self._walk_name_tree(ef_tree):
+                            payload = self._filespec_payload(value)
+                            if payload:
+                                emit(str(name) or payload[0],
+                                     payload[1], "names_tree")
+            except Exception as e:
+                logging.debug("names-tree harvest failed: %s", e)
+
+            # 2. Catalog-level /AF (Associated Files)
+            try:
+                af = _resolve(catalog.get("/AF"))
+                if af:
+                    af_list = af if hasattr(af, "__iter__") else [af]
+                    for fs in af_list:
+                        payload = self._filespec_payload(fs)
+                        if payload:
+                            emit(payload[0], payload[1], "AF")
+            except Exception as e:
+                logging.debug("/AF harvest failed: %s", e)
+
+            # 3. /Subtype /FileAttachment annotations across all pages
+            try:
+                from PyPDF2.generic import IndirectObject
+                for page in self.pdfobj.pages:
+                    annots = page.get("/Annots") or []
+                    if isinstance(annots, IndirectObject):
+                        annots = annots.get_object()
+                    for annot in annots:
+                        if isinstance(annot, IndirectObject):
+                            annot = annot.get_object()
+                        if (annot.get("/Subtype") == "/FileAttachment"
+                                and annot.get("/FS")):
+                            payload = self._filespec_payload(annot["/FS"])
+                            if payload:
+                                emit(payload[0], payload[1],
+                                     "fileattachment_annot")
+                        # Per-page /AF
+                        page_af = page.get("/AF")
+                        if page_af:
+                            page_af_list = (page_af if hasattr(page_af, "__iter__")
+                                            else [page_af])
+                            for fs in page_af_list:
+                                p = self._filespec_payload(fs)
+                                if p:
+                                    emit(p[0], p[1], "page_AF")
+            except Exception as e:
+                logging.debug("FileAttachment annotation walk failed: %s", e)
+
+            # Emit Structures
+            self.embedded_files = {n: d for n, d, _ in attachments}
+            for name, data, source in attachments:
+                self.childitems.append(
+                    self.generate_struct(data=data, filename=name)
+                )
+
+            if attachments:
+                by_source = {}
+                for _, _, src in attachments:
+                    by_source[src] = by_source.get(src, 0) + 1
+                self.reports["embedded_files"] = Report(
+                    f"Extracted {len(attachments)} embedded file(s): "
+                    + ", ".join(f"{n}={c}" for n, c in by_source.items()),
+                    short=f"{len(attachments)} embedded",
+                    label="embedded_files",
+                    severity=Severity.MEDIUM,
+                    verbosity=0,
+                    order=24,
+                    data={"count": len(attachments), "by_source": by_source,
+                          "names": [n for n, _, _ in attachments]},
+                )
+
         except Exception as e:
             logging.error(f"Error extracting embedded files from PDF: {e}")
+
+    def detect_incremental_updates(self):
+        """A PDF with more than one ``%%EOF`` carries one or more
+        incremental updates — the file was modified after original
+        signing/distribution, with new objects appended after the
+        first %%EOF. Acrobat reads the latest xref, but the prior
+        bytes are still in the file and may differ materially
+        (added /JS, redefined catalog, etc.). This is a high-signal
+        forensic indicator.
+
+        We additionally byte-scan for any ``<id> <gen> obj`` whose
+        (id, gen) pair has multiple distinct definitions, and emit
+        each *non-final* version as a forensic child Structure so
+        analysts can see what was changed."""
+        raw = self.struct.rawdata
+        eof_count = raw.count(b"%%EOF")
+        if eof_count <= 1:
+            return
+
+        # Grade severity by what the post-EOF region contains. Incremental
+        # updates by themselves are routine (signed PDFs, editor saves —
+        # Amyuni / Adobe / etc. all use them). They become high-signal
+        # only when the appended content adds active surfaces.
+        first_eof = raw.index(b"%%EOF") + len(b"%%EOF")
+        post = raw[first_eof:]
+        active_markers = [
+            (b"/JavaScript", "JavaScript"),
+            (b"/JS ", "JS"),
+            (b"/OpenAction", "OpenAction"),
+            (b"/Launch", "Launch"),
+            (b"/AA ", "AA"),
+            (b"/AA<", "AA"),
+            (b"/SubmitForm", "SubmitForm"),
+            (b"/ImportData", "ImportData"),
+        ]
+        triggered = [name for marker, name in active_markers if marker in post]
+        if triggered:
+            severity = Severity.HIGH
+            note = (f" — appended content adds active surface: "
+                    f"{', '.join(sorted(set(triggered)))}")
+        else:
+            severity = Severity.INFO
+            note = " — no active content in appended region (likely benign)"
+
+        self.reports["incremental_updates"] = Report(
+            f"PDF contains {eof_count - 1} incremental update(s) "
+            f"(content was appended after the original %%EOF){note}",
+            short=f"{eof_count - 1} incremental update(s)",
+            label="incremental_updates",
+            severity=severity,
+            verbosity=0,
+            order=22,
+            data={"eof_count": eof_count, "updates": eof_count - 1,
+                  "active_markers_in_appended_region": sorted(set(triggered))},
+        )
+
+        # Scan for multi-version objects
+        import re
+        obj_re = re.compile(
+            rb"(?:^|\n)\s*(\d+)\s+(\d+)\s+obj\s*(.*?)\s*endobj",
+            re.DOTALL,
+        )
+        versions: dict[tuple[int, int], list[bytes]] = {}
+        for m in obj_re.finditer(raw):
+            idnum = int(m.group(1))
+            gen = int(m.group(2))
+            body = m.group(3)
+            versions.setdefault((idnum, gen), []).append(body)
+
+        multi = [(k, vs) for k, vs in versions.items() if len(set(vs)) > 1]
+        if not multi:
+            return
+
+        # Sort so the same (id, gen) groups together; emit non-final
+        # versions as forensic children so they get analyzed too.
+        for (idnum, gen), bodies in multi:
+            unique = []
+            seen = set()
+            for b in bodies:
+                if b not in seen:
+                    seen.add(b)
+                    unique.append(b)
+            # Emit all but the last as historical versions
+            for i, body in enumerate(unique[:-1]):
+                try:
+                    self.childitems.append(
+                        self.generate_struct(
+                            data=b"%PDF-fragment\n" + body + b"\n%%EOF\n",
+                            filename=f"pdf_obj_{idnum}_{gen}_v{i}.bin",
+                            mime_type="application/octet-stream",
+                        )
+                    )
+                except Exception as e:
+                    logging.debug("emit historical obj failed: %s", e)
+
+        self.reports["redefined_objects"] = Report(
+            f"{len(multi)} object(s) redefined across incremental updates: "
+            + ", ".join(f"{k[0]} {k[1]}" for k in multi[:10])
+            + (f" (+{len(multi) - 10} more)" if len(multi) > 10 else ""),
+            short=f"{len(multi)} redefined object(s)",
+            label="redefined_objects",
+            severity=Severity.HIGH,
+            verbosity=0,
+            order=22,
+            data={"objects": [{"id": k[0], "gen": k[1],
+                               "versions": len(set(v))}
+                              for k, v in multi]},
+        )
 
 
     def generate_preview(self):
@@ -323,6 +584,7 @@ class PDFAnalyzer(Analyzer):
         self.modules['pdf2text'] = self.get_text
         self.modules['embeddedFiles'] = self.getAttachments
         self.modules['embedded_js'] = self.extract_js
+        self.modules['incremental_updates'] = self.detect_incremental_updates
         self.modules['policy'] = self.policy_check
         self.modules['preview'] = self.generate_preview
 
