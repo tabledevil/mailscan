@@ -517,6 +517,90 @@ MEDIUM_PATTERNS: list[tuple[re.Pattern, str, str]] = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# PDF Reader DOM — patterns specific to JavaScript embedded in PDFs.
+#
+# These never fire on browser/Node JS because the API surface (app.*,
+# Collab.*, util.*, media.*, this.*) is unique to Acrobat / Foxit /
+# similar viewers. Each pattern below ties to a real exploit family:
+#
+#   util.printf %D/%S args  → CVE-2008-2992  (buffer overflow)
+#   Collab.collectEmailInfo → CVE-2007-5659  (classic Adobe sandbox escape)
+#   media.newPlayer         → CVE-2009-4324
+#   app.beginPriv/endPriv   → Acrobat privilege elevation
+#   getAnnots overflow      → CVE-2009-1492
+#
+# Heap-spray fingerprints (NOP sled / shellcode constants) are language-
+# generic but appear most often in PDF JS, so they live here too.
+# ---------------------------------------------------------------------------
+
+PDF_CRITICAL_PATTERNS: list[tuple[re.Pattern, str, str]] = [
+    # CVE-2008-2992 — util.printf with hostile format args
+    (re.compile(r"util\s*\.\s*printf\s*\(\s*[\"'](?:[^\"']*?%(?:\d+)?[Dd])",
+                re.IGNORECASE),
+     "pdf_cve_2008_2992", "util.printf with %D format — CVE-2008-2992 buffer overflow"),
+    # CVE-2007-5659 — Collab.collectEmailInfo (any reference is a strong signal)
+    (re.compile(r"Collab\s*\.\s*collectEmailInfo\b"),
+     "pdf_cve_2007_5659", "Collab.collectEmailInfo — CVE-2007-5659 sandbox escape"),
+    # CVE-2009-4324 — media.newPlayer
+    (re.compile(r"media\s*\.\s*newPlayer\b"),
+     "pdf_cve_2009_4324", "media.newPlayer — CVE-2009-4324 use-after-free"),
+    # CVE-2009-1492 — getAnnots overflow with start>end
+    (re.compile(r"getAnnots\s*\(\s*\{[^}]*?nStart"),
+     "pdf_cve_2009_1492", "getAnnots() with nStart parameter — CVE-2009-1492"),
+    # CVE-2009-0658 — Doc.spell.customDictionaryOpen
+    (re.compile(r"\.\s*spell\s*\.\s*customDictionaryOpen\b"),
+     "pdf_cve_2009_0658", "spell.customDictionaryOpen — CVE-2009-0658"),
+    # Heap-spray NOP sled (\x90 or %u9090 repeated)
+    (re.compile(r"(?:%u9090){10,}|(?:\\x90){20,}|(?:\\u9090){10,}"),
+     "pdf_heap_spray", "Heap-spray NOP sled — classic exploit primitive"),
+    # Privilege elevation context
+    (re.compile(r"app\s*\.\s*beginPriv\s*\(", re.IGNORECASE),
+     "pdf_privilege_elevation",
+     "app.beginPriv — Acrobat privileged-context entry"),
+]
+
+PDF_HIGH_PATTERNS: list[tuple[re.Pattern, str, str]] = [
+    # Trust-Manager bypass — any of these in a JS payload is unusual
+    (re.compile(r"app\s*\.\s*trustedFunction\s*\(", re.IGNORECASE),
+     "pdf_trusted_function", "app.trustedFunction — trust manager bypass"),
+    (re.compile(r"app\s*\.\s*trustPropagatorFunction\s*\(", re.IGNORECASE),
+     "pdf_trust_propagator", "app.trustPropagatorFunction — trust propagation"),
+    # Outbound URL opening
+    (re.compile(r"app\s*\.\s*launchURL\s*\(", re.IGNORECASE),
+     "pdf_launch_url", "app.launchURL — outbound URL navigation"),
+    # External executable / file launch via this.submitForm or
+    # this.exportDataObject(cName, nLaunch)
+    (re.compile(r"\.\s*exportDataObject\s*\([^)]*?cName", re.IGNORECASE),
+     "pdf_export_data", "exportDataObject — extract embedded payload to disk"),
+    # File-system access via Doc.saveAs
+    (re.compile(r"\.\s*saveAs\s*\(", re.IGNORECASE),
+     "pdf_save_as", "Doc.saveAs — disk write capability"),
+    # Menu-item automation (silent print, save, etc.)
+    (re.compile(r"app\s*\.\s*execMenuItem\s*\(", re.IGNORECASE),
+     "pdf_exec_menu_item", "app.execMenuItem — Acrobat menu automation"),
+    # getAnnots — annotation harvesting
+    (re.compile(r"\.\s*getAnnots?\s*\(", re.IGNORECASE),
+     "pdf_get_annots", "getAnnots — annotation enumeration / data harvest"),
+    # this.submitForm to external URL
+    (re.compile(r"\.\s*submitForm\s*\(\s*[\"'](?:https?|ftp|file)://",
+                re.IGNORECASE),
+     "pdf_submit_form_url", "this.submitForm to external URL — exfiltration"),
+]
+
+PDF_MEDIUM_PATTERNS: list[tuple[re.Pattern, str, str]] = [
+    # Generic Reader APIs that are notable but common in legit fillable forms
+    (re.compile(r"app\s*\.\s*alert\s*\(", re.IGNORECASE),
+     "pdf_app_alert", "app.alert — Acrobat dialog (test-PoC and legit forms)"),
+    (re.compile(r"\.\s*setAction\s*\(", re.IGNORECASE),
+     "pdf_set_action", "Field.setAction — programmatic action assignment"),
+    (re.compile(r"\.\s*importTextData\s*\(", re.IGNORECASE),
+     "pdf_import_text_data", "importTextData — external data ingestion"),
+    (re.compile(r"util\s*\.\s*printd\s*\(", re.IGNORECASE),
+     "pdf_util_printd", "util.printd — date format function (CVE-prone)"),
+]
+
+
 def detect_threat_patterns(source: str) -> list[dict]:
     """Run all pattern checks.  Returns list of dicts with keys:
     pattern, description, severity, context.
@@ -525,9 +609,9 @@ def detect_threat_patterns(source: str) -> list[dict]:
     seen_patterns: set[str] = set()
 
     for severity_name, patterns in [
-        ("CRITICAL", CRITICAL_PATTERNS),
-        ("HIGH", HIGH_PATTERNS),
-        ("MEDIUM", MEDIUM_PATTERNS),
+        ("CRITICAL", CRITICAL_PATTERNS + PDF_CRITICAL_PATTERNS),
+        ("HIGH", HIGH_PATTERNS + PDF_HIGH_PATTERNS),
+        ("MEDIUM", MEDIUM_PATTERNS + PDF_MEDIUM_PATTERNS),
     ]:
         for regex, pattern_name, description in patterns:
             m = regex.search(source)
