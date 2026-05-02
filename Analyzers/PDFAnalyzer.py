@@ -5,12 +5,18 @@ import base64
 import importlib
 import importlib.util
 import shutil
-from structure import Analyzer, Report, AnalysisModuleException
+from structure import Analyzer, Report, Severity, AnalysisModuleException
 
 try:
     import PyPDF2
 except ImportError:
     PyPDF2 = None
+
+try:
+    from Utils import pdf_policy as _pdf_policy
+    _PDF_POLICY_AVAILABLE = True
+except ImportError:
+    _PDF_POLICY_AVAILABLE = False
 
 
 
@@ -108,14 +114,99 @@ class PDFAnalyzer(Analyzer):
         except Exception as e:
             logging.warning(f"Could not generate PDF preview: {e}")
 
+    def policy_check(self):
+        """Run the pdfcop-parity policy scan and emit verdicts.
+
+        Always runs even when PyPDF2 isn't available — the scan is byte-level
+        and doesn't depend on the parser. Emits one report per profile that
+        would have blocked, plus structured Findings reports."""
+        if not _PDF_POLICY_AVAILABLE:
+            return
+        try:
+            findings = _pdf_policy.scan(self.struct.rawdata)
+        except Exception as e:
+            logging.debug("pdf_policy scan failed: %s", e)
+            return
+        if not findings:
+            return
+
+        # Per-finding reports — graded by the worst right involved.
+        worst = Severity.INFO
+        for f in findings:
+            sev = f.severity()
+            worst = min(worst, sev)
+            label = f"pdf_{f.kind}_{f.name}"
+            self.reports[label] = Report(
+                f"{f.kind}: {f.name}"
+                + (f" (×{f.count})" if f.count > 1 else "")
+                + (" [triggered at opening]" if f.triggered_at_opening else ""),
+                short=f"{f.kind}:{f.name}",
+                label=label.replace("@", "_at_"),
+                severity=sev,
+                verbosity=1,
+                order=24,
+                data={
+                    "kind": f.kind, "name": f.name, "count": f.count,
+                    "rights": list(f.rights),
+                    "triggered_at_opening": f.triggered_at_opening,
+                },
+            )
+
+        # Per-profile rollup so the analyst sees "this PDF would trigger
+        # under standard / strong / paranoid" at a glance.
+        profile_summary = {}
+        for profile_name in ("standard", "strong", "paranoid"):
+            verdicts = _pdf_policy.evaluate(findings, profile_name)
+            profile_summary[profile_name] = [
+                {"kind": v.finding.kind, "name": v.finding.name,
+                 "blocked_by": list(v.blocked_by),
+                 "severity": v.severity.name}
+                for v in verdicts
+            ]
+
+        triggered_under = [name for name, v in profile_summary.items() if v]
+        if triggered_under:
+            std_count = len(profile_summary["standard"])
+            strong_count = len(profile_summary["strong"])
+            paranoid_count = len(profile_summary["paranoid"])
+            text_lines = []
+            for name, verdicts in profile_summary.items():
+                if not verdicts:
+                    continue
+                text_lines.append(f"  [{name}] would block:")
+                for v in verdicts:
+                    text_lines.append(
+                        f"    - {v['kind']}/{v['name']} "
+                        f"({v['severity']}, blocked by {','.join(v['blocked_by'])})"
+                    )
+            # Severity for the overall finding = worst per-finding severity
+            # we collected above (already in `worst`).
+            self.reports["pdfcop_policy"] = Report(
+                "PDF would trigger under: " + ", ".join(triggered_under)
+                + f"\n  standard: {std_count}, strong: {strong_count}, "
+                f"paranoid: {paranoid_count} blocking finding(s)\n"
+                + "\n".join(text_lines),
+                short="pdfcop: " + "/".join(triggered_under),
+                label="pdfcop_policy",
+                severity=worst,
+                verbosity=0,
+                order=23,
+                data={"triggered_under": triggered_under,
+                      "by_profile": profile_summary},
+            )
+
     def analysis(self):
         if not PyPDF2:
             logging.warning("PyPDF2 is not installed, cannot analyze PDF files.")
+            # Even without PyPDF2 we can still run the byte-level policy scan
+            self.modules['policy'] = self.policy_check
+            super().analysis()
             return
 
         self.modules['parser'] = self.parse_pdf
         self.modules['pdf2text'] = self.get_text
         self.modules['embeddedFiles'] = self.getAttachments
+        self.modules['policy'] = self.policy_check
         self.modules['preview'] = self.generate_preview
 
         super().analysis()
