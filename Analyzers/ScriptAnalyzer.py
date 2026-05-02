@@ -67,6 +67,10 @@ class ScriptAnalyzer(Analyzer):
         re.compile(r"\brequire\s*\("),
         re.compile(r"\bmodule\.exports\b"),
         re.compile(r"=>"),
+        # Obfuscated dropper patterns: `this.X += "..."`, `this[a]=b`, `a["b"]=c`
+        re.compile(r"\bthis\.\w+\s*[+\-*/]?="),
+        re.compile(r"\bthis\s*\[\s*['\"]"),
+        re.compile(r"\w+\s*\[\s*['\"][^'\"]+['\"]\s*\]\s*="),
     ]
 
     @classmethod
@@ -75,27 +79,30 @@ class ScriptAnalyzer(Analyzer):
         if struct.mime_type not in ("application/octet-stream", "text/plain"):
             return False
 
-        # Check filename extension
+        # JScript.Encode marker is always conclusive
+        if b"#@~^" in struct.rawdata[:1024]:
+            return True
+
         filename = getattr(struct, "filename", "") or ""
         _, ext = os.path.splitext(filename)
         has_js_ext = ext.lower() in cls._JS_EXTENSIONS
 
-        # Check content for JS structural signatures
+        # Probe more bytes — heavily obfuscated droppers repeat boilerplate
+        # for tens of KB before any keyword shows up.
         try:
-            text = struct.rawdata[:4096].decode("utf-8", errors="replace")
+            text = struct.rawdata[:32768].decode("utf-8", errors="replace")
         except Exception:
             return False
 
         hits = sum(1 for sig in cls._JS_SIGNATURES if sig.search(text))
 
-        # Extension match + any content hit, or 2+ content hits without ext
-        if has_js_ext and hits >= 1:
-            return True
-        if hits >= 2:
+        # Filename ending in a JS-family extension is sufficient when content
+        # is plausibly text (we already restricted MIME to text/plain or octet).
+        if has_js_ext:
             return True
 
-        # JScript.Encode marker
-        if b"#@~^" in struct.rawdata[:1024]:
+        # No extension hint: require multiple structural hits
+        if hits >= 2:
             return True
 
         return False

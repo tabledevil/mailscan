@@ -352,9 +352,13 @@ class RichRenderer(Renderer):
     def _make_type_panel(info: dict):
         """Build a boxed table showing all file type provider verdicts, grouped if identical."""
         all_dets = info.get("all_detections", [])
-        exiftool_ft = info.get("exiftool_filetype", {})
 
-        # Build list of (provider, mime, description) tuples
+        # Build list of (provider, mime, description) tuples.
+        # exiftool is intentionally excluded — it routinely mis-classifies
+        # email/MS-Office files (e.g. .eml -> text/plain, .msg -> image/vnd.fpx)
+        # and showing it as a peer provider creates a false impression of
+        # disagreement. Its filetype data is still rendered in the metadata
+        # panel via the dedicated `exiftool` report.
         entries = []
         for det in all_dets:
             provider = det.get("provider", "")
@@ -365,16 +369,6 @@ class RichRenderer(Renderer):
                 entries.append((provider, None, err))
             else:
                 entries.append((provider, mime, desc))
-
-        if exiftool_ft.get("mime"):
-            ext = exiftool_ft.get("extension", "")
-            ft = exiftool_ft.get("filetype", "")
-            desc_parts = []
-            if ft:
-                desc_parts.append(ft)
-            if ext:
-                desc_parts.append(f".{ext}")
-            entries.append(("exiftool", exiftool_ft["mime"], "  ".join(desc_parts)))
 
         if not entries:
             # Fallback: single detection from magic_info

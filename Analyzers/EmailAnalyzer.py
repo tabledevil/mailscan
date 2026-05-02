@@ -53,7 +53,14 @@ class EmailAnalyzer(Analyzer):
 
     @classmethod
     def can_handle(cls, struct) -> bool:
-        """Check if raw data looks like an RFC822 email."""
+        """Content-based probe for ambiguous MIME types only.
+
+        Quoted/forwarded email bodies inside `text/plain` parts trivially
+        contain `From:`/`To:`/`Subject:` lines — claiming those would re-run
+        the email parser on every nested forward and recurse to depth limit.
+        Only probe when the MIME type is genuinely ambiguous (octet-stream)."""
+        if struct.mime_type != "application/octet-stream":
+            return False
         head = struct.rawdata[:8192] if struct.rawdata else b""
         matches = sum(1 for sig in cls._RFC822_SIGNATURES if sig in head)
         return matches >= 2
@@ -91,6 +98,8 @@ class EmailAnalyzer(Analyzer):
             # Reply-To / Return-Path extraction and mismatch detection
             self._check_reply_to_mismatch()
             self._check_return_path_mismatch()
+            self._check_message_id_mismatch()
+            self._check_undisclosed_recipients()
 
             # B5: Mail route extraction using new module
             self._extract_mail_route()
@@ -103,10 +112,33 @@ class EmailAnalyzer(Analyzer):
         except Exception as e:
             log.error(f"Error parsing email: {e}")
 
+    _LIST_HEADERS = (
+        "List-Id", "List-Post", "List-Unsubscribe", "List-Help",
+        "List-Archive", "List-Subscribe", "Mailing-List",
+    )
+
+    def _is_mailing_list(self) -> bool:
+        """True if this looks like mailing-list traffic. Reply-To /
+        Return-Path / Message-ID mismatches are routine and benign for
+        list-distributed mail and would otherwise drown out real findings."""
+        if not hasattr(self, "eml"):
+            return False
+        for h in self._LIST_HEADERS:
+            if list(self.eml.get_header(h)):
+                return True
+        # VERP bounce addresses on the Sender header are another tell
+        for s in self.eml.get_header("Sender"):
+            if s and ("-bounces@" in s.lower() or "-owner@" in s.lower()
+                      or "-request@" in s.lower()):
+                return True
+        return False
+
     def _check_reply_to_mismatch(self):
         """Flag Reply-To domain mismatch with From (BEC indicator)."""
         if not hasattr(self, "eml"):
             return
+        if self._is_mailing_list():
+            return  # mailing lists routinely set Reply-To to the list address
         reply_tos = list(self.eml.get_header("Reply-To"))
         if not reply_tos or not self.eml.froms:
             return
@@ -133,6 +165,8 @@ class EmailAnalyzer(Analyzer):
         """Flag Return-Path domain mismatch with From."""
         if not hasattr(self, "eml"):
             return
+        if self._is_mailing_list():
+            return  # VERP bounce addresses are normal for list traffic
         return_paths = list(self.eml.get_header("Return-Path"))
         if not return_paths or not self.eml.froms:
             return
@@ -154,6 +188,69 @@ class EmailAnalyzer(Analyzer):
                         verbosity=0,
                     )
                     break
+
+    def _from_domain(self) -> str:
+        """Return the lowercased domain of the first parseable From address."""
+        if not hasattr(self, "eml") or not self.eml.froms:
+            return ""
+        for f in self.eml.froms:
+            if "@" in f:
+                return f.split("@")[-1].strip(">").strip().lower()
+        return ""
+
+    def _check_message_id_mismatch(self):
+        """Flag Message-ID right-hand side that doesn't share an organisational
+        domain with From. Match if either side is a suffix of the other (covers
+        subdomains like mta.corp.example vs corp.example)."""
+        if not hasattr(self, "eml"):
+            return
+        if self._is_mailing_list():
+            return  # list-stamped Message-IDs use the list domain, not the poster's
+        msg_ids = list(self.eml.get_header("Message-ID"))
+        if not msg_ids:
+            return
+        from_domain = self._from_domain()
+        if not from_domain:
+            return
+        # Message-ID format: <local@domain>
+        for mid in msg_ids:
+            if "@" not in mid:
+                continue
+            mid_domain = mid.rsplit("@", 1)[-1].strip("<>").strip().lower()
+            if not mid_domain:
+                continue
+            # Suffix match either direction (subdomain-tolerant)
+            if (
+                mid_domain == from_domain
+                or mid_domain.endswith("." + from_domain)
+                or from_domain.endswith("." + mid_domain)
+            ):
+                return
+            self.reports["message_id_mismatch"] = Report(
+                f"Message-ID domain ({mid_domain}) differs from From domain "
+                f"({from_domain})",
+                label="message_id_mismatch",
+                severity=Severity.LOW,
+                verbosity=0,
+            )
+            return
+
+    def _check_undisclosed_recipients(self):
+        """Flag To/Cc headers using `undisclosed-recipients` — common in mass
+        phishing where a single message is BCC-blasted."""
+        if not hasattr(self, "eml"):
+            return
+        for header in ("To", "Cc"):
+            for value in self.eml.get_header(header):
+                if value and "undisclosed-recipients" in value.lower():
+                    self.reports["undisclosed_recipients"] = Report(
+                        f"{header} contains 'undisclosed-recipients' — "
+                        f"message was BCC-blasted to a hidden recipient list",
+                        label="undisclosed_recipients",
+                        severity=Severity.MEDIUM,
+                        verbosity=0,
+                    )
+                    return
 
     def _extract_mail_route(self):
         """Extract and report mail delivery route from Received headers."""
@@ -191,6 +288,11 @@ class EmailAnalyzer(Analyzer):
 
             # Origin summary at v0 — skip loopback/private IPs
             self._report_origin(ordered, hops)
+
+            # First-external-hop callout — boundary between external infra
+            # and the receiving org's mail gateway. Uses relay_cache to
+            # identify well-known gateways (M365 EOP, Mimecast, Proofpoint…).
+            self._report_boundary_hop(hop_display)
 
             # Emit route data for timeline collection
             route_data = []
@@ -300,6 +402,38 @@ class EmailAnalyzer(Analyzer):
             verbosity=0,
             order=3,
         )
+
+    def _report_boundary_hop(self, hop_display: list[dict]) -> None:
+        """Find the first hop (chronological) whose `by` server is a known
+        external mail-receiving gateway, and surface it as a separate finding.
+
+        ``hop_display`` is already chronological (oldest first) when produced
+        with ``reverse=True``. Annotations like ``microsoft-365 (EOP)`` or
+        ``mimecast`` mark the boundary where the message entered the
+        receiving org's perimeter."""
+        if not hop_display:
+            return
+
+        # Annotations that indicate "this is the receiving org's gateway".
+        # 'internal' / 'self-loop' are intra-relay markers, not boundary.
+        _ignore = {"internal", "self-loop"}
+
+        for hop in hop_display:
+            ann = [a for a in hop.get("annotations", []) if a not in _ignore
+                   and not a.startswith("from:")]
+            if not ann:
+                continue
+            by_host = hop.get("by_hostname", "?")
+            self.reports["mail_boundary"] = Report(
+                f"First external gateway: {by_host} "
+                f"({', '.join(ann)}) at hop {hop.get('hop')}",
+                short=f"Gateway: {by_host}",
+                label="mail_boundary",
+                severity=Severity.INFO,
+                verbosity=0,
+                order=4,
+            )
+            return
 
     def _collect_gateway_findings(self) -> list[dict]:
         """Collect gateway header findings as structured data for hop integration."""

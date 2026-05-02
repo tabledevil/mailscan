@@ -180,6 +180,31 @@ class IOCResult:
             "passwords": self.passwords,
         }
 
+    def merge(self, other: "IOCResult") -> None:
+        """In-place union with another IOCResult, deduplicating per category."""
+        for field_name in (
+            "ipv4", "ipv6", "urls", "emails", "domains",
+            "md5", "sha1", "sha256", "passwords",
+        ):
+            combined = getattr(self, field_name) + getattr(other, field_name)
+            setattr(self, field_name, _dedup(combined))
+
+
+def defang(value: str) -> str:
+    """Render an IOC in defanged form so analysts can paste it into reports
+    without accidentally triggering link previews or DNS lookups.
+
+    Replaces ``.`` with ``[.]`` and ``://`` with ``[:]//``. Emails get an
+    ``[@]`` substitution. Idempotent on already-defanged input."""
+    if not value:
+        return value
+    if "[.]" in value or "[:]" in value or "[@]" in value:
+        return value  # already defanged
+    out = value.replace("://", "[:]//")
+    out = out.replace("@", "[@]")
+    out = out.replace(".", "[.]")
+    return out
+
 
 # ------------------------------------------------------------------
 # Helper: deduplicate preserving order

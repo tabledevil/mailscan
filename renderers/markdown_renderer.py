@@ -9,6 +9,14 @@ from renderers import Renderer, ReportNode, _register
 # Characters that need escaping in Markdown inline text
 _MD_ESCAPE_RE = re.compile(r"([\\`*_\[\]{}()#+\-.!|~>])")
 
+_SEVERITY_BADGE = {
+    "CRITICAL": "🟥 **CRITICAL**",
+    "HIGH":     "🟧 **HIGH**",
+    "MEDIUM":   "🟨 **MEDIUM**",
+    "LOW":      "🟦 **LOW**",
+    "INFO":     "",  # no badge for INFO — keep output uncluttered
+}
+
 
 def _escape_md(text: str | None) -> str:
     """Escape Markdown special characters in *text*."""
@@ -24,6 +32,13 @@ def _safe(text) -> str:
     return str(text)
 
 
+def _tree_max_severity(node: ReportNode) -> int:
+    worst = node.max_severity
+    for child in node.children:
+        worst = min(worst, _tree_max_severity(child))
+    return worst
+
+
 @_register
 class MarkdownRenderer(Renderer):
     format_name = "markdown"
@@ -37,7 +52,12 @@ class MarkdownRenderer(Renderer):
         indent = "  " * level
         mime = _escape_md(node.info["mime_type"])
         size = node.info["size"]
-        lines.append(f"{indent}* **{mime}** ({size} bytes)")
+        sev_int = _tree_max_severity(node)
+        sev_name = {0: "CRITICAL", 1: "HIGH", 2: "MEDIUM", 3: "LOW", 4: "INFO"}[sev_int]
+        sev_tag = ""
+        if sev_int <= 2:  # only MEDIUM or worse warrants a header tag
+            sev_tag = f"  {_SEVERITY_BADGE[sev_name]}"
+        lines.append(f"{indent}* **{mime}** ({size} bytes){sev_tag}")
 
         info = _escape_md(node.info["analyzer_info"])
         lines.append(f"{indent}  * **Info**: {info}")
@@ -48,25 +68,34 @@ class MarkdownRenderer(Renderer):
 
         md5 = node.info["md5"]
         lines.append(f"{indent}  * **MD5**: `{md5}`")
+        sha1 = node.info.get("sha1")
+        sha256 = node.info.get("sha256")
+        if sha1:
+            lines.append(f"{indent}  * **SHA1**: `{sha1}`")
+        if sha256:
+            lines.append(f"{indent}  * **SHA256**: `{sha256}`")
 
         for report in node.reports:
             label = _escape_md(report["label"])
+            sev = report.get("severity", "INFO")
+            badge = _SEVERITY_BADGE.get(sev, "")
+            prefix = f"{badge} " if badge else ""
             if report["content_type"] == "application/x-matt-hops":
                 self._render_hop_table(report, lines, indent)
             elif report["content_type"] == "image/png":
                 alt = _safe(report["text"]) or "preview in HTML report"
-                lines.append(f"{indent}  * **{label}**: \\[Image: {_escape_md(alt)}\\]")
+                lines.append(f"{indent}  * {prefix}**{label}**: \\[Image: {_escape_md(alt)}\\]")
             else:
                 text = _safe(report["text"])
                 # For multi-line content, use a fenced code block
                 if "\n" in text:
-                    lines.append(f"{indent}  * **{label}**:")
+                    lines.append(f"{indent}  * {prefix}**{label}**:")
                     lines.append(f"{indent}    ```")
                     for tl in text.splitlines():
                         lines.append(f"{indent}    {tl}")
                     lines.append(f"{indent}    ```")
                 else:
-                    lines.append(f"{indent}  * **{label}**: {_escape_md(text)}")
+                    lines.append(f"{indent}  * {prefix}**{label}**: {_escape_md(text)}")
 
         for child in node.children:
             self._render_node(child, lines, level + 1)

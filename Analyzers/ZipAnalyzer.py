@@ -5,6 +5,8 @@ from structure import Analyzer, Report, Severity
 from Config.config import flags
 from Utils.password_broker import PasswordBroker
 
+log = logging.getLogger("matt")
+
 
 class ZipAnalyzer(Analyzer):
     compatible_mime_types = ["application/zip", "application/x-zip-compressed"]
@@ -28,19 +30,36 @@ class ZipAnalyzer(Analyzer):
 
                 # Zip bomb checks
                 total_uncompressed_size = sum(f.file_size for f in zip_file.infolist())
+
+                # Compression ratio — analyst signal (high = packed/bomb)
+                if self.struct.size > 0 and total_uncompressed_size > 0:
+                    ratio = total_uncompressed_size / self.struct.size
+                    severity = (
+                        Severity.MEDIUM if ratio > 100
+                        else Severity.LOW if ratio > 20
+                        else Severity.INFO
+                    )
+                    self.reports["compression_ratio"] = Report(
+                        f"{ratio:.1f}:1 "
+                        f"({total_uncompressed_size:,} / {self.struct.size:,} bytes)",
+                        short=f"{ratio:.1f}:1",
+                        label="compression_ratio",
+                        severity=severity,
+                        verbosity=0,
+                    )
                 if (
                     self.struct.size > 0
                     and total_uncompressed_size / self.struct.size
                     > flags.max_compression_ratio
                 ):
-                    logging.warning("Zip bomb detected: compression ratio too high.")
+                    log.warning("Zip bomb detected: compression ratio too high.")
                     self.reports["error"] = Report(
                         "Zip bomb detected: compression ratio too high."
                     )
                     return
 
                 if total_uncompressed_size > flags.max_file_size:
-                    logging.warning(
+                    log.warning(
                         "Zip bomb detected: total uncompressed size is too large."
                     )
                     self.reports["error"] = Report(
@@ -89,7 +108,7 @@ class ZipAnalyzer(Analyzer):
                                 label="pending_password",
                                 rank=1,
                             )
-                            logging.warning(
+                            log.warning(
                                 "Could not find password for encrypted ZIP file."
                             )
                             return  # Stop for now, broker will retry later
@@ -98,7 +117,7 @@ class ZipAnalyzer(Analyzer):
                 self._extract_contents(zip_file)
 
         except zipfile.BadZipFile:
-            logging.error("Bad ZIP file.")
+            log.error("Bad ZIP file.")
             self.reports["error"] = Report("Bad ZIP file.")
 
     def _test_passwords(self, zip_file):
@@ -111,9 +130,25 @@ class ZipAnalyzer(Analyzer):
             except RuntimeError as e:
                 if "Bad password" in str(e):
                     continue  # Try next password
-                else:
-                    logging.error(f"Error testing password on ZIP file: {e}")
-                    return False  # Stop on other errors
+                if "compression method" in str(e).lower():
+                    # AES-encrypted zips (pyzipper-only) — stdlib zipfile can't
+                    # decrypt; record as a structured finding rather than spam.
+                    self.reports["unsupported_compression"] = Report(
+                        f"ZIP uses an encryption/compression method this build "
+                        f"cannot probe (install py7zr/pyzipper for AES support): {e}",
+                        severity=Severity.MEDIUM,
+                    )
+                    log.debug("ZIP compression method not supported: %s", e)
+                    return False
+                log.debug("Error testing password on ZIP file: %s", e)
+                return False  # Stop on other errors
+            except NotImplementedError as e:
+                self.reports["unsupported_compression"] = Report(
+                    f"ZIP uses an unsupported encryption method: {e}",
+                    severity=Severity.MEDIUM,
+                )
+                log.debug("ZIP unsupported encryption: %s", e)
+                return False
         return False
 
     def _extract_contents(self, zip_file):
@@ -132,7 +167,7 @@ class ZipAnalyzer(Analyzer):
                 )
                 self._extracted_members.add(member_key)
             except RuntimeError as e:
-                logging.error(f"Could not extract {file_info.filename} from zip: {e}")
+                log.error(f"Could not extract {file_info.filename} from zip: {e}")
 
     def _retry_with_password(self, password):
         file_like_object = io.BytesIO(self.struct.rawdata)
