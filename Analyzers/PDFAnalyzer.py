@@ -67,6 +67,122 @@ class PDFAnalyzer(Analyzer):
                 self.childitems.append(self.generate_struct(data=text.encode(), mime_type="text/plain"))
                 self.reports['text'] = Report(text, short=textwrap.shorten(text, width=100))
 
+    def extract_js(self):
+        """Walk PDF objects and emit each /JS payload as a text/javascript
+        child Structure so ScriptAnalyzer's full obfuscation/threat-detection
+        pipeline runs on it.
+
+        Covers two shapes:
+          * Action dicts: ``<< /S /JavaScript /JS (...) >>`` and
+            ``<< /S /JavaScript /JS <stream-ref> >>``.
+          * Names tree: ``/Names /JavaScript /Names [<name> <action> …]``.
+        Walks the trailer and every indirect object — the full PDF object
+        graph PyPDF2 already enumerates."""
+        if not hasattr(self, "pdfobj"):
+            return
+
+        try:
+            from PyPDF2.generic import (
+                IndirectObject, DictionaryObject, ArrayObject,
+                StreamObject, TextStringObject, ByteStringObject,
+            )
+        except ImportError:
+            return
+
+        seen_objects: set[int] = set()
+        seen_payloads: set[str] = set()
+        emitted = 0
+
+        def coerce_js(value) -> bytes | None:
+            """Return the JS source bytes from a /JS value, or None."""
+            try:
+                if isinstance(value, IndirectObject):
+                    value = value.get_object()
+                if isinstance(value, StreamObject):
+                    return value.get_data()
+                if isinstance(value, (TextStringObject, ByteStringObject, str, bytes)):
+                    return value.encode("utf-8") if isinstance(value, str) else bytes(value)
+            except Exception as e:
+                logging.debug("coerce_js failed: %s", e)
+            return None
+
+        def emit(js_bytes: bytes, source: str) -> None:
+            nonlocal emitted
+            if not js_bytes:
+                return
+            # Dedup by content — names-tree often references the same JS
+            # object multiple times.
+            digest = hash(bytes(js_bytes[:512]))
+            key = f"{digest}:{len(js_bytes)}"
+            if key in seen_payloads:
+                return
+            seen_payloads.add(key)
+            emitted += 1
+            try:
+                self.childitems.append(
+                    self.generate_struct(
+                        data=bytes(js_bytes),
+                        filename=f"pdf_js_{emitted}_{source}.js",
+                        mime_type="application/javascript",
+                    )
+                )
+            except Exception as e:
+                logging.debug("emit JS child failed: %s", e)
+
+        def visit(obj, source: str = "obj") -> None:
+            if obj is None:
+                return
+            if isinstance(obj, IndirectObject):
+                if obj.idnum in seen_objects:
+                    return
+                seen_objects.add(obj.idnum)
+                try:
+                    obj = obj.get_object()
+                except Exception:
+                    return
+            if isinstance(obj, DictionaryObject):
+                # Action: /S /JavaScript /JS <value>
+                try:
+                    if obj.get("/S") == "/JavaScript" and "/JS" in obj:
+                        js = coerce_js(obj["/JS"])
+                        if js is not None:
+                            emit(js, "action")
+                except Exception:
+                    pass
+                # Generic /JS key (some malformed PDFs put JS without /S)
+                try:
+                    if "/JS" in obj and obj.get("/S") in (None, "/JavaScript"):
+                        js = coerce_js(obj["/JS"])
+                        if js is not None:
+                            emit(js, "JS")
+                except Exception:
+                    pass
+                # Recurse into all values
+                for v in list(obj.values()):
+                    visit(v, source)
+            elif isinstance(obj, ArrayObject):
+                for v in obj:
+                    visit(v, source)
+            # Other primitive types — nothing to recurse into
+
+        try:
+            # Start from the trailer and the root catalog
+            visit(self.pdfobj.trailer)
+        except Exception as e:
+            logging.debug("PDF JS walk failed: %s", e)
+
+        if emitted:
+            self.reports["embedded_js"] = Report(
+                f"Extracted {emitted} embedded JavaScript payload(s) "
+                f"for ScriptAnalyzer inspection",
+                short=f"{emitted} JS payload(s)",
+                label="embedded_js",
+                severity=Severity.HIGH,
+                verbosity=0,
+                order=24,
+                data={"count": emitted},
+            )
+
     def getAttachments(self):
         if not hasattr(self, 'pdfobj'):
             return
@@ -206,6 +322,7 @@ class PDFAnalyzer(Analyzer):
         self.modules['parser'] = self.parse_pdf
         self.modules['pdf2text'] = self.get_text
         self.modules['embeddedFiles'] = self.getAttachments
+        self.modules['embedded_js'] = self.extract_js
         self.modules['policy'] = self.policy_check
         self.modules['preview'] = self.generate_preview
 
