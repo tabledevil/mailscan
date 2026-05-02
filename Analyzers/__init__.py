@@ -22,6 +22,7 @@ analyzers_list = [
     "VBAProjectAnalyzer",
     "RTFAnalyzer",
     "ImageAnalyzer",
+    "QRAnalyzer",
     "ICSAnalyzer",
     "RARAnalyzer",
     "ScriptAnalyzer",

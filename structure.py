@@ -869,27 +869,88 @@ class Structure(dict):
         renderer = get_renderer(report_format)
         return renderer.render(self, verbosity=verbosity)
 
-    def extract(self, basepath=None, filenames=False, recursive=False):
+    def extract(self, basepath=None, filenames=True, recursive=False,
+                _manifest=None, _is_root=True):
+        """Write rawdata to disk, optionally recursing into children.
+
+        ``filenames=True`` (default) preserves original filenames and folder
+        structure as the file was containerised — the analyst-readable mode.
+        ``filenames=False`` uses content-hash names (dedup-by-content). The
+        CLI exposes the hash mode via ``--hash-names``.
+
+        At the root, a ``manifest.json`` is written next to the extracted
+        files mapping each on-disk path to the analysis-tree node, full
+        hashes, MIME, size, and severity. Hash-recovery is one ``jq`` away
+        without polluting filenames."""
         if basepath is None:
             basepath = os.getcwd()
         if not os.path.isdir(basepath):
             log.debug(f"Creating folder {basepath}")
             os.makedirs(basepath)
+
         filename = self.sanitized_filename if filenames else self.generated_filename
         outfile = os.path.join(basepath, filename)
+
+        # Avoid clobbering siblings that share a sanitized name (multiple
+        # parts named "image001.png" inside one MIME multipart, etc.).
+        if os.path.exists(outfile):
+            stem, ext = os.path.splitext(outfile)
+            n = 1
+            while os.path.exists(f"{stem}_{n}{ext}"):
+                n += 1
+            outfile = f"{stem}_{n}{ext}"
+
         log.debug(f"Writing {outfile}")
         try:
             with open(outfile, "wb") as outfile_obj:
                 outfile_obj.write(self.rawdata)
         except OSError as e:
             log.error(f"Error during extraction [{e}]")
+            return
+
+        if _is_root and _manifest is None:
+            _manifest = []
+
+        if _manifest is not None:
+            try:
+                _manifest.append({
+                    "path": os.path.relpath(outfile, basepath if _is_root
+                                            else os.path.dirname(outfile)),
+                    "abspath": os.path.abspath(outfile),
+                    "level": getattr(self, "level", 0),
+                    "index": getattr(self, "index", 0),
+                    "mime": getattr(self, "mime_type", None) or self.magic,
+                    "size": self.size,
+                    "md5": self.md5,
+                    "sha1": self.sha1,
+                    "sha256": self.sha256,
+                    "original_filename": getattr(
+                        self, "_Structure__filename", None),
+                    "severity": getattr(self.max_severity, "name",
+                                        str(self.max_severity)),
+                })
+            except Exception as e:
+                log.debug(f"manifest entry failed: {e}")
+
         if recursive and self.has_children:
-            base, ext = os.path.splitext(outfile)
+            base, _ = os.path.splitext(outfile)
             newbasepath = os.path.join(base, "children")
             for child in self.get_children():
                 child.extract(
-                    basepath=newbasepath, filenames=filenames, recursive=recursive
+                    basepath=newbasepath, filenames=filenames,
+                    recursive=recursive, _manifest=_manifest, _is_root=False,
                 )
+
+        # Root call: flush manifest.json next to the top-level extract
+        if _is_root and _manifest is not None:
+            try:
+                import json as _json
+                root_dir = os.path.dirname(outfile) or basepath
+                manifest_path = os.path.join(root_dir, "manifest.json")
+                with open(manifest_path, "w", encoding="utf-8") as f:
+                    _json.dump(_manifest, f, indent=2, sort_keys=True)
+            except OSError as e:
+                log.debug(f"manifest write failed: {e}")
 
     @property
     def has_children(self):
@@ -904,19 +965,37 @@ class Structure(dict):
             severity = min(severity, child.max_severity)
         return severity
 
-    @property
-    def sanitized_filename(self):
-        _RE_REPLACE_SPECIAL = re.compile(r"""[ <>|:!&*?/]""")
-        _RE_COMBINE_UNDERSCORE = re.compile(r"(?a:_+)")
-        return _RE_COMBINE_UNDERSCORE.sub(
-            "_", _RE_REPLACE_SPECIAL.sub("_", self.filename)
+    _RE_REPLACE_SPECIAL = re.compile(r"""[ <>|:!&*?/\\]""")
+    _RE_COMBINE_UNDERSCORE = re.compile(r"_+")
+
+    def _sanitize(self, name: str) -> str:
+        """Make a filename component safe for the local filesystem."""
+        return self._RE_COMBINE_UNDERSCORE.sub(
+            "_", self._RE_REPLACE_SPECIAL.sub("_", name)
         )
 
     @property
-    def generated_filename(self):
-        # Prefer the extension from the original filename when present —
-        # MIME-derived extensions lose intent (e.g. SWIFT...JS detected as
-        # text/plain would otherwise be saved as .txt).
+    def sanitized_filename(self) -> str:
+        """Filesystem-safe extraction name preserving the original filename.
+
+        For body parts that arrive without a filename (eml multipart bodies,
+        archive entries with no name), produce a stable role-based name like
+        ``part_<index>.<ext>`` rather than a truncated MD5 — analyst-readable
+        and deterministic across re-runs."""
+        raw = getattr(self, "_Structure__filename", None)
+        if raw:
+            return self._sanitize(raw)
+
+        # No original filename — build a stable role name from index + MIME ext
+        ext = mimetypes.guess_extension(self.magic, strict=False) or ".bin"
+        idx = getattr(self, "index", 0) or 0
+        return f"part_{idx}{ext}"
+
+    @property
+    def generated_filename(self) -> str:
+        """Hash-named extraction filename for dedup-by-content workflows.
+        Preserves the original extension when present (so ``SWIFT…JS`` stays
+        ``.js`` even when its detected MIME is ``text/plain``)."""
         original = getattr(self, "_Structure__filename", None) or self.filename
         ext = ""
         if original:

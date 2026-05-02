@@ -162,8 +162,16 @@ def main():
     parser.add_argument(
         "-f",
         "--filenames",
-        help="Restore original filenames",
+        help="(deprecated, now default) Restore original filenames during extraction",
         action="store_true",
+        default=True,
+    )
+    parser.add_argument(
+        "--hash-names",
+        help="Use content-hash filenames during extraction "
+             "(opposite of -f; for dedup-by-content workflows)",
+        action="store_true",
+        default=False,
     )
     parser.add_argument(
         "-d",
@@ -224,7 +232,7 @@ def main():
         if args.extract:
             s.extract(
                 basepath=args.out_dir,
-                filenames=args.filenames,
+                filenames=not args.hash_names,
                 recursive=True,
             )
 
