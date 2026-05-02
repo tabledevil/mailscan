@@ -358,6 +358,183 @@ class PDFAnalyzer(Analyzer):
         except Exception as e:
             logging.error(f"Error extracting embedded files from PDF: {e}")
 
+    def extract_resources(self):
+        """Walk every page's /Resources and emit inline images and fonts
+        as child Structures.
+
+        Inline images matter because phishing increasingly embeds QR codes
+        in PDFs as a static image — extracting them lets QRAnalyzer run on
+        the bytes and surface the destination URL. Embedded fonts are
+        included for completeness (Type 1 / TrueType / OpenType / CIDFont
+        streams sometimes carry shellcode in older exploit chains).
+
+        Quiet by design: no Report on the PDF for the extraction itself,
+        only what downstream analyzers find on the resource bytes."""
+        if not hasattr(self, "pdfobj"):
+            return
+        try:
+            from PyPDF2.generic import IndirectObject
+        except ImportError:
+            return
+
+        seen_payloads: set[tuple[int, bytes]] = set()
+        emitted = 0
+
+        def _resolve(o):
+            while isinstance(o, IndirectObject):
+                o = o.get_object()
+            return o
+
+        def emit(name: str, data: bytes, mime: str) -> None:
+            nonlocal emitted
+            if not data:
+                return
+            key = (len(data), data[:64])
+            if key in seen_payloads:
+                return
+            seen_payloads.add(key)
+            emitted += 1
+            try:
+                self.childitems.append(
+                    self.generate_struct(
+                        data=data, filename=name, mime_type=mime,
+                    )
+                )
+            except Exception as e:
+                logging.debug("emit resource child failed: %s", e)
+
+        # XObject filter → MIME hint. PDF /Filter on an Image XObject is
+        # the strongest signal — DCTDecode == JPEG, JPXDecode == JPEG2000,
+        # JBIG2Decode == JBIG2, CCITTFaxDecode == G3/G4 fax (TIFF-able).
+        _FILTER_TO_EXT = {
+            "/DCTDecode":     ("jpg",  "image/jpeg"),
+            "/JPXDecode":     ("jp2",  "image/jp2"),
+            "/JBIG2Decode":   ("jb2",  "image/x-jbig2"),
+            "/CCITTFaxDecode": ("tif", "image/tiff"),
+            # FlateDecode'd images are usually raw pixel data — Pillow can
+            # reconstruct them via .image accessor, but skip the bytes
+            # heuristic and flag as octet-stream so analysts can inspect.
+            "/FlateDecode":   ("bin",  "application/octet-stream"),
+        }
+
+        def _filter_to_extmime(filter_obj):
+            try:
+                if filter_obj is None:
+                    return ("bin", "application/octet-stream")
+                if hasattr(filter_obj, "__iter__") and not isinstance(filter_obj, str):
+                    # /Filter chain — last filter is innermost; use the
+                    # outermost (first) for naming since that's what the
+                    # decoded bytes look like.
+                    filter_obj = next(iter(filter_obj), None)
+                key = str(filter_obj)
+                return _FILTER_TO_EXT.get(key, ("bin", "application/octet-stream"))
+            except Exception:
+                return ("bin", "application/octet-stream")
+
+        # ---- Walk every page ----
+        try:
+            for page_idx, page in enumerate(self.pdfobj.pages):
+                resources = _resolve(page.get("/Resources"))
+                if resources is None:
+                    continue
+
+                # 1. Inline images via /XObject (Subtype /Image)
+                xobjs = _resolve(resources.get("/XObject"))
+                if xobjs:
+                    for key in list(xobjs.keys()):
+                        try:
+                            obj = _resolve(xobjs[key])
+                            if (hasattr(obj, "get")
+                                    and obj.get("/Subtype") == "/Image"):
+                                ext, mime = _filter_to_extmime(obj.get("/Filter"))
+                                data = obj.get_data() if hasattr(obj, "get_data") else b""
+                                # Pillow-reconstructable images: try to get
+                                # a real PNG out so QRAnalyzer can decode.
+                                if ext == "bin":
+                                    png_bytes = self._render_image_xobject(obj)
+                                    if png_bytes:
+                                        ext, mime = "png", "image/png"
+                                        data = png_bytes
+                                emit(
+                                    f"page{page_idx + 1}_image_{key.lstrip('/')}.{ext}",
+                                    bytes(data) if data else b"", mime,
+                                )
+                        except Exception as e:
+                            logging.debug("XObject %s extract failed: %s", key, e)
+
+                # 2. Embedded fonts via /Font /FontDescriptor /FontFileN
+                fonts = _resolve(resources.get("/Font"))
+                if fonts:
+                    for key in list(fonts.keys()):
+                        try:
+                            font_obj = _resolve(fonts[key])
+                            descriptor = _resolve(font_obj.get("/FontDescriptor"))
+                            if descriptor is None:
+                                continue
+                            for fkey, ext in (("/FontFile", "pfb"),
+                                              ("/FontFile2", "ttf"),
+                                              ("/FontFile3", "otf")):
+                                stream = _resolve(descriptor.get(fkey))
+                                if stream is None or not hasattr(stream, "get_data"):
+                                    continue
+                                font_name = (descriptor.get("/FontName")
+                                             or font_obj.get("/BaseFont")
+                                             or key)
+                                font_name = str(font_name).lstrip("/")
+                                data = stream.get_data()
+                                emit(
+                                    f"page{page_idx + 1}_font_{font_name}.{ext}",
+                                    bytes(data) if data else b"",
+                                    "application/font-sfnt"
+                                    if ext != "pfb"
+                                    else "application/x-font-type1",
+                                )
+                        except Exception as e:
+                            logging.debug("Font %s extract failed: %s", key, e)
+        except Exception as e:
+            logging.debug("PDF resource walk failed: %s", e)
+
+        # No Report emitted intentionally — keeps the default report quiet
+        # for the common case where every PDF has fonts and a few images.
+        # Analysts who care look at the analysis tree / manifest.json.
+
+    @staticmethod
+    def _render_image_xobject(xobj):
+        """Try to reconstruct a non-DCT/JPX image XObject as PNG bytes via
+        Pillow. Returns ``None`` if reconstruction isn't possible (no
+        Pillow, unsupported colorspace, malformed object)."""
+        try:
+            from PIL import Image
+        except ImportError:
+            return None
+        try:
+            data = xobj.get_data()
+            width = int(xobj.get("/Width", 0))
+            height = int(xobj.get("/Height", 0))
+            bits = int(xobj.get("/BitsPerComponent", 8))
+            colorspace = str(xobj.get("/ColorSpace", "/DeviceRGB"))
+            if not (width and height):
+                return None
+            if "DeviceRGB" in colorspace and bits == 8:
+                mode = "RGB"
+                expected = width * height * 3
+            elif "DeviceGray" in colorspace and bits == 8:
+                mode = "L"
+                expected = width * height
+            elif "DeviceCMYK" in colorspace and bits == 8:
+                mode = "CMYK"
+                expected = width * height * 4
+            else:
+                return None
+            if len(data) < expected:
+                return None
+            img = Image.frombytes(mode, (width, height), data[:expected])
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            return buf.getvalue()
+        except Exception:
+            return None
+
     def detect_incremental_updates(self):
         """A PDF with more than one ``%%EOF`` carries one or more
         incremental updates — the file was modified after original
@@ -584,6 +761,7 @@ class PDFAnalyzer(Analyzer):
         self.modules['pdf2text'] = self.get_text
         self.modules['embeddedFiles'] = self.getAttachments
         self.modules['embedded_js'] = self.extract_js
+        self.modules['resources'] = self.extract_resources
         self.modules['incremental_updates'] = self.detect_incremental_updates
         self.modules['policy'] = self.policy_check
         self.modules['preview'] = self.generate_preview
