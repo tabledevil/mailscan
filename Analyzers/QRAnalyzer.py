@@ -74,7 +74,10 @@ class QRAnalyzer(Analyzer):
     specificity = 5
 
     optional_pip_dependencies = [("pyzbar", "pyzbar")]
-    optional_system_dependencies = ["zbar"]
+    # zbarimg ships with the `zbar-tools` package and serves as a reliable
+    # PATH-discoverable proxy for libzbar being installed (which is what
+    # pyzbar actually needs at runtime via ctypes).
+    optional_system_dependencies = ["zbarimg"]
     extra = "qr"
 
     @classmethod
