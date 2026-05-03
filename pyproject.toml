@@ -86,3 +86,11 @@ ignore = ["E501"]  # line length handled by formatter
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
+# Marker registry — `docker` tests detonate attacker-controlled bytes
+# through external sandboxes (box-js etc.) and only run inside the
+# MATT container (set MATT_IN_DOCKER=1). They are deselected by
+# default; use `-m docker` to opt in (or `make test-dynamic`).
+markers = [
+    "docker: requires running inside the MATT Docker image (MATT_IN_DOCKER=1) — exercises box-js, libzbar, dynamic JS sandbox",
+]
+addopts = "-m 'not docker'"

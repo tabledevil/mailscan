@@ -38,7 +38,45 @@ You can use the `-x` or `--extract` flag to extract all parts of the file (e.g.,
 python3 matt.py -x <file>
 ```
 
-## Dependencies
+## Installation
+
+MATT supports two installation paths. The Docker path is recommended
+when handling **untrusted samples** — it bundles box-js, libzbar,
+poppler, and the rest of the optional analyzer stack in a REMnux-based
+image with the right permissions and isolation.
+
+### Docker (recommended for analyzing untrusted samples)
+
+```bash
+make build              # builds tabledevil/matt locally
+make check              # matt --check inside the container
+make shell              # interactive shell, ./data:/data mount
+make test               # host-safe tests
+make test-dynamic       # docker-only tests (box-js, libzbar, dynamic analysis)
+```
+
+Direct invocation against a sample (mount the directory, run `matt`):
+
+```bash
+docker run --rm -v "$(pwd)/samples:/data" tabledevil/matt \
+    matt /data/suspicious.eml --format json
+```
+
+The image is based on `tabledevil/file-analysis:latest` (REMnux-derived)
+and ships:
+
+- Python 3.10 venv with all optional extras (`office`, `pdf`, `html`,
+  `msg`, `7z`, `mime`, `tui`, `fuzzy`, `yara`, `js`, `qr`, `dev`)
+- `libzbar0` — QR / barcode decoding for the QRAnalyzer
+- `poppler-utils` — PDF page rendering (`pdftoppm`)
+- `box-js` — dynamic JavaScript sandbox; verified at build time
+- `MATT_IN_DOCKER=1` env var — unlocks `@pytest.mark.docker` tests
+  that detonate attacker-controlled bytes (refused on the host)
+
+The build fails loudly if `matt --check` reports unsatisfied core
+dependencies, so a successful image is guaranteed analyzer-complete.
+
+### Bare-metal install
 
 Install the core dependencies (required for basic analysis) with pip:
 
@@ -60,7 +98,9 @@ Optional features are provided via extras. For example:
 pip install .[all]
 ```
 
-Available extras include `pdf`, `html`, `msg`, `7z`, `lang`, and `mime`. You can also check what is missing on your system with:
+Available extras: `office`, `pdf`, `html`, `msg`, `7z`, `lang`, `mime`,
+`tui`, `fuzzy`, `yara`, `js`, `qr`, `dev`. Check what's missing on your
+system with:
 
 ```bash
 matt --check
@@ -68,11 +108,21 @@ matt --check
 
 For mbox analysis, the standard library `mailbox` module is used and requires no extra dependencies.
 
-**Note:** The `python-magic` library depends on the `libmagic` library. You may need to install it using your system's package manager. For example, on Debian/Ubuntu:
+#### System dependencies
 
-```bash
-sudo apt-get install libmagic1
-```
+Some optional features need system libraries:
+
+| Extra | System dep | Debian/Ubuntu | macOS (brew) |
+|-------|-----------|---------------|--------------|
+| `(core)` | libmagic | `apt-get install libmagic1` | `brew install libmagic` |
+| `qr` | libzbar | `apt-get install libzbar0` | `brew install zbar` |
+| `pdf` | poppler-utils | `apt-get install poppler-utils` | `brew install poppler` |
+| `js` (dynamic) | box-js (npm) | `npm install -g box-js` | `npm install -g box-js` |
+
+Dynamic JavaScript analysis (box-js) detonates attacker-controlled
+bytes — only run it inside the MATT Docker container or an equally
+isolated sandbox. The bare-metal install of `js` covers static
+deobfuscation only.
 
 ## Cloud Testing With Sample Files
 
