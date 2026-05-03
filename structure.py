@@ -598,12 +598,25 @@ class Structure(dict):
         # Calculate hash for dedup
         sha256_hash = hashlib.sha256(raw_data).hexdigest()
 
-        # Check cache
-        if sha256_hash in cls._cache:
+        # Audit finding (codex_security_1, _2; HIGH): hash-only cache
+        # returns the existing Structure regardless of filename/mime,
+        # so order-dependent attacks evade dangerous-extension and
+        # JS/VBA can_handle() detections — same bytes seen first as
+        # ``readme.txt`` poisons every later occurrence as ``payload.js``.
+        # Include filename basename + declared mime in the cache key.
+        # Use only the basename (not full path) so path differences
+        # don't break dedup of legitimate duplicate attachments.
+        if filename:
+            fn_key = os.path.basename(str(filename)).lower()
+        else:
+            fn_key = ""
+        cache_key = (sha256_hash, fn_key, mime_type or "")
+
+        if cache_key in cls._cache:
             log.info(
                 f"Returning cached Structure object for hash {sha256_hash[:10]}..."
             )
-            return cls._cache[sha256_hash]
+            return cls._cache[cache_key]
 
         # A2: pass raw_data directly — __init__ will NOT re-read the file
         new_struct = cls(
@@ -615,7 +628,7 @@ class Structure(dict):
             parent=parent,
             metadata=metadata,
         )
-        cls._cache[sha256_hash] = new_struct
+        cls._cache[cache_key] = new_struct
         return new_struct
 
     def __getattr__(self, key):
