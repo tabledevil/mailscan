@@ -31,10 +31,16 @@ def run_boxjs(raw_data: bytes, timeout: int = 30) -> dict | None:
         with open(js_path, "wb") as f:
             f.write(raw_data)
 
+        # box-js mkdir's <output-dir>/<basename>.results but does NOT
+        # create the parent <output-dir>; pre-create so the run doesn't
+        # die with ENOENT on first dispatch.
+        out_dir = os.path.join(tmpdir, "results")
+        os.makedirs(out_dir, exist_ok=True)
+
         try:
             subprocess.run(
                 ["box-js", "--no-kill", "--no-echo", "--output-dir",
-                 os.path.join(tmpdir, "results"), "--timeout", str(timeout),
+                 out_dir, "--timeout", str(timeout),
                  js_path],
                 capture_output=True, timeout=timeout + 10,
                 cwd=tmpdir,
@@ -46,12 +52,25 @@ def run_boxjs(raw_data: bytes, timeout: int = 30) -> dict | None:
             log.debug("box-js failed: %s", e)
             return None
 
-        # box-js may create results/ or sample.js.results/
-        results_dir = os.path.join(tmpdir, "results")
-        if not os.path.isdir(results_dir):
-            results_dir = js_path + ".results"
-            if not os.path.isdir(results_dir):
-                return None
+        # box-js layout (current versions): writes to
+        # <output-dir>/<basename>.results/. Older versions write directly
+        # to <output-dir>/ or to <input>.results/ next to the input file.
+        # Probe each in order.
+        candidates = [
+            os.path.join(out_dir, "sample.js.results"),
+            out_dir,
+            js_path + ".results",
+        ]
+        results_dir = next(
+            (p for p in candidates
+             if os.path.isdir(p) and any(
+                 fname.endswith(".json")
+                 for fname in os.listdir(p)
+             )),
+            None,
+        )
+        if results_dir is None:
+            return None
 
         result = {}
         for name in ("urls", "active_urls", "IOC", "snippets", "resources"):
