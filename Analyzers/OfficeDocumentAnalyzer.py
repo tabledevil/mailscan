@@ -467,16 +467,73 @@ class OfficeDocumentAnalyzer(Analyzer):
     # ------------------------------------------------------------------
     # XML content analysis (absorbs OfficeXMLAnalyzer)
     # ------------------------------------------------------------------
+    def _emit_dde_finding(self, xml_path: str, cmd: str, source: str) -> None:
+        """Record a DDE field-code finding and extract the launched
+        executable / argument so it surfaces in iocs_aggregate.
+
+        DDE / DDEAUTO is a pre-macro execution vector — Word will exec
+        the named program at document-open if the user clicks "yes" on
+        the link-update prompt (and silently in older /
+        unpatched configurations). CRITICAL severity unconditional;
+        false-positive surface is near zero given the precise gating
+        on field-code container elements."""
+        # Extract the targets (typically: program path, then arguments)
+        targets = re.findall(r'(?:&quot;|")([^"&]+)(?:&quot;|")', cmd)
+        target_str = " ".join(targets) if targets else "<unparsed args>"
+
+        key = f"dde_{xml_path}_{hash(cmd) & 0xffffffff:x}"
+        body_lines = [
+            f"DDE field-code in {xml_path} ({source})",
+            f"  raw : {cmd[:240]}",
+        ]
+        if targets:
+            body_lines.append(f"  exec: {targets[0]}")
+            if len(targets) > 1:
+                body_lines.append(f"  args: {' '.join(targets[1:])}")
+
+        self.reports[key] = Report(
+            "\n".join(body_lines),
+            short=f"DDE: {target_str[:80]}",
+            label="dde_field",
+            severity=Severity.CRITICAL,
+            verbosity=0,
+            order=23,
+            data={"xml_path": xml_path, "source": source,
+                  "raw_command": cmd, "targets": targets},
+        )
+
     def _analyze_xml_content(self):
         xml_files = [
             f for f in self._namelist
             if f.endswith(".xml") and not f.endswith(".rels") and f != "[Content_Types].xml"
         ]
 
-        suspicious_patterns = {
-            r"\bDDE\b": "DDE field",
-            r"\bDDEAUTO\b": "DDE Auto-execution",
-        }
+        # DDE field-code patterns. Earlier the detector matched the bare
+        # word "DDE" anywhere in a line which fired on legitimate text.
+        # Real DDE fields live in two specific shapes:
+        #
+        #   1. <w:instrText> DDEAUTO "<exec>" "<args>" </w:instrText>
+        #      (field-code instruction split across multiple runs)
+        #   2. <w:fldSimple w:instr="DDEAUTO &quot;<exec>&quot; …">
+        #      (collapsed single-element form)
+        #
+        # We extract the command target so it flows into the IOC
+        # aggregate (analysts care about the executable being launched,
+        # not just the presence of DDE).
+        _dde_re_instrtext = re.compile(
+            r"<w:instrText[^>]*>\s*"
+            r"(?P<cmd>(?:DDE|DDEAUTO)\b[^<]*?)"
+            r"\s*</w:instrText>",
+            re.IGNORECASE | re.DOTALL,
+        )
+        _dde_re_fldsimple = re.compile(
+            r'<w:fldSimple[^>]*\sw:instr\s*=\s*"'
+            r'(?P<cmd>(?:DDE|DDEAUTO)\b[^"]*)"',
+            re.IGNORECASE,
+        )
+        _dde_target_re = re.compile(
+            r'(?:&quot;|")(?P<target>[^"&]+)(?:&quot;|")'
+        )
 
         for xml_path in xml_files:
             try:
@@ -484,7 +541,7 @@ class OfficeDocumentAnalyzer(Analyzer):
             except Exception:
                 continue
 
-            # Line-based scans: DDE, XXE, XML bombs
+            # Line-based scans: XXE, XML bombs (line-precise reports)
             entity_count = 0
             for line_num, line in enumerate(content.splitlines(), 1):
                 if "<!ENTITY" in line:
@@ -500,13 +557,15 @@ class OfficeDocumentAnalyzer(Analyzer):
                         f"DOCTYPE declaration in {xml_path} — not expected in OOXML",
                         severity=Severity.HIGH,
                     )
-                for pattern, desc in suspicious_patterns.items():
-                    if re.search(pattern, line, re.IGNORECASE):
-                        key = f"dde_{xml_path}_{line_num}"
-                        self.reports[key] = Report(
-                            f"Suspicious string ({desc}) in {xml_path} line {line_num}: {line.strip()[:120]}",
-                            severity=Severity.CRITICAL,
-                        )
+
+            # DDE: scan the whole document content (instrText spans split
+            # across multiple lines in unformatted documents).
+            for match in _dde_re_instrtext.finditer(content):
+                cmd = match.group("cmd").strip()
+                self._emit_dde_finding(xml_path, cmd, "instrText")
+            for match in _dde_re_fldsimple.finditer(content):
+                cmd = match.group("cmd").strip()
+                self._emit_dde_finding(xml_path, cmd, "fldSimple")
 
             # XML bomb detection: multiple nested entity definitions
             if entity_count > 3:
