@@ -1,7 +1,23 @@
 """Subprocess wrappers for external JS analysis tools (box-js, JStillery, de4js).
 
-Pure functions — no Analyzer coupling. Each tool degrades silently if not installed.
-All tools run locally with no network access (box-js emulates network calls).
+Pure functions — no Analyzer coupling. Each tool degrades silently if
+not installed.
+
+**Sandbox gate.** box-js emulates a JScript runtime by *executing* the
+input under Node's vm. That's a real code-execution surface against
+attacker-controlled bytes. To prevent the audit-time discovery that
+this could detonate on the analyst's host with no isolation, the
+wrapper now refuses to spawn box-js unless one of the following is
+true:
+
+  1. ``MATT_IN_DOCKER=1`` is set (the MATT image sets this).
+  2. ``MATT_ALLOW_HOST_SANDBOX=1`` is set (escape hatch — the analyst
+     has explicitly accepted that box-js will execute the bytes on
+     this host, e.g. they're on an isolated air-gapped VM).
+
+When neither holds, ``run_boxjs()`` returns ``None`` and emits a
+WARNING-level log line so the analyst can see why dynamic analysis
+didn't run.
 """
 
 import json
@@ -13,19 +29,55 @@ import tempfile
 
 log = logging.getLogger("matt")
 
+
+# ---------------------------------------------------------------
+# Sandbox-gate
+# ---------------------------------------------------------------
+
+
+def _sandbox_authorised() -> bool:
+    """Are we running in an environment where it's safe to detonate
+    attacker-controlled bytes through box-js?"""
+    if os.environ.get("MATT_IN_DOCKER") == "1":
+        return True
+    if os.environ.get("MATT_ALLOW_HOST_SANDBOX") == "1":
+        return True
+    return False
+
+
 # ---------------------------------------------------------------
 # box-js
 # ---------------------------------------------------------------
 
 def boxjs_available() -> bool:
-    return shutil.which("box-js") is not None
+    """True iff the box-js binary exists AND we're allowed to invoke it.
+
+    Bare presence of the binary is no longer enough: ``--check`` and
+    everything else must respect the sandbox gate so analysts don't
+    inadvertently detonate samples on a host install of box-js."""
+    if not shutil.which("box-js"):
+        return False
+    return _sandbox_authorised()
 
 
 def run_boxjs(raw_data: bytes, timeout: int = 30) -> dict | None:
     """Run box-js on raw JS data. Returns parsed results dict or None.
 
+    Refuses to run unless ``_sandbox_authorised()`` returns True (set
+    ``MATT_IN_DOCKER=1`` inside the container or
+    ``MATT_ALLOW_HOST_SANDBOX=1`` to opt in on a host you own).
+
     Result keys: urls, active_urls, iocs, snippets, resources, payloads
     """
+    if not _sandbox_authorised():
+        log.warning(
+            "box-js dynamic analysis refused: not running inside the MATT "
+            "Docker container. Set MATT_IN_DOCKER=1 (Docker) or "
+            "MATT_ALLOW_HOST_SANDBOX=1 (explicit host opt-in) to enable."
+        )
+        return None
+    if not shutil.which("box-js"):
+        return None
     with tempfile.TemporaryDirectory(prefix="matt_boxjs_") as tmpdir:
         js_path = os.path.join(tmpdir, "sample.js")
         with open(js_path, "wb") as f:

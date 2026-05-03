@@ -23,12 +23,26 @@ from Utils.js_tools import (
 
 
 class TestAvailability:
-    def test_boxjs_available_true(self):
+    def test_boxjs_available_true(self, monkeypatch):
+        # box-js is gated behind a sandbox-authorisation check
+        # (audit follow-up); inside the test we explicitly opt in so
+        # the assertion is still about binary presence.
+        monkeypatch.setenv("MATT_ALLOW_HOST_SANDBOX", "1")
         with mock.patch("shutil.which", return_value="/usr/bin/box-js"):
             assert boxjs_available() is True
 
     def test_boxjs_available_false(self):
         with mock.patch("shutil.which", return_value=None):
+            assert boxjs_available() is False
+
+    def test_boxjs_available_gated_off_outside_sandbox(self, monkeypatch):
+        """Sandbox gate: even when box-js is on PATH, refuse to advertise
+        availability unless we're inside the MATT container or the
+        analyst has explicitly opted in. Audit finding: codex_security_1
+        and _2 (CRITICAL)."""
+        monkeypatch.delenv("MATT_IN_DOCKER", raising=False)
+        monkeypatch.delenv("MATT_ALLOW_HOST_SANDBOX", raising=False)
+        with mock.patch("shutil.which", return_value="/usr/bin/box-js"):
             assert boxjs_available() is False
 
     def test_jstillery_available_true_cli(self):
@@ -62,6 +76,17 @@ class TestAvailability:
 
 
 class TestRunBoxjs:
+    @pytest.fixture(autouse=True)
+    def _allow_sandbox(self, monkeypatch):
+        # These tests mock subprocess.run; box-js never actually runs.
+        # The sandbox gate (added in the audit follow-up) still guards
+        # the code path, so opt in explicitly here. Also mock
+        # shutil.which so the pre-flight binary-presence check passes
+        # on hosts without box-js installed.
+        monkeypatch.setenv("MATT_ALLOW_HOST_SANDBOX", "1")
+        monkeypatch.setattr("Utils.js_tools.shutil.which",
+                            lambda _: "/usr/bin/box-js")
+
     def test_parses_output_files(self, tmp_path):
         """Mock subprocess + tempdir to verify box-js output parsing."""
         js_data = b'var x = new ActiveXObject("WScript.Shell");'
