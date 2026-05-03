@@ -17,13 +17,13 @@ build:
 
 test:
 	docker run --rm $(IMAGE) matt --check
-	docker run --rm $(IMAGE) python -m pytest tests/ -x -q
+	docker run --rm -w /opt/matt/src $(IMAGE) python -m pytest tests/ -x -q
 
 # Dynamic-analysis tests (marked @pytest.mark.docker) detonate
 # attacker-controlled bytes through box-js etc. Only safe inside the
 # container — refuse to run on the host.
 test-dynamic:
-	docker run --rm -e MATT_IN_DOCKER=1 $(IMAGE) \
+	docker run --rm -w /opt/matt/src -e MATT_IN_DOCKER=1 $(IMAGE) \
 	    python -m pytest tests/ -m docker -v
 
 check:
