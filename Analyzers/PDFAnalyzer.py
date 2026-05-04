@@ -644,6 +644,16 @@ class PDFAnalyzer(Analyzer):
         )
 
 
+    # Preview render budget — caps the work Poppler is willing to do
+    # against attacker-controlled PDFs. Audit finding (codex_security_1,
+    # codex_security_2): unbounded ``convert_from_bytes`` is a reliable
+    # CPU/RAM exhaustion path against any deployment with poppler-utils
+    # installed.
+    _PREVIEW_TIMEOUT_S = 15        # pdftoppm spawn budget
+    _PREVIEW_DPI = 72              # screen-resolution; 1 inch ~= 1 inch
+    _PREVIEW_MAX_INPUT_BYTES = 50 * 1024 * 1024  # don't render PDFs > 50 MB
+    _PREVIEW_MAX_PIXELS = 4_000_000  # ~2000×2000 ceiling on output
+
     def generate_preview(self):
         if importlib.util.find_spec("pdf2image") is None:
             logging.warning("pdf2image is not installed, cannot generate PDF preview.")
@@ -651,20 +661,49 @@ class PDFAnalyzer(Analyzer):
         if not shutil.which("pdftoppm"):
             logging.warning("poppler (pdftoppm) is not installed, cannot generate PDF preview.")
             return
+
+        # Refuse to render large attacker PDFs — pdftoppm is happy to
+        # spend minutes on multi-hundred-MB inputs that have no useful
+        # preview anyway.
+        if self.struct.size > self._PREVIEW_MAX_INPUT_BYTES:
+            logging.debug(
+                "PDF preview skipped: input %d bytes exceeds budget %d",
+                self.struct.size, self._PREVIEW_MAX_INPUT_BYTES,
+            )
+            return
+
         convert_from_bytes = importlib.import_module("pdf2image").convert_from_bytes
         try:
-            images = convert_from_bytes(self.struct.rawdata, first_page=1, last_page=1, fmt='png')
-            if images:
-                image = images[0]
-                buffer = io.BytesIO()
-                image.save(buffer, format="PNG")
-                encoded_string = base64.b64encode(buffer.getvalue()).decode('ascii')
-                self.reports['preview'] = Report(
-                    text="First page preview",
-                    label="Preview",
-                    content_type='image/png',
-                    data=encoded_string
+            images = convert_from_bytes(
+                self.struct.rawdata,
+                first_page=1, last_page=1, fmt='png',
+                dpi=self._PREVIEW_DPI,
+                # pdf2image forwards the timeout flag to pdftoppm via
+                # subprocess; if missing on older pdf2image versions, the
+                # outer subprocess.TimeoutExpired guard catches it.
+                timeout=self._PREVIEW_TIMEOUT_S,
+            )
+            if not images:
+                return
+            image = images[0]
+            # Reject pathological page geometry (e.g. crafted MediaBox
+            # 100000×100000) that slips past pdftoppm's own checks.
+            w, h = image.size
+            if w * h > self._PREVIEW_MAX_PIXELS:
+                logging.debug(
+                    "PDF preview skipped: page %dx%d exceeds %d-pixel budget",
+                    w, h, self._PREVIEW_MAX_PIXELS,
                 )
+                return
+            buffer = io.BytesIO()
+            image.save(buffer, format="PNG")
+            encoded_string = base64.b64encode(buffer.getvalue()).decode('ascii')
+            self.reports['preview'] = Report(
+                text="First page preview",
+                label="Preview",
+                content_type='image/png',
+                data=encoded_string,
+            )
         except Exception as e:
             logging.warning(f"Could not generate PDF preview: {e}")
 
