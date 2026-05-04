@@ -1,75 +1,105 @@
+"""Template analyzer — copy this file as a starting point for new analyzers.
+
+This file is intentionally NOT registered in ``Analyzers/__init__.py``;
+it never runs. It exists as documentation-by-example for contributors.
+
+Steps to add a new analyzer:
+  1. Copy this file: ``cp TEMPLATE_ANALYZER.py MyNewAnalyzer.py``
+  2. Rename the class: ``TemplateAnalyzer`` → ``MyNewAnalyzer``
+  3. Set ``compatible_mime_types``, ``specificity``, dependencies
+  4. Implement ``analysis()`` and any helpers it needs
+  5. Add ``"MyNewAnalyzer"`` to the ``analyzers_list`` in
+     ``Analyzers/__init__.py``
+
+Audit follow-up #45: the previous version imported from a nonexistent
+``.base`` module and listed placeholder pip deps (``new_dependency``,
+``new_command``) that confused contributors copying the template.
+This rewrite imports from the real ``structure`` module and shows the
+actual extension points correctly.
+"""
+
 import logging
-from .base import BaseAnalyzer, Report, AnalysisModuleException
 
-# To use a new dependency, import it here.
-# If the dependency is optional, wrap the import in a try...except block.
-# For example:
-# try:
-#     import new_dependency
-# except ImportError:
-#     new_dependency = None
+from structure import Analyzer, Report, Severity, AnalysisModuleException  # noqa: F401
 
-class TemplateAnalyzer(BaseAnalyzer):
-    """
-    This is a template for a new analyzer.
-    Copy this file and rename it to something like 'MyNewAnalyzer.py'.
-    Then, change the class name from 'TemplateAnalyzer' to 'MyNewAnalyzer'.
-    """
+log = logging.getLogger("matt")
 
-    # A list of MIME types that this analyzer can handle.
-    compatible_mime_types = ['application/x-my-new-format']
 
-    # A short description of the analyzer.
+# Optional dependency — wrap imports for any package the analyzer
+# needs but that should be installable as an extra rather than a hard
+# requirement. Replace ``some_optional_dep`` with the real import.
+try:
+    import some_optional_dep  # type: ignore[import-not-found]  # noqa: F401
+except ImportError:
+    some_optional_dep = None
+
+
+class TemplateAnalyzer(Analyzer):
+    """Replace this docstring with what the analyzer actually does."""
+
+    # MIME types this analyzer claims as primary. ``can_analyze`` checks
+    # this list first; supplement with ``can_handle()`` for content-based
+    # probing on ambiguous types like ``application/octet-stream``.
+    compatible_mime_types = ["application/x-my-new-format"]
+
+    # Human-readable label shown by ``matt --check``.
     description = "My New Analyzer"
 
-    # A list of required pip packages.
-    # The tool's --check command will verify that these are installed.
-    pip_dependencies = ['new_dependency']
+    # Dispatch ranking. See the project README for the convention:
+    #   5  generic (PlainText)
+    #   10 container (Zip, 7z, OLE)
+    #   15 semi-structured (HTML)
+    #   20 format (Email, PDF, Docx, Mbox, Msg)
+    #   25 sub-analyzer
+    specificity = 20
 
-    # A list of required system commands.
-    # The tool's --check command will verify that these are installed.
-    system_dependencies = ['new_command']
+    # Hard pip requirements — analyzer is unavailable without these.
+    # Format: list of (import_name, pip_package) tuples.
+    pip_dependencies: list[tuple[str, str]] = []
 
-    def analysis(self):
+    # Optional pip requirements — analyzer degrades gracefully without
+    # these but ``matt --check`` will list them as install hints.
+    optional_pip_dependencies = [("some_optional_dep", "some-optional-dep")]
+
+    # Optional system binaries — discovered via ``shutil.which``.
+    optional_system_dependencies: list[str] = []
+
+    # Name of the pip extra that pulls in this analyzer's optional deps.
+    # ``matt --check`` shows ``Install: pip install .[<extra>]``.
+    extra = "myextra"
+
+    @classmethod
+    def can_handle(cls, struct) -> bool:
+        """Optional content-based probe for ambiguous MIME types.
+        Return True if this analyzer wants to run on the given Structure.
+        Default: False (i.e. only run on the compatible_mime_types list).
         """
-        This is the main analysis method.
-        It is called by the framework after the analyzer is initialized.
-        """
-        # Call the parent analysis method first.
-        super().analysis()
+        return False
 
-        # Check if optional dependencies are installed.
-        # if not new_dependency:
-        #     logging.warning("new_dependency is not installed, cannot perform some analysis.")
-        #     return
+    def analysis(self) -> None:
+        """Populate ``self.reports`` with findings and ``self.childitems``
+        with nested ``Structure`` objects (e.g. archive entries, MIME
+        parts). You can either register modules via
+        ``self.modules['name'] = fn`` and call ``super().analysis()``,
+        or do everything inline here."""
+        if some_optional_dep is None:
+            log.debug("TemplateAnalyzer: optional dep unavailable, skipping")
+            return
 
-        # The raw data of the file is available in self.struct.rawdata.
-        # The filename is in self.struct.filename.
+        self.info = "Short summary shown in the analyzer-info column."
 
-        # You can add reports to the analyzer.
-        # A report is a key-value pair that will be displayed in the output.
-        self.reports['my_report'] = Report("This is my report.")
+        # Example: emit a finding
+        self.reports["template_finding"] = Report(
+            "TemplateAnalyzer ran",
+            label="template_finding",
+            severity=Severity.INFO,
+        )
 
-        # You can also add child items.
-        # A child item is a new piece of data that will be analyzed by the framework.
-        # For example, if you are analyzing an archive, you can add the extracted
-        # files as child items.
-        # new_data = b"This is a new piece of data."
-        # self.childitems.append(self.generate_struct(data=new_data, filename="new_file.txt", mime_type="text/plain"))
-
-        # If something goes wrong, you can raise an AnalysisModuleException.
-        # raise AnalysisModuleException("Something went wrong.")
-
-        # The info property is a short string that summarizes the analysis.
-        self.info = "This is a summary of the analysis."
-
-        # The analysis method can be broken down into smaller methods using the
-        # self.modules dictionary. This is useful for organizing your code.
-        # self.modules['my_module'] = self.my_module_method
-        # self.run_modules()
-
-    # def my_module_method(self):
-    #     """
-    #     This is an example of a module method.
-    #     """
-    #     pass
+        # Example: emit a child Structure for some extracted bytes
+        # self.childitems.append(
+        #     self.generate_struct(
+        #         data=extracted_bytes,
+        #         filename="extracted.bin",
+        #         mime_type="application/octet-stream",
+        #     )
+        # )
