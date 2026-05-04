@@ -531,8 +531,25 @@ class OfficeDocumentAnalyzer(Analyzer):
             r'(?P<cmd>(?:DDE|DDEAUTO)\b[^"]*)"',
             re.IGNORECASE,
         )
-        _dde_target_re = re.compile(
-            r'(?:&quot;|")(?P<target>[^"&]+)(?:&quot;|")'
+        # Multi-run / split-instrText evasion (audit #5, HIGH × 3 audits):
+        # Word can split a single field-code instruction across multiple
+        # adjacent ``<w:instrText>`` elements within the same paragraph,
+        # e.g.
+        #   <w:r><w:instrText>DDE</w:instrText></w:r>
+        #   <w:r><w:instrText>AUTO "cmd.exe" "/c calc"</w:instrText></w:r>
+        # The single-element regex above sees only "DDE" in element 1
+        # and produces a finding with empty target list, losing the
+        # cmd.exe argument that should land in iocs_aggregate.
+        # Fix: per-paragraph, concatenate every instrText content into
+        # a virtual joined instruction and re-scan that for DDE/DDEAUTO.
+        _para_re = re.compile(r"<w:p\b[^>]*>(.*?)</w:p>", re.DOTALL)
+        _instr_re = re.compile(
+            r"<w:instrText[^>]*>(.*?)</w:instrText>",
+            re.DOTALL,
+        )
+        _dde_re_joined = re.compile(
+            r"\b(?P<cmd>(?:DDE|DDEAUTO)\b[^<]*)",
+            re.IGNORECASE | re.DOTALL,
         )
 
         for xml_path in xml_files:
@@ -560,12 +577,37 @@ class OfficeDocumentAnalyzer(Analyzer):
 
             # DDE: scan the whole document content (instrText spans split
             # across multiple lines in unformatted documents).
+            single_run_hits: set[tuple[str, str]] = set()
             for match in _dde_re_instrtext.finditer(content):
                 cmd = match.group("cmd").strip()
+                single_run_hits.add((xml_path, cmd))
                 self._emit_dde_finding(xml_path, cmd, "instrText")
             for match in _dde_re_fldsimple.finditer(content):
                 cmd = match.group("cmd").strip()
                 self._emit_dde_finding(xml_path, cmd, "fldSimple")
+
+            # Multi-run shape: concatenate adjacent instrText within
+            # each paragraph, then re-scan. Suppress duplicate findings
+            # already emitted by the single-element pass.
+            for para_match in _para_re.finditer(content):
+                fragments = [
+                    m.group(1)
+                    for m in _instr_re.finditer(para_match.group(1))
+                ]
+                if not fragments:
+                    continue
+                joined = "".join(fragments)
+                m = _dde_re_joined.search(joined)
+                if not m:
+                    continue
+                cmd = m.group("cmd").strip()
+                # If the single-run pass already saw this exact cmd, skip.
+                # (Identical findings dedup at report-key level too, but
+                # the join sometimes recovers the *same* command from
+                # one element — no need to double-emit.)
+                if (xml_path, cmd) in single_run_hits:
+                    continue
+                self._emit_dde_finding(xml_path, cmd, "instrText_split")
 
             # XML bomb detection: multiple nested entity definitions
             if entity_count > 3:

@@ -168,13 +168,35 @@ def test_portfolio_pdf_extracts_all_embedded_files():
     assert rep is not None
     assert rep.data["count"] == 4
 
+    # Audit finding #20 (gemini_test_cov_2; HIGH): asserting on filename
+    # presence alone misses regressions where the parser extracts
+    # zero-byte or truncated children. Validate the actual bytes for
+    # each known payload.
+    by_name = {c.filename: c for c in children}
+    expected = {
+        b"inner.pdf":   b"%PDF-1.4\n%inner-pdf-bytes\n%%EOF",
+        b"report.docx": b"PK\x03\x04docx-zip-bytes-and-some-content",
+        b"font.ttf":    b"\x00\x01\x00\x00ttf-bytes",
+        b"image.png":   b"\x89PNG\r\n\x1a\nimage-bytes",
+    }
+    for name_bytes, want in expected.items():
+        name = name_bytes.decode()
+        assert name in by_name
+        assert by_name[name].rawdata == want, (
+            f"{name}: got {by_name[name].rawdata!r}"
+        )
+
 
 def test_af_associated_files_extracted():
     pytest.importorskip("PyPDF2")
     s = Structure.create(data=_af_pdf(), filename="invoice.pdf",
                          mime_type="application/pdf")
-    names = [c.filename for c in s.get_children()]
-    assert "factur-x.xml" in names
+    children_by_name = {c.filename: c for c in s.get_children()
+                        if c.filename}
+    assert "factur-x.xml" in children_by_name
+    # Audit #20: verify content bytes, not just filename presence
+    expected = b"<?xml version='1.0'?><invoice><amount>42</amount></invoice>"
+    assert children_by_name["factur-x.xml"].rawdata == expected
     rep = s.analyzer.reports.get("embedded_files")
     assert rep is not None
     assert "AF" in rep.data["by_source"]
@@ -185,8 +207,11 @@ def test_file_attachment_annotation_extracted():
     s = Structure.create(data=_file_attachment_annot_pdf(),
                          filename="annot.pdf",
                          mime_type="application/pdf")
-    names = [c.filename for c in s.get_children()]
-    assert "attached.bin" in names
+    children_by_name = {c.filename: c for c in s.get_children()
+                        if c.filename}
+    assert "attached.bin" in children_by_name
+    # Audit #20: verify content bytes
+    assert children_by_name["attached.bin"].rawdata == b"secret-attachment-content"
     rep = s.analyzer.reports.get("embedded_files")
     assert rep is not None
     assert "fileattachment_annot" in rep.data["by_source"]
@@ -260,9 +285,12 @@ def test_no_incremental_report_for_single_eof_pdf():
     assert "redefined_objects" not in s.analyzer.reports
 
 
-def test_dedup_attachments_by_content_hash():
-    """If the same payload is reachable via both names tree and a
-    FileAttachment annot, we should only emit one child Structure."""
+def test_dedup_attachments_names_tree_vs_af():
+    """Names-tree and /AF both pointing at the same Filespec should
+    dedup. (Renamed from the original ``test_dedup_attachments_by_content_hash``
+    which claimed to test FileAttachment annotations but actually only
+    used Names + /AF — see ``test_dedup_attachments_names_tree_vs_fileattachment_annot``
+    below for the genuine annotation-vs-tree dedup case.)"""
     pytest.importorskip("PyPDF2")
     payload = b"shared-attachment-bytes"
     objs = [b""]
@@ -278,3 +306,41 @@ def test_dedup_attachments_by_content_hash():
     # Same payload referenced twice — should appear once
     matches = [c for c in s.get_children() if c.filename == "shared.bin"]
     assert len(matches) == 1
+
+
+def test_dedup_attachments_names_tree_vs_fileattachment_annot():
+    """Audit finding #19 (codex_test_cov_1, codex_test_cov_2; HIGH):
+    the original ``test_dedup_attachments_by_content_hash`` claimed to
+    cover the names-tree vs FileAttachment-annotation dedup branch but
+    its fixture only used Names + /AF. The annotation branch
+    (``Analyzers/PDFAnalyzer.py:317-322``) had zero direct coverage.
+
+    This test builds a PDF where the SAME payload is reachable both
+    via ``/Names/EmbeddedFiles`` and via a ``/Subtype /FileAttachment``
+    annotation, and verifies the cross-source dedup actually fires."""
+    pytest.importorskip("PyPDF2")
+    payload = b"shared-via-tree-and-annot"
+    objs: list[bytes] = [b""]
+    # 1: catalog with Names tree pointing at the shared filespec
+    objs.append(b"<< /Type /Catalog /Pages 2 0 R /Names 3 0 R >>")
+    # 2: pages with a single page that has a FileAttachment annot
+    objs.append(b"<< /Type /Pages /Kids [4 0 R] /Count 1 >>")
+    # 3: names dict pointing at the same filespec
+    objs.append(b"<< /EmbeddedFiles << /Names "
+                b"[(shared.bin) 5 0 R] >> >>")
+    # 4: page with the FileAttachment annot
+    objs.append(b"<< /Type /Page /Parent 2 0 R /Annots [6 0 R] "
+                b"/MediaBox [0 0 100 100] >>")
+    # 5: shared filespec — both paths reach this
+    objs.append(b"<< /Type /Filespec /F (shared.bin) /EF << /F 7 0 R >> >>")
+    # 6: FileAttachment annot pointing at the same filespec (object 5)
+    objs.append(b"<< /Type /Annot /Subtype /FileAttachment /FS 5 0 R >>")
+    # 7: stream with the actual bytes
+    objs.append(b"<< /Length " + str(len(payload)).encode()
+                + b" >>\nstream\n" + payload + b"\nendstream")
+    s = Structure.create(data=_assemble_pdf(objs, root_id=1),
+                         filename="dup-cross.pdf",
+                         mime_type="application/pdf")
+    matches = [c for c in s.get_children() if c.filename == "shared.bin"]
+    assert len(matches) == 1, [c.filename for c in matches]
+    assert matches[0].rawdata == payload

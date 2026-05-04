@@ -162,6 +162,45 @@ def test_dde_false_positive_guard_legitimate_text():
 # ---------------------------------------------------------------
 
 
+def test_dde_split_instrtext_recovers_command_targets():
+    """Audit finding #5 (codex_test_cov_1, codex_test_cov_2,
+    gemini_test_cov_2; HIGH × 3): Word can split a single DDE field-
+    code instruction across multiple ``<w:instrText>`` elements
+    within the same paragraph. Before the fix, detection fired but
+    targets[] was empty — the command target (cmd.exe arg) was
+    invisible to iocs_aggregate.
+
+    Pin the recovery: the joined-paragraph pass must reconstruct the
+    full command and surface its targets."""
+    SPLIT_DOC = b"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:p>
+      <w:r><w:instrText>DDE</w:instrText></w:r>
+      <w:r><w:instrText>AUTO &quot;cmd.exe&quot; &quot;/c calc.exe&quot;</w:instrText></w:r>
+    </w:p>
+  </w:body>
+</w:document>
+"""
+    s = Structure.create(
+        data=_docx_with_document_xml(SPLIT_DOC),
+        filename="split.docx",
+        mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
+    dde = [s.analyzer.reports[k] for k in s.analyzer.reports
+           if k.startswith("dde_")]
+    assert dde, list(s.analyzer.reports)
+    # At least one finding must carry the full target list, not empty
+    targets_recovered = any(
+        rep.data and any("cmd.exe" in t for t in rep.data.get("targets") or [])
+        for rep in dde
+    )
+    assert targets_recovered, [r.data for r in dde]
+    # And one finding's source should be the new "instrText_split" tag
+    sources = {r.data.get("source") for r in dde if r.data}
+    assert "instrText_split" in sources, sources
+
+
 def test_dde_target_flows_to_iocs_aggregate():
     """The harvested executable path / argument should land in the
     root iocs_aggregate via the standard report-text harvesting path
