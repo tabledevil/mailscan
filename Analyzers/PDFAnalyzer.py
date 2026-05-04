@@ -7,10 +7,22 @@ import importlib.util
 import shutil
 from structure import Analyzer, Report, Severity, AnalysisModuleException
 
+# Prefer pypdf (the maintained fork) over the deprecated PyPDF2. Both
+# expose the same API surface used here (PdfReader, errors.PdfReadError,
+# generic.IndirectObject / StreamObject / TextStringObject etc.) so
+# binding to a single ``PyPDF2`` alias keeps the rest of the analyzer
+# unchanged. pypdf is installed by the ``pdf`` extra; PyPDF2 stays as
+# a legacy fallback for environments still pinned to it.
 try:
-    import PyPDF2
+    import pypdf as PyPDF2  # noqa: N814 — alias intentional
+    from pypdf import generic as _pdf_generic  # type: ignore[import-not-found]
 except ImportError:
-    PyPDF2 = None
+    try:
+        import PyPDF2  # type: ignore[no-redef]
+        from PyPDF2 import generic as _pdf_generic  # type: ignore[import-not-found]
+    except ImportError:
+        PyPDF2 = None
+        _pdf_generic = None
 
 try:
     from Utils import pdf_policy as _pdf_policy
@@ -59,7 +71,7 @@ class PDFAnalyzer(Analyzer):
     compatible_mime_types = ['application/pdf']
     description = 'PDF Analyser'
     specificity = 20
-    optional_pip_dependencies = ['PyPDF2', 'pdf2image']
+    optional_pip_dependencies = ['pypdf', 'pdf2image']
     optional_system_dependencies = ['pdftoppm']
     extra = "pdf"
 
@@ -116,13 +128,14 @@ class PDFAnalyzer(Analyzer):
         if not hasattr(self, "pdfobj"):
             return
 
-        try:
-            from PyPDF2.generic import (
-                IndirectObject, DictionaryObject, ArrayObject,
-                StreamObject, TextStringObject, ByteStringObject,
-            )
-        except ImportError:
+        if _pdf_generic is None:
             return
+        IndirectObject = _pdf_generic.IndirectObject
+        DictionaryObject = _pdf_generic.DictionaryObject
+        ArrayObject = _pdf_generic.ArrayObject
+        StreamObject = _pdf_generic.StreamObject
+        TextStringObject = _pdf_generic.TextStringObject
+        ByteStringObject = _pdf_generic.ByteStringObject
 
         seen_objects: set[int] = set()
         seen_payloads: set[str] = set()
@@ -240,7 +253,7 @@ class PDFAnalyzer(Analyzer):
         if _seen is None:
             _seen = set()
         try:
-            from PyPDF2.generic import IndirectObject
+            IndirectObject = _pdf_generic.IndirectObject if _pdf_generic else None
             if isinstance(node, IndirectObject):
                 if node.idnum in _seen:
                     return
@@ -264,7 +277,7 @@ class PDFAnalyzer(Analyzer):
         """Extract the payload bytes from a /Filespec dict's /EF stream.
         Returns ``(name, bytes)`` or ``None``."""
         try:
-            from PyPDF2.generic import IndirectObject
+            IndirectObject = _pdf_generic.IndirectObject if _pdf_generic else None
             if isinstance(fs_dict, IndirectObject):
                 fs_dict = fs_dict.get_object()
             ef = fs_dict.get("/EF") if hasattr(fs_dict, "get") else None
@@ -315,7 +328,7 @@ class PDFAnalyzer(Analyzer):
             attachments.append((name, data, source))
 
         try:
-            from PyPDF2.generic import IndirectObject as _Ind
+            _Ind = _pdf_generic.IndirectObject if _pdf_generic else None
             catalog = self.pdfobj.trailer["/Root"]
             if isinstance(catalog, _Ind):
                 catalog = catalog.get_object()
@@ -353,7 +366,7 @@ class PDFAnalyzer(Analyzer):
 
             # 3. /Subtype /FileAttachment annotations across all pages
             try:
-                from PyPDF2.generic import IndirectObject
+                IndirectObject = _pdf_generic.IndirectObject if _pdf_generic else None
                 for page in self.pdfobj.pages:
                     annots = page.get("/Annots") or []
                     if isinstance(annots, IndirectObject):
@@ -420,7 +433,7 @@ class PDFAnalyzer(Analyzer):
         if not hasattr(self, "pdfobj"):
             return
         try:
-            from PyPDF2.generic import IndirectObject
+            IndirectObject = _pdf_generic.IndirectObject if _pdf_generic else None
         except ImportError:
             return
 

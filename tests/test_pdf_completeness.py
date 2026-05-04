@@ -153,7 +153,7 @@ def _incremental_update_pdf() -> bytes:
 
 
 def test_portfolio_pdf_extracts_all_embedded_files():
-    pytest.importorskip("PyPDF2")
+    pytest.importorskip("pypdf")
     s = Structure.create(data=_portfolio_pdf(), filename="portfolio.pdf",
                          mime_type="application/pdf")
     children = [c for c in s.get_children() if c.filename and "." in c.filename]
@@ -188,7 +188,7 @@ def test_portfolio_pdf_extracts_all_embedded_files():
 
 
 def test_af_associated_files_extracted():
-    pytest.importorskip("PyPDF2")
+    pytest.importorskip("pypdf")
     s = Structure.create(data=_af_pdf(), filename="invoice.pdf",
                          mime_type="application/pdf")
     children_by_name = {c.filename: c for c in s.get_children()
@@ -203,7 +203,7 @@ def test_af_associated_files_extracted():
 
 
 def test_file_attachment_annotation_extracted():
-    pytest.importorskip("PyPDF2")
+    pytest.importorskip("pypdf")
     s = Structure.create(data=_file_attachment_annot_pdf(),
                          filename="annot.pdf",
                          mime_type="application/pdf")
@@ -218,7 +218,7 @@ def test_file_attachment_annotation_extracted():
 
 
 def test_incremental_update_detected():
-    pytest.importorskip("PyPDF2")
+    pytest.importorskip("pypdf")
     s = Structure.create(data=_incremental_update_pdf(),
                          filename="incr.pdf",
                          mime_type="application/pdf")
@@ -234,7 +234,7 @@ def test_benign_incremental_update_is_info():
     """An update that only appends static content (no active surfaces)
     should report INFO, not HIGH — signed PDFs and editor-resaves do
     this routinely."""
-    pytest.importorskip("PyPDF2")
+    pytest.importorskip("pypdf")
     benign = (
         b"%PDF-1.7\n"
         b"1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n"
@@ -256,7 +256,7 @@ def test_benign_incremental_update_is_info():
 
 
 def test_redefined_object_emitted_as_forensic_child():
-    pytest.importorskip("PyPDF2")
+    pytest.importorskip("pypdf")
     s = Structure.create(data=_incremental_update_pdf(),
                          filename="incr.pdf",
                          mime_type="application/pdf")
@@ -270,7 +270,7 @@ def test_redefined_object_emitted_as_forensic_child():
 
 
 def test_no_incremental_report_for_single_eof_pdf():
-    pytest.importorskip("PyPDF2")
+    pytest.importorskip("pypdf")
     pdf = (
         b"%PDF-1.7\n"
         b"1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n"
@@ -291,7 +291,7 @@ def test_dedup_attachments_names_tree_vs_af():
     which claimed to test FileAttachment annotations but actually only
     used Names + /AF — see ``test_dedup_attachments_names_tree_vs_fileattachment_annot``
     below for the genuine annotation-vs-tree dedup case.)"""
-    pytest.importorskip("PyPDF2")
+    pytest.importorskip("pypdf")
     payload = b"shared-attachment-bytes"
     objs = [b""]
     objs.append(b"<< /Type /Catalog /Pages 2 0 R /Names 3 0 R /AF [4 0 R] >>")
@@ -318,7 +318,7 @@ def test_dedup_attachments_names_tree_vs_fileattachment_annot():
     This test builds a PDF where the SAME payload is reachable both
     via ``/Names/EmbeddedFiles`` and via a ``/Subtype /FileAttachment``
     annotation, and verifies the cross-source dedup actually fires."""
-    pytest.importorskip("PyPDF2")
+    pytest.importorskip("pypdf")
     payload = b"shared-via-tree-and-annot"
     objs: list[bytes] = [b""]
     # 1: catalog with Names tree pointing at the shared filespec

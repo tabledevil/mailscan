@@ -32,7 +32,11 @@ dependencies = [
 
 [project.optional-dependencies]
 office = ["olefile>=0.46", "oletools>=0.60"]
-pdf = ["PyPDF2", "pdf2image"]
+# Prefer pypdf (the maintained fork) over the deprecated PyPDF2.
+# PDFAnalyzer prefers pypdf at import time and falls back to PyPDF2
+# only when pypdf isn't available, so existing PyPDF2-pinned environments
+# still work.
+pdf = ["pypdf>=5.0", "pdf2image"]
 html = ["justhtml>=1.0"]
 msg = ["extract-msg"]
 7z = ["py7zr"]
@@ -102,3 +106,13 @@ markers = [
     "docker: requires running inside the MATT Docker image (MATT_IN_DOCKER=1) — exercises box-js, libzbar, dynamic JS sandbox",
 ]
 addopts = "-m 'not docker'"
+# Quiet 3rd-party deprecation noise that floods the test output and
+# isn't actionable from the project: oletools imports pyparsing
+# patterns deprecated in pyparsing >=3.0; pypdf ships a transitional
+# shim warning. Filter by *module* so genuine project warnings are
+# still visible.
+filterwarnings = [
+    "ignore::DeprecationWarning:oletools.*",
+    "ignore::DeprecationWarning:PyPDF2.*",
+    "ignore:.*pyparsing.*:DeprecationWarning",
+]

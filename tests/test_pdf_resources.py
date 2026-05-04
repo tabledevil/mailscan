@@ -89,7 +89,7 @@ def _pdf_with_embedded_font() -> bytes:
 
 
 def test_inline_jpeg_image_extracted():
-    pytest.importorskip("PyPDF2")
+    pytest.importorskip("pypdf")
     s = Structure.create(data=_pdf_with_jpeg_xobject(),
                          filename="img.pdf",
                          mime_type="application/pdf")
@@ -103,7 +103,7 @@ def test_inline_jpeg_image_extracted():
 
 
 def test_embedded_font_extracted():
-    pytest.importorskip("PyPDF2")
+    pytest.importorskip("pypdf")
     s = Structure.create(data=_pdf_with_embedded_font(),
                          filename="font.pdf",
                          mime_type="application/pdf")
@@ -119,7 +119,7 @@ def test_no_report_clutter_for_resource_extraction():
     """Pulling fonts and images on every PDF would fire reports on
     every legitimate document. Resource extraction must be silent —
     only what downstream analyzers find on the resource bytes shows."""
-    pytest.importorskip("PyPDF2")
+    pytest.importorskip("pypdf")
     s = Structure.create(data=_pdf_with_jpeg_xobject(),
                          filename="img.pdf",
                          mime_type="application/pdf")
@@ -133,7 +133,7 @@ def test_no_report_clutter_for_resource_extraction():
 def test_dedup_repeated_xobject():
     """Two pages referencing the same image XObject should only emit
     one child Structure (content-hash dedup)."""
-    pytest.importorskip("PyPDF2")
+    pytest.importorskip("pypdf")
     jpeg = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01" + b"X" * 50 + b"\xff\xd9"
     objs = [b""]
     objs.append(b"<< /Type /Catalog /Pages 2 0 R >>")
