@@ -765,8 +765,17 @@ class PDFAnalyzer(Analyzer):
         """Run the pdfcop-parity policy scan and emit verdicts.
 
         Always runs even when PyPDF2 isn't available — the scan is byte-level
-        and doesn't depend on the parser. Emits one report per profile that
-        would have blocked, plus structured Findings reports."""
+        and doesn't depend on the parser. Two kinds of reports are emitted:
+
+          * one ``pdf_<kind>_<name>`` Report per Finding (action / annotation /
+            filter / structural marker), with the worst graded severity
+            across the rights it requires
+          * a single rollup Report ``pdfcop_policy`` summarising which
+            profile(s) (standard / strong / paranoid) would block, with a
+            per-profile listing of blocking findings in its ``data`` field
+
+        Audit fix #43: the previous docstring claimed "one report per
+        profile" — that wasn't accurate, only the rollup is per-profile."""
         if not _PDF_POLICY_AVAILABLE:
             return
         try:
