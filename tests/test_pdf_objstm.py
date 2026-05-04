@@ -133,7 +133,7 @@ def test_objstm_invisible_to_old_byte_scan():
 
 
 def test_pdfanalyzer_flags_launch_inside_objstm():
-    pytest.importorskip("PyPDF2")
+    pytest.importorskip("pypdf")
     inner = b"5 0 obj << /Type /Action /S /Launch /F (calc.exe) >> endobj"
     pdf = _pdf_with_objstm(inner)
     s = Structure.create(data=pdf, filename="t.pdf",

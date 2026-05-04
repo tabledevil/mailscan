@@ -180,7 +180,7 @@ def _pdf_with_js(js_source: str) -> bytes:
 
 
 def test_pdf_with_collab_collectemailinfo_lights_up_endtoend():
-    pytest.importorskip("PyPDF2")
+    pytest.importorskip("pypdf")
     s = Structure.create(
         data=_pdf_with_js("Collab.collectEmailInfo({});"),
         filename="cve.pdf",

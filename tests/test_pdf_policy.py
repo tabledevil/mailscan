@@ -186,7 +186,7 @@ def test_all_profiles_verdicts_groups_correctly():
 
 
 def test_pdf_analyzer_emits_pdfcop_policy_report():
-    pytest.importorskip("PyPDF2")
+    pytest.importorskip("pypdf")
     body = b"<< /OpenAction << /Type /Action /S /Launch /F (calc.exe) >> >>"
     s = Structure.create(data=_pdf_with(body), filename="t.pdf",
                          mime_type="application/pdf")
@@ -202,7 +202,7 @@ def test_pdf_analyzer_emits_pdfcop_policy_report():
 
 
 def test_pdf_analyzer_no_policy_report_for_clean_pdf():
-    pytest.importorskip("PyPDF2")
+    pytest.importorskip("pypdf")
     # Just metadata — no actions, no annotations, no exotic filters
     body = b"<< /Title (hello) /Creator (test) >>"
     s = Structure.create(data=_pdf_with(body), filename="t.pdf",

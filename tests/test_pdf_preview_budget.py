@@ -67,7 +67,7 @@ def test_preview_budgets_defined():
 def test_oversize_input_skips_preview(monkeypatch):
     """A PDF larger than _PREVIEW_MAX_INPUT_BYTES must short-circuit the
     preview path before pdf2image is even imported."""
-    pytest.importorskip("PyPDF2")
+    pytest.importorskip("pypdf")
 
     # Force the budget tiny so we don't have to build a 50MB fixture
     monkeypatch.setattr(PDFAnalyzer, "_PREVIEW_MAX_INPUT_BYTES", 16)
@@ -106,7 +106,7 @@ def test_oversize_geometry_skips_preview_output(monkeypatch):
     """When pdf2image returns a page whose pixel area exceeds
     _PREVIEW_MAX_PIXELS, the preview report MUST NOT be emitted —
     even if everything else succeeded."""
-    pytest.importorskip("PyPDF2")
+    pytest.importorskip("pypdf")
 
     # Tiny pixel ceiling so we don't have to render a real big image
     monkeypatch.setattr(PDFAnalyzer, "_PREVIEW_MAX_PIXELS", 100)
@@ -140,7 +140,7 @@ def test_oversize_geometry_skips_preview_output(monkeypatch):
 def test_convert_from_bytes_called_with_dpi_and_timeout(monkeypatch):
     """The dpi and timeout kwargs must be threaded through to pdf2image
     so pdftoppm enforces them upstream of our budget checks."""
-    pytest.importorskip("PyPDF2")
+    pytest.importorskip("pypdf")
 
     captured = {}
     import importlib

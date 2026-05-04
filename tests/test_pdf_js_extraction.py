@@ -55,7 +55,7 @@ def _pdf_with_js(js_source: str) -> bytes:
 
 
 def test_pdf_js_extracted_as_child_structure():
-    pytest.importorskip("PyPDF2")
+    pytest.importorskip("pypdf")
     pdf = _pdf_with_js("var x = 1; eval('payload');")
     s = Structure.create(data=pdf, filename="t.pdf",
                          mime_type="application/pdf")
@@ -75,7 +75,7 @@ def test_pdf_js_extracted_as_child_structure():
 
 
 def test_embedded_js_report_emitted_on_root():
-    pytest.importorskip("PyPDF2")
+    pytest.importorskip("pypdf")
     pdf = _pdf_with_js("alert('hi');")
     s = Structure.create(data=pdf, filename="t.pdf",
                          mime_type="application/pdf")
@@ -90,7 +90,7 @@ def test_embedded_js_report_emitted_on_root():
 
 def test_no_embedded_js_report_for_clean_pdf():
     """A PDF with no JS objects must not emit the embedded_js report."""
-    pytest.importorskip("PyPDF2")
+    pytest.importorskip("pypdf")
     # Tiny PDF with just a catalog + pages, no actions
     pdf = (
         b"%PDF-1.7\n"
@@ -144,7 +144,7 @@ def test_dedup_repeated_js_references():
     "Two action references" but the fixture had only one action +
     one /JS object — the dedup branch was never reached. Build a
     real two-action / one-shared-JS PDF and verify dedup."""
-    pytest.importorskip("PyPDF2")
+    pytest.importorskip("pypdf")
     pdf = _pdf_with_two_actions_one_js()
     s = Structure.create(data=pdf, filename="t.pdf",
                          mime_type="application/pdf")
@@ -156,7 +156,7 @@ def test_dedup_repeated_js_references():
 def test_pdf_js_runs_through_script_threat_detection():
     """The whole point: extracted PDF JS gets ScriptAnalyzer's full
     threat-pattern pipeline."""
-    pytest.importorskip("PyPDF2")
+    pytest.importorskip("pypdf")
     # JS containing high-signal threat strings (eval, ActiveXObject)
     js = "var s = eval(unescape('%75%75')); new ActiveXObject('Wscript.Shell');"
     pdf = _pdf_with_js(js)
