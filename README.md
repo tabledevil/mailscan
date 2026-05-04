@@ -4,25 +4,50 @@ MATT is a modular file analysis tool designed to dissect and extract information
 
 ## Overall Flow
 
-The system is designed as a modular file analysis tool. The main entry point is `matt.py`, which is a command-line script that takes one or more files as input.
+MATT is a modular file analysis tool. The main entry point is
+`matt.py`, which takes one or more files as input.
 
 Here's the general flow:
 
-1.  **Initialization:** `matt.py` takes a file path from the command line.
+1. **Initialization.** `matt.py` parses CLI flags and walks the
+   provided file paths.
 
-2.  **Structure Creation:** For each file, it creates a `Structure` object (from `structure.py`). The `Structure` object is the central data container for a file and its analysis results. It reads the raw data of the file and determines its MIME type using the `python-magic` library.
+2. **Structure creation.** For each file, a `Structure` object
+   (`structure.py`) reads the raw data and determines its MIME type
+   via a **provider chain** — `python_magic` → `file` command →
+   `magika` → stdlib `mimetypes` fallback (`Utils/filetype.py`).
+   The cache key combines `(sha256, basename, mime_type)` so
+   identical bytes seen under different filenames don't mask
+   filename-based detections.
 
-3.  **Analyzer Selection:** The `Structure` object then uses the `Analyzer.get_analyzer(mimetype)` method to find a suitable analyzer for the file's MIME type. The system looks through all the available `Analyzer` subclasses (defined in the `Analyzers/` directory) and finds one that lists the file's MIME type in its `compatible_mime_types` list.
+3. **Multi-dispatch analysis.** Every Analyzer subclass that
+   `can_analyze()` the Structure runs against it
+   (`Analyzer.run_all_analyzers`). The highest-`specificity`
+   analyzer is **primary**; the rest are **contributors** that
+   fill gaps without overriding primary findings. Specificity
+   levels: 5=generic (PlainText), 10=container (Zip, 7z, OLE),
+   15=semi (HTML), 20=format (Email, PDF, Docx, Mbox, Msg),
+   25=sub-analyzer.
 
-4.  **Analysis:** Once the correct analyzer is found, it's instantiated. The analyzer's `analysis()` method is called, which in turn runs various analysis modules. For example, the `EmailAnalyzer` will use the `eml.py` module to parse the email's headers and structure.
+4. **Reports + children.** Analyzers populate `self.reports` with
+   findings and `self.childitems` with nested `Structure` objects
+   (e.g. zip entries, MIME parts, embedded PDF files). Children
+   recurse through the same pipeline.
 
-5.  **Report Generation:** During analysis, the analyzer populates the `Structure` object with reports and information it discovers. For example, the `EmailAnalyzer` adds reports for the sender, recipient, and subject of the email.
+5. **Root-only post-pass.** Once the tree is built, the root
+   Structure runs `_build_ioc_aggregate` (collects URLs/IPs/
+   domains/emails/hashes from every node, defangs them) and
+   `_build_capability_hints` (flags YARA/VT skipped because
+   unconfigured).
 
-6.  **Handling of Nested Files:** If the analyzer finds nested files (like email attachments or files in a zip archive), it creates new `Structure` objects for each of them. These children are then analyzed recursively in the same way, creating a hierarchical structure.
+6. **Rendering.** `Structure.get_report(format=...)` dispatches to
+   `renderers/`. Available formats: `rich` (default), `text`,
+   `json`, `markdown`, `html`, `timeline`.
 
-7.  **Output:** Finally, `matt.py` calls the `get_report()` method on the top-level `Structure` object. This method generates a formatted, indented report of all the information gathered from the file and its children. If the `--extract` flag is used, the `extract()` method is called to save all the parts of the file (e.g., email attachments) to disk.
-
-In essence, the system uses a flexible, modular design where `Structure` objects represent files and `Analyzer` objects are responsible for processing them based on their type. This makes it easy to extend the tool by simply adding new analyzer classes for different file types.
+7. **Optional extraction.** `-x` writes every reachable Structure
+   to disk preserving the container hierarchy and original
+   filenames; a `manifest.json` at the root maps every on-disk
+   path to hashes/MIME/severity.
 
 ## Usage
 
@@ -90,17 +115,21 @@ If you are installing in an offline environment, you can use:
 pip install . --no-build-isolation
 ```
 
-This project uses the legacy `setup.py` build to avoid build-time downloads in restricted environments.
+The project uses the modern PEP-517 `setuptools.build_meta` backend
+declared in `pyproject.toml`. A legacy `setup.py` is also present for
+tooling that hasn't migrated yet, but `pyproject.toml` is canonical.
 
-Optional features are provided via extras. For example:
+Optional features are provided via extras. **Quote the extras name**
+in shells that interpret square brackets as glob characters (zsh,
+fish):
 
 ```bash
-pip install .[all]
+pip install '.[all]'
 ```
 
 Available extras: `office`, `pdf`, `html`, `msg`, `7z`, `lang`, `mime`,
-`tui`, `fuzzy`, `yara`, `js`, `qr`, `dev`. Check what's missing on your
-system with:
+`tui`, `fuzzy`, `fuzzy-ssdeep`, `yara`, `js`, `qr`, `rar`, `dev`.
+Check what's missing on your system with:
 
 ```bash
 matt --check

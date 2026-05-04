@@ -42,17 +42,18 @@ The core analysis pipeline is: `matt.py` → `Structure` → `Analyzer` → `Rep
 
 ## Analyzer System
 
-Analyzers live in `Analyzers/` and subclass `Analyzer` from `structure.py`. Registered via `Analyzers/__init__.py` (`__all__` list). Discovery via `Analyzer.__subclasses__()`.
+Analyzers live in `Analyzers/` and subclass `Analyzer` from `structure.py`. Registered via the `analyzers_list` in `Analyzers/__init__.py`. Module discovery is by string-name lookup; subclass discovery via `Analyzer.__subclasses__()`. The package's `__all__` is built dynamically from successfully imported modules.
 
 Each analyzer declares:
 - `compatible_mime_types` — MIME types it handles (primary dispatch)
-- `can_handle(data, mime_type)` — optional classmethod for content-based probing
+- `can_handle(struct)` — optional classmethod for content-based probing on ambiguous MIME types (typically `application/octet-stream` or `text/plain`)
+- `specificity` — primary/contributor ranking (5=generic, 10=container, 15=semi, 20=format, 25=sub-analyzer)
 - `pip_dependencies` / `system_dependencies` — for `--check` validation
 - `analysis()` — populates `self.reports` dict with `Report` objects and `self.childitems` with child `Structure` objects
 
-Current analyzers: Email, PlainText, Zip, SevenZip, HTML, PDF, Msg, Mbox, Docx, OfficeRelationship, OfficeXML, VBAProject.
+Current analyzers: `EmailAnalyzer`, `PlainTextAnalyzer`, `ZipAnalyzer`, `SevenZipAnalyzer`, `HTMLAnalyzer`, `PDFAnalyzer`, `MsgAnalyzer`, `MboxAnalyzer`, `OfficeDocumentAnalyzer` (handles DOCX/XLSX/PPTX), `OLEOfficeAnalyzer` (legacy .doc/.xls/.ppt), `OfficeRelationshipAnalyzer`, `OfficeXMLAnalyzer`, `VBAProjectAnalyzer`, `RTFAnalyzer`, `ImageAnalyzer`, `QRAnalyzer`, `ICSAnalyzer`, `RARAnalyzer`, `ScriptAnalyzer`.
 
-To add a new analyzer: copy `Analyzers/TEMPLATE_ANALYZER.py`, set `compatible_mime_types`, implement `analysis()`, add the class name to `__all__` in `Analyzers/__init__.py`.
+To add a new analyzer: copy `Analyzers/TEMPLATE_ANALYZER.py`, set `compatible_mime_types`, implement `analysis()`, add the module name to `analyzers_list` in `Analyzers/__init__.py`.
 
 ## Severity System
 
@@ -77,9 +78,9 @@ Passwords discovered by other analyzers (e.g., PlainTextAnalyzer finding "passwo
 
 ## Packaging
 
-- **`pyproject.toml`** is canonical (PEP 517). Optional extras: `[dev]`, `[yara]`, `[office]`, `[web]`.
-- Core dependencies: `charset-normalizer>=3.0`, `python-dateutil>=2.8`. Optional: `rich`, `pyzipper`, `py7zr`, `lingua-language-detector`, `beautifulsoup4`, `pillow`, `python-magic`.
-- `libmagic` system library needed for `python-magic` (e.g., `apt-get install libmagic1` on Debian/Ubuntu).
+- **`pyproject.toml`** is canonical (PEP 517, `setuptools.build_meta` backend). Optional extras: `office`, `pdf`, `html`, `msg`, `7z`, `lang`, `mime`, `tui`, `fuzzy`, `fuzzy-ssdeep`, `yara`, `js`, `qr`, `rar`, `dev`, `all`.
+- Core dependencies: `charset-normalizer>=3.0`, `python-dateutil>=2.8`, `pytz`, `rich>=13.0`.
+- System dependencies (per-extra): `libmagic` (mime), `libzbar0` + `zbar-tools` (qr), `poppler-utils` (pdf preview), `unrar` (rar), `box-js` via npm (js dynamic).
 
 ## Standalone Tools (in Analyzers/)
 
@@ -93,7 +94,18 @@ Legacy CLI scripts in repo root (use `eml.py` directly):
 
 ## Key Details
 
-- Python 3.8+ required.
+- Python 3.10+ required (per `pyproject.toml`).
 - Logging goes to stderr (not to file) unless debug mode. Configured via `Utils/logger.py`.
-- `Structure` objects are cached by content hash — duplicate attachments are analyzed only once.
+- `Structure` objects are cached by `(sha256, basename, mime_type)` — duplicate attachments with the same name+type collapse, but the same bytes under different filenames don't mask filename-based detections.
+- Multi-dispatch: every Analyzer that `can_analyze` runs against the Structure; highest-`specificity` is primary, others are contributors.
+- Root-level post-pass builds `iocs_aggregate` (defanged) and `capability_hints` (skipped optional checks).
 - The `NUL` device file that sometimes appears in `git status` on Windows is in `.gitignore`.
+
+## Sandbox safety (dynamic JS)
+
+`Utils/js_tools.py` (box-js wrapper) refuses to run unless one of:
+- `MATT_IN_DOCKER=1` (set automatically by the MATT image)
+- `MATT_ALLOW_HOST_SANDBOX=1` (analyst opt-in on an isolated host)
+
+This prevents accidentally detonating attacker-controlled JS through
+a host install of box-js. Static analysis is always available.

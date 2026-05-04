@@ -47,13 +47,18 @@ fuzzy-ssdeep = ["ssdeep"]
 yara = ["yara-python"]
 js = ["jsbeautifier>=1.14"]
 qr = ["pyzbar"]
+# RARAnalyzer needs both the rarfile pip wrapper AND the `unrar` system
+# binary (license-encumbered, not redistributed). Setting `extra = "rar"`
+# in the analyzer made ``matt --check`` advertise ``pip install .[rar]``;
+# this entry makes that command actually work for the Python side.
+rar = ["rarfile"]
 dev = [
     "pytest>=7.0",
     "pytest-cov",
     "ruff",
 ]
 all = [
-    "matt[office,pdf,html,msg,7z,lang,mime,fuzzy,tui,yara,js,qr]",
+    "matt[office,pdf,html,msg,7z,lang,mime,fuzzy,tui,yara,js,qr,rar]",
 ]
 
 [project.scripts]
