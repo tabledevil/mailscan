@@ -81,7 +81,11 @@ def test_embedded_js_report_emitted_on_root():
                          mime_type="application/pdf")
     rep = s.analyzer.reports.get("embedded_js")
     assert rep is not None
-    assert "1" in rep.text  # one payload extracted
+    # Audit finding #26 (gemini_test_cov_2; MEDIUM): asserting
+    # ``"1" in rep.text`` was brittle — any string containing "1"
+    # passed (e.g. "Found JavaScript (version 1)"). Pin the
+    # structured count instead.
+    assert rep.data["count"] == 1
 
 
 def test_no_embedded_js_report_for_clean_pdf():
@@ -103,20 +107,50 @@ def test_no_embedded_js_report_for_clean_pdf():
     assert "embedded_js" not in s.analyzer.reports
 
 
+def _pdf_with_two_actions_one_js() -> bytes:
+    """Build a PDF where TWO action dicts both point at the same /JS
+    object. Used to actually exercise the dedup branch — the previous
+    fixture only had one action and silently couldn't test dedup."""
+    js = b"alert('shared');"
+    objs: list[bytes] = [b""]
+    objs.append(b"<< /Type /Catalog /Pages 2 0 R "
+                b"/OpenAction 3 0 R /AA << /C 4 0 R >> >>")  # 1
+    objs.append(b"<< /Type /Pages /Kids [] /Count 0 >>")     # 2
+    objs.append(b"<< /Type /Action /S /JavaScript /JS 5 0 R >>")  # 3 — first
+    objs.append(b"<< /Type /Action /S /JavaScript /JS 5 0 R >>")  # 4 — second
+    escaped = js.replace(b"\\", b"\\\\").replace(b"(", b"\\(").replace(b")", b"\\)")
+    objs.append(b"(" + escaped + b")")  # 5 — the shared JS string
+
+    body = b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n"
+    offsets = []
+    for i in range(1, len(objs)):
+        offsets.append(len(body))
+        body += f"{i} 0 obj\n".encode() + objs[i] + b"\nendobj\n"
+    xref_pos = len(body)
+    body += b"xref\n0 " + str(len(objs)).encode() + b"\n"
+    body += b"0000000000 65535 f \n"
+    for off in offsets:
+        body += f"{off:010d} 00000 n \n".encode()
+    body += (
+        b"trailer\n<< /Size " + str(len(objs)).encode() + b" /Root 1 0 R >>\n"
+        b"startxref\n" + str(xref_pos).encode() + b"\n%%EOF\n"
+    )
+    return body
+
+
 def test_dedup_repeated_js_references():
-    """Two action references pointing at the same /JS payload should only
-    emit one child Structure."""
+    """Audit finding #18 (codex_test_cov_1, codex_test_cov_2,
+    codex_detect_corr_1; HIGH × 3): the original test name claimed
+    "Two action references" but the fixture had only one action +
+    one /JS object — the dedup branch was never reached. Build a
+    real two-action / one-shared-JS PDF and verify dedup."""
     pytest.importorskip("PyPDF2")
-    # Build a PDF where two actions reference the same JS string object —
-    # but for simplicity use the same JS literal in both. The dedup
-    # heuristic is content-hash-based so identical bytes collapse.
-    js = "var a = 'one';" * 5  # >0 chars
-    pdf = _pdf_with_js(js)
+    pdf = _pdf_with_two_actions_one_js()
     s = Structure.create(data=pdf, filename="t.pdf",
                          mime_type="application/pdf")
     js_children = [c for c in s.get_children()
                    if c.filename and "pdf_js" in c.filename]
-    assert len(js_children) == 1
+    assert len(js_children) == 1, [c.filename for c in js_children]
 
 
 def test_pdf_js_runs_through_script_threat_detection():

@@ -101,7 +101,11 @@ def test_hash_names_mode_still_works(tmp_path):
 
 
 def test_no_collision_clobber(tmp_path):
-    """Two siblings sharing a sanitized name must not overwrite each other."""
+    """Two siblings sharing a sanitized name must not overwrite each
+    other. Audit finding #24 (codex_test_cov_2, gemini_test_cov_2;
+    MEDIUM): the original assertion only counted files. A buggy
+    collision resolver that wrote payload AAA into both files would
+    pass. Check exact filenames AND content-byte preservation."""
     eml = (
         b"From: a@a.example\r\nTo: b@b.example\r\nSubject: t\r\n"
         b"MIME-Version: 1.0\r\n"
@@ -114,5 +118,11 @@ def test_no_collision_clobber(tmp_path):
     )
     s = Structure.create(data=eml, filename="t.eml", mime_type="message/rfc822")
     s.extract(basepath=str(tmp_path), recursive=True)
-    pngs = sorted(p.name for p in tmp_path.rglob("img*"))
-    assert len(pngs) >= 2, f"siblings clobbered: {pngs}"
+    pngs = sorted(p for p in tmp_path.rglob("img*") if p.is_file())
+    # Exactly two files, names disambiguated via the _N suffix
+    assert len(pngs) == 2, [p.name for p in pngs]
+    names = sorted(p.name for p in pngs)
+    assert names == ["img.png", "img_1.png"], names
+    # Content preservation — both AAA and BBB must be on disk
+    contents = sorted(p.read_bytes() for p in pngs)
+    assert contents == [b"AAA", b"BBB"], contents
