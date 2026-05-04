@@ -535,22 +535,49 @@ MEDIUM_PATTERNS: list[tuple[re.Pattern, str, str]] = [
 # ---------------------------------------------------------------------------
 
 PDF_CRITICAL_PATTERNS: list[tuple[re.Pattern, str, str]] = [
-    # CVE-2008-2992 — util.printf with hostile format args
-    (re.compile(r"util\s*\.\s*printf\s*\(\s*[\"'](?:[^\"']*?%(?:\d+)?[Dd])",
-                re.IGNORECASE),
-     "pdf_cve_2008_2992", "util.printf with %D format — CVE-2008-2992 buffer overflow"),
-    # CVE-2007-5659 — Collab.collectEmailInfo (any reference is a strong signal)
+    # CVE-2008-2992 — util.printf with hostile *width-augmented* format
+    # args. The CVE is triggered by oversized width fields (e.g.
+    # ``%4500D``, ``%5000f``) that overflow the format-string handling
+    # code. Audit findings (codex_detect_corr_1: false-positive on
+    # benign ``util.printf("%d", n)``; codex_detect_corr_2: too-narrow,
+    # misses ``%f`` exploit shape). Require a long width specifier
+    # (>= 3 digits) covering both /d/D and /f/F.
+    (re.compile(
+        # %  optional flag  required oversized width (>= 3 digits)
+        # optional precision  conversion char
+        r"util\s*\.\s*printf\s*\(\s*[\"'][^\"']*?"
+        r"%[-+ #0]?\d{3,}(?:\.\d+)?\s*[DdFf]",
+        re.IGNORECASE,
+     ),
+     "pdf_cve_2008_2992",
+     "util.printf with oversized format width — CVE-2008-2992 buffer overflow"),
+    # CVE-2007-5659 — Collab.collectEmailInfo (any reference is a strong
+    # signal). Audit finding (codex_detect_corr_1): description was
+    # "sandbox escape" but the public references describe a buffer
+    # overflow primitive triggered by malformed/long arguments.
     (re.compile(r"Collab\s*\.\s*collectEmailInfo\b"),
-     "pdf_cve_2007_5659", "Collab.collectEmailInfo — CVE-2007-5659 sandbox escape"),
+     "pdf_cve_2007_5659",
+     "Collab.collectEmailInfo — CVE-2007-5659 buffer overflow"),
     # CVE-2009-4324 — media.newPlayer
     (re.compile(r"media\s*\.\s*newPlayer\b"),
      "pdf_cve_2009_4324", "media.newPlayer — CVE-2009-4324 use-after-free"),
-    # CVE-2009-1492 — getAnnots overflow with start>end
-    (re.compile(r"getAnnots\s*\(\s*\{[^}]*?nStart"),
-     "pdf_cve_2009_1492", "getAnnots() with nStart parameter — CVE-2009-1492"),
-    # CVE-2009-0658 — Doc.spell.customDictionaryOpen
+    # CVE-2009-1492 — getAnnots overflow. The exploit primitive is
+    # ``nStart`` with a value relationship to ``nEnd`` (e.g. nStart < 0
+    # or nStart > nEnd). Audit finding (codex_detect_corr_1, _2): the
+    # original regex matched mere presence of ``nStart`` which fires
+    # on benign range-based getAnnots(). Require both nStart and nEnd
+    # in the same call to better approximate the exploit shape.
+    (re.compile(r"getAnnots\s*\(\s*\{[^}]*?nStart[^}]*?nEnd"),
+     "pdf_cve_2009_1492",
+     "getAnnots() with nStart+nEnd range — CVE-2009-1492 overflow"),
+    # CVE-2009-1493 — Doc.spell.customDictionaryOpen. Audit finding
+    # (codex_detect_corr_1, _2): the upstream label was wrong —
+    # CVE-2009-0658 is the unrelated JBIG2 issue from Feb 2009.
+    # customDictionaryOpen is CVE-2009-1493 (Unix/Linux Reader/Acrobat
+    # buffer overflow).
     (re.compile(r"\.\s*spell\s*\.\s*customDictionaryOpen\b"),
-     "pdf_cve_2009_0658", "spell.customDictionaryOpen — CVE-2009-0658"),
+     "pdf_cve_2009_1493",
+     "spell.customDictionaryOpen — CVE-2009-1493 buffer overflow"),
     # Heap-spray NOP sled (\x90 or %u9090 repeated)
     (re.compile(r"(?:%u9090){10,}|(?:\\x90){20,}|(?:\\u9090){10,}"),
      "pdf_heap_spray", "Heap-spray NOP sled — classic exploit primitive"),
@@ -569,23 +596,42 @@ PDF_HIGH_PATTERNS: list[tuple[re.Pattern, str, str]] = [
     # Outbound URL opening
     (re.compile(r"app\s*\.\s*launchURL\s*\(", re.IGNORECASE),
      "pdf_launch_url", "app.launchURL — outbound URL navigation"),
-    # External executable / file launch via this.submitForm or
-    # this.exportDataObject(cName, nLaunch)
-    (re.compile(r"\.\s*exportDataObject\s*\([^)]*?cName", re.IGNORECASE),
-     "pdf_export_data", "exportDataObject — extract embedded payload to disk"),
+    # External file launch via this.exportDataObject({cName, nLaunch}).
+    # Audit finding (codex_detect_corr_1; HIGH): the original regex
+    # matched any ``cName`` parameter, firing on benign attachment
+    # export. The exploit primitive specifically requires ``nLaunch``
+    # set to a non-zero value (1=open with default app, 2=launch).
+    # Require ``nLaunch`` somewhere in the same call.
+    (re.compile(r"\.\s*exportDataObject\s*\([^)]*?nLaunch\s*:\s*[1-9]",
+                re.IGNORECASE),
+     "pdf_export_data",
+     "exportDataObject(nLaunch>0) — extract+launch embedded payload"),
     # File-system access via Doc.saveAs
     (re.compile(r"\.\s*saveAs\s*\(", re.IGNORECASE),
      "pdf_save_as", "Doc.saveAs — disk write capability"),
     # Menu-item automation (silent print, save, etc.)
     (re.compile(r"app\s*\.\s*execMenuItem\s*\(", re.IGNORECASE),
      "pdf_exec_menu_item", "app.execMenuItem — Acrobat menu automation"),
-    # getAnnots — annotation harvesting
-    (re.compile(r"\.\s*getAnnots?\s*\(", re.IGNORECASE),
-     "pdf_get_annots", "getAnnots — annotation enumeration / data harvest"),
-    # this.submitForm to external URL
-    (re.compile(r"\.\s*submitForm\s*\(\s*[\"'](?:https?|ftp|file)://",
-                re.IGNORECASE),
-     "pdf_submit_form_url", "this.submitForm to external URL — exfiltration"),
+    # getAnnots harvesting — only flag the abusive object-arg form so
+    # we don't fire on benign ``this.getAnnots()`` enumeration loops.
+    # Audit finding (codex_detect_corr_1, _2): the original regex
+    # double-fired with the CRITICAL CVE detector on the same site.
+    (re.compile(r"\.\s*getAnnots\s*\(\s*\{", re.IGNORECASE),
+     "pdf_get_annots",
+     "getAnnots({…}) with options — annotation harvest"),
+    # this.submitForm to external URL — both shapes:
+    #   submitForm("https://...")            (positional string)
+    #   submitForm({cURL: "https://..."})    (object form)
+    # Audit finding (codex_detect_corr_1; HIGH): object-form was
+    # invisible to the previous matcher.
+    (re.compile(
+        r"\.\s*submitForm\s*\(\s*"
+        r"(?:[\"'](?:https?|ftp|file)://"
+        r"|\{[^}]*?cURL\s*:\s*[\"'](?:https?|ftp|file)://)",
+        re.IGNORECASE,
+     ),
+     "pdf_submit_form_url",
+     "this.submitForm to external URL — exfiltration (string or {cURL})"),
 ]
 
 PDF_MEDIUM_PATTERNS: list[tuple[re.Pattern, str, str]] = [
