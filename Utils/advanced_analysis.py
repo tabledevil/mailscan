@@ -318,6 +318,46 @@ def lookup_virustotal_ip(ip: str) -> dict | None:
 
 _MAX_ENRICHMENT_LOOKUPS = 10
 
+# Audit finding (codex_security_2; MEDIUM): enrich_iocs submitted every
+# domain and every IPv4/IPv6 to VT without filtering internal/private
+# values. Even though enrichment is gated behind explicit
+# network_policy="online" + VT_API_KEY (so the analyst opted in), we
+# should never leak link-local IPv6, RFC4193 ULAs, internal-only TLDs
+# (.local, .lan, .internal), or single-label hostnames to a third
+# party. These rarely have public reputation data anyway.
+
+_INTERNAL_DOMAIN_SUFFIXES = (
+    ".local", ".lan", ".internal", ".intranet", ".corp", ".home",
+    ".localdomain",
+)
+
+
+def _is_internal_domain(domain: str) -> bool:
+    if not domain:
+        return True
+    d = domain.strip().rstrip(".").lower()
+    if not d or "." not in d:  # single-label hostname
+        return True
+    return any(d == suf.lstrip(".") or d.endswith(suf)
+               for suf in _INTERNAL_DOMAIN_SUFFIXES)
+
+
+def _is_internal_ip(ip: str) -> bool:
+    """True for IPv4 private/loopback/link-local AND IPv6 ULA, link-local,
+    loopback, unspecified — anything that has no business reaching VT."""
+    if not ip:
+        return True
+    try:
+        import ipaddress
+        addr = ipaddress.ip_address(ip)
+    except (ValueError, TypeError):
+        return True  # malformed → don't leak
+    if addr.is_private or addr.is_loopback or addr.is_link_local:
+        return True
+    if addr.is_unspecified or addr.is_multicast or addr.is_reserved:
+        return True
+    return False
+
 
 def enrich_iocs(ioc_data: dict) -> dict:
     if not _vt_is_online() or not _vt_api_key():
@@ -327,6 +367,8 @@ def enrich_iocs(ioc_data: dict) -> dict:
     for domain in (ioc_data.get("domains") or []):
         if budget <= 0:
             break
+        if _is_internal_domain(domain):
+            continue
         vt = lookup_virustotal_domain(domain)
         if vt:
             results[domain] = vt
@@ -334,6 +376,8 @@ def enrich_iocs(ioc_data: dict) -> dict:
     for ip in (ioc_data.get("ipv4") or []) + (ioc_data.get("ipv6") or []):
         if budget <= 0:
             break
+        if _is_internal_ip(ip):
+            continue
         vt = lookup_virustotal_ip(ip)
         if vt:
             results[ip] = vt
