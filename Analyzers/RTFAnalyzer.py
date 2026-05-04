@@ -100,7 +100,9 @@ class RTFAnalyzer(Analyzer):
         found = []
 
         for word, description in self.SUSPICIOUS_CONTROL_WORDS.items():
-            pattern = word.encode("ascii").replace(b"\\", b"\\\\")
+            # Audit fix #56: removed dead ``pattern`` assignment that was
+            # computed and never used; ``re.escape(word.encode(...))`` is
+            # the actual search key.
             escaped_word = re.escape(word.encode("ascii"))
             if re.search(escaped_word, data):
                 found.append(f"{word}: {description}")

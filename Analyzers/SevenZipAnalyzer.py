@@ -5,6 +5,11 @@ from Utils.temp_manager import TempFileManager
 import lzma
 import os
 
+# Audit fix #48: route through the named ``matt`` logger so log output
+# stays in the project namespace and isn't drowned by 3rd-party noise
+# (Sprint 7 fixed the same issue for ZipAnalyzer; this one was missed).
+log = logging.getLogger("matt")
+
 try:
     import py7zr
 except ImportError:
@@ -16,14 +21,18 @@ class SevenZipAnalyzer(Analyzer):
     specificity = 10
     passwords = ["infected", "Infected", "iNFECTED", "INFECTED"]
 
-    # py7zr is required for this analyzer to work at all
-    optional_pip_dependencies = [('py7zr', 'py7zr')]
+    # Audit fix #50: py7zr was mislabeled ``optional_pip_dependencies``.
+    # The analyzer cannot extract anything without it; analysis() bails
+    # immediately when py7zr is None. Listing it as a hard
+    # ``pip_dependencies`` makes ``matt --check`` report the right
+    # status (ERROR, not WARNING) when 7z extras aren't installed.
+    pip_dependencies = [('py7zr', 'py7zr')]
     extra = "7z"
 
     def analysis(self):
         super().analysis()
         if not py7zr:
-            logging.warning("py7zr is not installed, cannot analyze 7z files.")
+            log.warning("py7zr is not installed, cannot analyze 7z files.")
             return
 
         # Add shared passwords from context
@@ -34,7 +43,7 @@ class SevenZipAnalyzer(Analyzer):
                      local_passwords.append(pwd)
 
         # DEBUG LOG
-        # logging.warning(f"7Z PASSWORDS AVAILABLE: {local_passwords}")
+        # log.warning(f"7Z PASSWORDS AVAILABLE: {local_passwords}")
 
         with TempFileManager() as temp_manager:
             tmp_file_path = temp_manager.create_temp_file(self.struct.rawdata)
@@ -49,7 +58,7 @@ class SevenZipAnalyzer(Analyzer):
             except py7zr.exceptions.PasswordRequired:
                 password_protected = True
             except py7zr.exceptions.Bad7zFile:
-                logging.warning("Bad 7z file, could not open.")
+                log.warning("Bad 7z file, could not open.")
                 return
 
             if password_protected:
@@ -69,19 +78,19 @@ class SevenZipAnalyzer(Analyzer):
             except Exception as e:
                  pass
 
-        logging.warning("Could not guess password for 7z file.")
+        log.warning("Could not guess password for 7z file.")
 
     def extract_files(self, archive):
         try:
             # Zip bomb checks
             total_uncompressed_size = sum(f.uncompressed for f in archive.list())
             if self.struct.size > 0 and total_uncompressed_size / self.struct.size > flags.max_compression_ratio:
-                logging.warning("7z bomb detected: compression ratio too high.")
+                log.warning("7z bomb detected: compression ratio too high.")
                 self.reports['error'] = Report("7z bomb detected: compression ratio too high.")
                 return
 
             if total_uncompressed_size > flags.max_file_size:
-                logging.warning("7z bomb detected: total uncompressed size is too large.")
+                log.warning("7z bomb detected: total uncompressed size is too large.")
                 self.reports['error'] = Report("7z bomb detected: total uncompressed size is too large.")
                 return
 
@@ -110,4 +119,4 @@ class SevenZipAnalyzer(Analyzer):
                     verbosity=0,
                 )
         except Exception as e:
-            logging.error(f"Failed to extract files from 7z archive: {e}")
+            log.error(f"Failed to extract files from 7z archive: {e}")
