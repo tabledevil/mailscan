@@ -35,9 +35,12 @@ encrypted-with-actions beyond the per-action allow checks. Those are
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from typing import Iterable
+
+log = logging.getLogger("matt")
 
 from structure import Severity
 
@@ -270,13 +273,89 @@ _RE_COMMENT = re.compile(rb"%[^\r\n]*")
 _RE_HEX_STRING = re.compile(rb"<[0-9a-fA-F\s]*>")
 
 
+_RE_STREAM_BODY = re.compile(
+    rb"stream\r?\n.*?\nendstream",
+    re.DOTALL,
+)
+
+
+def _strip_pdf_stream_bodies(data: bytes) -> bytes:
+    """Replace every ``stream ... endstream`` body with equal-length
+    whitespace. Stream content is opaque binary that can legitimately
+    contain ``(`` bytes which are NOT PDF string literals — running
+    the literal-string strip across stream bodies would consume real
+    object-syntax markers downstream.
+
+    /ObjStm decompression happens BEFORE this pass and appends decoded
+    bytes outside the stream region, so they are still scanned."""
+    out = bytearray(data)
+    for m in _RE_STREAM_BODY.finditer(data):
+        for k in range(m.start(), m.end()):
+            if out[k] not in (ord("\n"), ord("\r")):
+                out[k] = ord(" ")
+    return bytes(out)
+
+
+def _strip_pdf_string_literals(data: bytes) -> bytes:
+    """Replace every PDF string literal ``(...)`` with whitespace of equal
+    length so byte-offset semantics (used by the JS-at-opening proximity
+    heuristic and other position-sensitive checks) are preserved.
+
+    Implements the full PDF 32000-1 spec for string literals:
+      * balanced unescaped parentheses nest legally
+      * ``\\(`` and ``\\)`` are escapes, do not affect nesting
+      * ``\\\\`` is an escape that does not affect what follows
+      * other backslash escapes (``\\n``, ``\\t``, octals) consume bytes
+
+    Audit finding (codex_test_cov_1, codex_test_cov_2,
+    codex_detect_corr_1, codex_detect_corr_2, codex_doc_1, codex_doc_2,
+    gemini_doc_2; HIGH × 7): the previous behavior left literals alone
+    so a metadata title like ``/Title (/S /Launch ...)`` produced a
+    bogus CRITICAL Launch finding.
+    """
+    out = bytearray(data)
+    i = 0
+    n = len(out)
+    while i < n:
+        if out[i] == ord("("):
+            # Walk the balanced literal, blanking bytes as we go
+            depth = 1
+            start = i
+            j = i + 1
+            while j < n and depth > 0:
+                c = out[j]
+                if c == ord("\\"):
+                    j += 2  # skip escape + escaped byte
+                    continue
+                if c == ord("("):
+                    depth += 1
+                elif c == ord(")"):
+                    depth -= 1
+                j += 1
+            # Blank from start..j (inclusive of trailing close paren)
+            for k in range(start, min(j, n)):
+                # Preserve newlines so line-based heuristics stay aligned
+                if out[k] not in (ord("\n"), ord("\r")):
+                    out[k] = ord(" ")
+            i = j
+            continue
+        i += 1
+    return bytes(out)
+
+
 def _strip_pdf_noise(data: bytes) -> bytes:
-    """Remove PDF comments and hex strings (the easy ones) before scanning.
-    String literals ``(...)`` are left alone — escaping is gnarly enough
-    that the false-positive cost is below the engineering cost of
-    handling it correctly."""
+    """Remove PDF stream bodies, comments, hex strings, and string
+    literals before scanning. Marker tokens inside any of these PDF-
+    syntax containers are inert content and would otherwise produce
+    false positives.
+
+    Order matters: streams must go first because their compressed
+    bodies can contain bytes that look like ``(`` literal-string
+    delimiters and would otherwise scramble the literal-string pass."""
+    data = _strip_pdf_stream_bodies(data)
     data = _RE_COMMENT.sub(b" ", data)
     data = _RE_HEX_STRING.sub(b" ", data)
+    data = _strip_pdf_string_literals(data)
     return data
 
 
@@ -302,10 +381,50 @@ _RE_OBJSTM_STREAM = re.compile(
 )
 
 
+# /ObjStm decompression budget. Audit finding (codex_perf_1: HIGH;
+# codex_security_1, codex_security_2: PDF stream exhaustion vector):
+# unbounded zlib.decompress on attacker-controlled compressed object
+# streams could expand far beyond the on-disk PDF size. We cap the
+# *total* decoded payload at 64 MB and refuse any individual stream
+# whose decoded size exceeds 16 MB.
+_OBJSTM_MAX_TOTAL_BYTES = 64 * 1024 * 1024
+_OBJSTM_MAX_PER_STREAM_BYTES = 16 * 1024 * 1024
+
+
+def _bounded_decompress(compressed: bytes, max_bytes: int) -> bytes | None:
+    """Decompress with a hard ceiling. Returns None if the stream blows
+    past ``max_bytes`` mid-decompression — saves us materializing a
+    multi-GB blob just to discover it's a bomb."""
+    import zlib
+    for wbits in (zlib.MAX_WBITS, -zlib.MAX_WBITS):
+        try:
+            decompressor = zlib.decompressobj(wbits)
+            chunks: list[bytes] = []
+            total = 0
+            chunk_size = 64 * 1024
+            i = 0
+            while i < len(compressed):
+                out = decompressor.decompress(compressed[i:i + chunk_size])
+                total += len(out)
+                if total > max_bytes:
+                    return None
+                chunks.append(out)
+                i += chunk_size
+            tail = decompressor.flush()
+            if total + len(tail) > max_bytes:
+                return None
+            chunks.append(tail)
+            return b"".join(chunks)
+        except zlib.error:
+            continue
+    return None
+
+
 def _decompress_objstms(rawdata: bytes) -> bytes:
     """Return the concatenated FlateDecode'd payload of every /ObjStm
     stream in the document, as one bytes blob suitable for appending to
-    the scan input. Returns ``b""`` when no /ObjStm exists or zlib fails.
+    the scan input. Returns ``b""`` when no /ObjStm exists, zlib fails,
+    or the cumulative decoded payload exceeds the policy budget.
 
     Note: real PDF /ObjStm streams may also use /Predictor / multi-filter
     chains. We handle the common case (single FlateDecode) since that's
@@ -314,20 +433,18 @@ def _decompress_objstms(rawdata: bytes) -> bytes:
     behavior — markers in such streams were already invisible)."""
     if b"/ObjStm" not in rawdata:
         return b""
-    import zlib
     chunks: list[bytes] = []
+    total = 0
     for m in _RE_OBJSTM_STREAM.finditer(rawdata):
         compressed = m.group(1)
-        try:
-            decoded = zlib.decompress(compressed)
-        except zlib.error:
-            # Try raw deflate (no zlib header) as a fallback — some
-            # producers emit raw streams.
-            try:
-                decoded = zlib.decompress(compressed, -15)
-            except zlib.error:
-                continue
+        decoded = _bounded_decompress(compressed, _OBJSTM_MAX_PER_STREAM_BYTES)
+        if decoded is None:
+            continue  # bomb or malformed — skip this stream, keep going
+        if total + len(decoded) > _OBJSTM_MAX_TOTAL_BYTES:
+            log.debug("ObjStm cumulative decode budget exceeded; truncating scan")
+            break
         chunks.append(decoded)
+        total += len(decoded)
     if not chunks:
         return b""
     # Separator helps avoid markers spanning concat boundaries.
@@ -341,14 +458,30 @@ _RE_ACTION_S = re.compile(rb"/S\s*/([A-Za-z][A-Za-z0-9]*)")
 # layer filters to ones we care about).
 _RE_SUBTYPE = re.compile(rb"/Subtype\s*/([A-Za-z][A-Za-z0-9]*)")
 # Filter: /Filter /<Name>  OR  /Filter [/<Name> ...]
-_RE_FILTER = re.compile(rb"/Filter\s*[\[/]\s*/?([A-Za-z][A-Za-z0-9]*)")
+# Single-filter form: /Filter /<Name>
+_RE_FILTER_SINGLE = re.compile(rb"/Filter\s*/([A-Za-z][A-Za-z0-9]*)")
+# Filter-array form: /Filter [/<Name1> /<Name2> ...] — capture the
+# whole bracketed list so we can iterate every filter, not just the
+# first one. Audit finding (codex_detect_corr_2; HIGH): a chain like
+# ``/Filter [/FlateDecode /JBIG2Decode]`` previously only counted
+# FlateDecode and missed the dangerous secondary JBIG2.
+_RE_FILTER_ARRAY = re.compile(rb"/Filter\s*\[([^\]]*)\]")
+_RE_FILTER_NAME_IN_ARRAY = re.compile(rb"/([A-Za-z][A-Za-z0-9]*)")
 # Structural markers we want to count regardless of context
+# Structural markers — match both inline-dict shape (``/Foo <<``) and
+# indirect-reference shape (``/Foo 5 0 R``). Audit finding
+# (codex_detect_corr_1, codex_detect_corr_2; HIGH × 2): the inline-only
+# matchers below missed real-world PDFs that use indirect refs at the
+# catalog level, breaking the "pdfcop parity" claim because Origami
+# resolves these through the parser.
 _RE_OPENACTION = re.compile(rb"/OpenAction\b")
-_RE_AA = re.compile(rb"/AA\s*<")
-_RE_ACROFORM = re.compile(rb"/AcroForm\s*<")
+_RE_AA = re.compile(rb"/AA\s*(?:<|\d+\s+\d+\s+R)")
+_RE_ACROFORM = re.compile(rb"/AcroForm\s*(?:<|\d+\s+\d+\s+R)")
 _RE_XFA = re.compile(rb"/XFA\b")
 _RE_EMBEDDEDFILES = re.compile(rb"/EmbeddedFiles\b")
-_RE_JAVASCRIPT_NAMETREE = re.compile(rb"/JavaScript\s*<")
+_RE_JAVASCRIPT_NAMETREE = re.compile(
+    rb"/JavaScript\s*(?:<|\d+\s+\d+\s+R)"
+)
 _RE_ENCRYPT = re.compile(rb"/Encrypt\s+\d+\s+\d+\s+R")
 _RE_OBJSTM = re.compile(rb"/Type\s*/ObjStm")
 
@@ -422,11 +555,20 @@ def scan(rawdata: bytes) -> list[Finding]:
             add("annotation", sub, rights)
 
     # Stream filters
-    for m in _RE_FILTER.finditer(cleaned):
+    # Single-filter form: /Filter /Foo
+    for m in _RE_FILTER_SINGLE.finditer(cleaned):
         flt = m.group(1).decode("ascii", errors="replace")
         rights = _FILTER_RIGHTS.get(flt)
         if rights:
             add("filter", flt, rights)
+    # Array form: /Filter [/Foo /Bar] — iterate every filter so chained
+    # filter pipelines don't smuggle dangerous filters past the gate.
+    for arr_match in _RE_FILTER_ARRAY.finditer(cleaned):
+        for name_match in _RE_FILTER_NAME_IN_ARRAY.finditer(arr_match.group(1)):
+            flt = name_match.group(1).decode("ascii", errors="replace")
+            rights = _FILTER_RIGHTS.get(flt)
+            if rights:
+                add("filter", flt, rights)
 
     # Structural markers
     if _RE_OPENACTION.search(cleaned):
