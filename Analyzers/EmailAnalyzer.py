@@ -6,6 +6,7 @@ for hop reconstruction and Auth-Results analysis.
 """
 
 import logging
+import re
 
 from structure import Analyzer, Report, Severity
 from eml import Eml
@@ -100,6 +101,9 @@ class EmailAnalyzer(Analyzer):
             self._check_return_path_mismatch()
             self._check_message_id_mismatch()
             self._check_undisclosed_recipients()
+            self._check_received_spf_softfail()
+            self._check_arc_chain()
+            self._check_bcc_leakage()
 
             # B5: Mail route extraction using new module
             self._extract_mail_route()
@@ -251,6 +255,145 @@ class EmailAnalyzer(Analyzer):
                         verbosity=0,
                     )
                     return
+
+    def _check_received_spf_softfail(self):
+        """Surface ``Received-SPF: softfail`` as its own LOW finding.
+
+        SPF softfail means the sender's published SPF record explicitly
+        says "this IP shouldn't be sending for this domain" but the
+        record uses the soft-mark (``~all``) rather than hard-fail
+        (``-all``). Mail servers typically accept the message but score
+        it as suspicious. Currently this gets folded into the generic
+        auth-results report; a separate finding makes it scannable."""
+        if not hasattr(self, "eml"):
+            return
+        for raw in self.eml.get_header_raw("Received-SPF"):
+            value = (raw or "").strip().lower()
+            if not value:
+                continue
+            verdict = value.split(None, 1)[0]
+            if verdict == "softfail":
+                self.reports["spf_softfail"] = Report(
+                    "Received-SPF: softfail — sender domain's SPF "
+                    "record marks this source as 'should fail' "
+                    "(``~all``). Mail accepted but flagged as "
+                    "suspicious by the receiving server.",
+                    short="SPF softfail",
+                    label="spf_softfail",
+                    severity=Severity.LOW,
+                    verbosity=0,
+                    order=5,
+                )
+                return
+
+    def _check_arc_chain(self):
+        """Inspect the ARC (Authenticated Received Chain) for depth +
+        validation status. ARC is a forwarder-friendly extension to
+        DKIM/SPF/DMARC that lets each hop seal the prior chain so the
+        eventual recipient can verify the full path even when each hop
+        breaks the original signatures.
+
+        Findings:
+          INFO  arc_chain — ``N`` ARC hops present (informational)
+          MEDIUM arc_validation_failed — ``cv=fail`` anywhere in the
+                 ARC-Seal chain (downstream verifier rejected the
+                 chain — a real signal of forwarding tampering)
+        """
+        if not hasattr(self, "eml"):
+            return
+        seals = list(self.eml.get_header_raw("ARC-Seal"))
+        if not seals:
+            return
+
+        # Each ARC-Seal carries an ``i=N`` instance counter. The hop
+        # count is the highest ``i=`` value across all seals.
+        max_i = 0
+        cv_fail_seen = False
+        for seal in seals:
+            text = (seal or "").lower()
+            # Match ``i=<digits>`` and ``cv=<word>``.
+            m = re.search(r"\bi\s*=\s*(\d+)", text)
+            if m:
+                max_i = max(max_i, int(m.group(1)))
+            cv = re.search(r"\bcv\s*=\s*(\w+)", text)
+            if cv and cv.group(1) == "fail":
+                cv_fail_seen = True
+
+        depth = max_i if max_i else len(seals)
+        self.reports["arc_chain"] = Report(
+            f"ARC chain: {depth} hop(s)" + (
+                " — ``cv=fail`` present (chain-validation failure)"
+                if cv_fail_seen else ""
+            ),
+            short=f"ARC depth {depth}"
+                  + (" cv=fail" if cv_fail_seen else ""),
+            label="arc_chain",
+            severity=Severity.MEDIUM if cv_fail_seen else Severity.INFO,
+            verbosity=1,
+            order=6,
+            data={"depth": depth, "cv_fail": cv_fail_seen},
+        )
+        if cv_fail_seen:
+            self.reports["arc_validation_failed"] = Report(
+                "ARC-Seal chain reports ``cv=fail`` — at least one hop "
+                "could not validate the prior chain. Forwarder tampering "
+                "or spoofing across the ARC path is the typical cause.",
+                short="ARC cv=fail",
+                label="arc_validation_failed",
+                severity=Severity.MEDIUM,
+                verbosity=0,
+                order=5,
+            )
+
+    def _check_bcc_leakage(self):
+        """Flag the BCC-bulk-send shape: To/Cc resolves to
+        ``undisclosed-recipients`` AND the Received chain shows multiple
+        distinct envelope-To values (Acme.com -> Bob; Acme.com -> Alice;
+        ...). This is the signature of mass-bcc'd phishing where the
+        sender used the To/Cc as a mask while the actual recipient list
+        leaks through ``for <addr>;`` clauses on the way through MTAs."""
+        if not hasattr(self, "eml"):
+            return
+
+        # Only fire when the visible recipient is masked
+        masked = False
+        for header in ("To", "Cc"):
+            for value in self.eml.get_header(header):
+                if value and "undisclosed-recipients" in value.lower():
+                    masked = True
+                    break
+            if masked:
+                break
+        if not masked:
+            return
+
+        # Harvest envelope-To from Received headers — the ``for <addr>;``
+        # clause leaks the actual delivery target on each hop.
+        envelope_tos: set[str] = set()
+        for received in self.eml.get_header_raw("Received"):
+            text = received or ""
+            for m in re.finditer(
+                r"\bfor\s+<?([\w.+\-]+@[\w.\-]+)>?\s*;",
+                text,
+                re.IGNORECASE,
+            ):
+                envelope_tos.add(m.group(1).lower())
+
+        if len(envelope_tos) >= 2:
+            self.reports["bcc_leakage"] = Report(
+                f"BCC bulk-send shape: To/Cc was masked "
+                f"(``undisclosed-recipients``) but Received headers leak "
+                f"{len(envelope_tos)} distinct envelope-To values: "
+                + ", ".join(sorted(envelope_tos)[:5])
+                + ("..." if len(envelope_tos) > 5 else ""),
+                short=f"BCC bulk-send ({len(envelope_tos)} envelope targets)",
+                label="bcc_leakage",
+                severity=Severity.MEDIUM,
+                verbosity=0,
+                order=4,
+                data={"envelope_to_count": len(envelope_tos),
+                      "envelope_tos": sorted(envelope_tos)},
+            )
 
     def _extract_mail_route(self):
         """Extract and report mail delivery route from Received headers."""
@@ -440,7 +583,6 @@ class EmailAnalyzer(Analyzer):
         if not hasattr(self, "eml"):
             return []
 
-        import re
         findings = []
 
         # X-IronPort-AV — Cisco Secure Email gateway
