@@ -581,6 +581,27 @@ PDF_CRITICAL_PATTERNS: list[tuple[re.Pattern, str, str]] = [
     # Heap-spray NOP sled (\x90 or %u9090 repeated)
     (re.compile(r"(?:%u9090){10,}|(?:\\x90){20,}|(?:\\u9090){10,}"),
      "pdf_heap_spray", "Heap-spray NOP sled — classic exploit primitive"),
+    # Additional heap-spray fill patterns (per-user request — niche
+    # carry-over from the audit triage). Each fingerprint matches
+    # specific bytes used by published exploit PoCs to seed the heap:
+    #
+    #   IE5/6 spray fill ``0c0c0c0c`` — seed bytes for the historic
+    #     Internet Explorer JavaScript spray that crossed over into
+    #     PDF JS exploits via shared spray helpers.
+    #   Long ``41414141`` runs (``AAAA``) — generic shellcode/stack
+    #     placeholder fill seen in PoC Acrobat exploits.
+    #   ``%41%41%41…`` URL-encoded variant of the same.
+    (re.compile(r"(?:0c0c0c0c){8,}|(?:%u0c0c){10,}"),
+     "pdf_heap_spray_0c0c", "0c0c0c0c heap-spray fill (IE/Adobe family)"),
+    (re.compile(r"(?:41414141){8,}|(?:%u4141){10,}|(?:%41){30,}"),
+     "pdf_heap_spray_aaaa",
+     "Long AAAA / 41414141 heap-spray fill — PoC shellcode placeholder"),
+    # Common Acrobat-era marker bytes left in published PoCs:
+    #   ``unescape("%uNSCK")`` / ``%uNSCM`` — sentinel constants in
+    #   metasploit-style Acrobat sled wrappers.
+    (re.compile(r"%u(?:NSCK|NSCM)\b", re.IGNORECASE),
+     "pdf_heap_spray_marker",
+     "Metasploit-style spray sentinel — published PoC marker"),
     # Privilege elevation context
     (re.compile(r"app\s*\.\s*beginPriv\s*\(", re.IGNORECASE),
      "pdf_privilege_elevation",

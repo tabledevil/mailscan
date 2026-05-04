@@ -224,6 +224,11 @@ _ANNOTATION_RIGHTS: dict[str, tuple[str, ...]] = {
     "Widget":         ("allowAcroForms",),  # NB: upstream typo fixed
     "RichMedia":      ("allowRichMediaAnnotation",),
     "3D":             ("allow3DAnnotation",),
+    # Niche carry-over (per-user request from audit triage):
+    # Legacy Flash3D annotation — older PDFs combined 3D scenes with
+    # embedded Flash. Subsumed by RichMedia in modern PDFs but archived
+    # malware corpora still carry it.
+    "Flash3D":        ("allow3DAnnotation", "allowRichMediaAnnotation"),
 }
 
 # Stream-filter names → required rights.
@@ -484,6 +489,15 @@ _RE_JAVASCRIPT_NAMETREE = re.compile(
 )
 _RE_ENCRYPT = re.compile(rb"/Encrypt\s+\d+\s+\d+\s+R")
 _RE_OBJSTM = re.compile(rb"/Type\s*/ObjStm")
+# Adobe-specific embedded Flash (audit niche carry-over): older PDF
+# malware embedded SWF content via the application/x-shockwave-flash
+# MIME marker on a Filespec or RichMedia configuration. Flash itself
+# was end-of-life in 2020 — any PDF still carrying SWF content in 2026
+# is from an archived corpus and worth flagging.
+_RE_FLASH_MIME = re.compile(rb"application\s*/\s*x-shockwave-flash",
+                             re.IGNORECASE)
+# SWF magic header — appears at the start of an embedded Flash blob.
+_RE_SWF_MAGIC = re.compile(rb"\b(?:CWS|FWS|ZWS)[\x00-\x20]")
 
 
 def scan(rawdata: bytes) -> list[Finding]:
@@ -591,6 +605,17 @@ def scan(rawdata: bytes) -> list[Finding]:
             triggered_at_opening=True)
     if _RE_ENCRYPT.search(cleaned):
         add("structural", "Encryption", ("allowEncryption",))
+
+    # Embedded Flash content (niche carry-over). Three ways to find it:
+    #   * the MIME marker ``application/x-shockwave-flash`` anywhere in
+    #     the bytes (often appears inside a literal string after a
+    #     /Subtype value, so we scan rawdata not cleaned)
+    #   * the raw SWF magic header (``CWS``/``FWS``/``ZWS``) at the
+    #     start of an embedded blob (lives inside a stream body which
+    #     has already been blanked, so likewise scan rawdata)
+    if _RE_FLASH_MIME.search(rawdata) or _RE_SWF_MAGIC.search(rawdata):
+        add("structural", "EmbeddedFlash",
+            ("allowRichMediaAnnotation",))
 
     return list(findings.values())
 
