@@ -60,10 +60,16 @@ def test_cve_2009_1492_get_annots_overflow():
     assert "pdf_cve_2009_1492" in _names(f)
 
 
-def test_cve_2009_0658_custom_dictionary_open():
+def test_cve_2009_1493_custom_dictionary_open():
+    """Audit finding (codex_detect_corr_1, _2): the original label was
+    pdf_cve_2009_0658 — wrong CVE entirely. customDictionaryOpen is
+    CVE-2009-1493; CVE-2009-0658 is the unrelated Feb 2009 JBIG2
+    issue. Regression guard for the corrected label."""
     src = "this.spell.customDictionaryOpen('/c/x', 'name');"
     f = detect_threat_patterns(src)
-    assert "pdf_cve_2009_0658" in _names(f)
+    assert "pdf_cve_2009_1493" in _names(f)
+    # The wrong label must NEVER come back
+    assert "pdf_cve_2009_0658" not in _names(f)
 
 
 def test_heap_spray_unicode_nop_sled():
