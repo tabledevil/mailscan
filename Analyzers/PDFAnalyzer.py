@@ -19,6 +19,41 @@ except ImportError:
     _PDF_POLICY_AVAILABLE = False
 
 
+# Per-stream decompression budget for embedded PDF resources. Audit
+# finding (codex_security_1, codex_security_2; HIGH): /JS, /EF,
+# /XObject Image, and /FontFile* streams were materialized via
+# ``get_data()`` without per-stream caps, so a small PDF carrying
+# heavily-compressed resources could inflate to GBs of heap before
+# the generic max_file_size ceiling kicked in.
+_PDF_STREAM_MAX_BYTES = 32 * 1024 * 1024  # 32 MB per individual stream
+_PDF_STREAM_MAX_CUMULATIVE = 256 * 1024 * 1024  # 256 MB across all extracts
+
+
+def _bounded_get_data(stream, max_bytes: int = _PDF_STREAM_MAX_BYTES) -> bytes | None:
+    """``stream.get_data()`` with a hard size ceiling.
+
+    PyPDF2's StreamObject lazily decompresses on get_data(); we have
+    no streaming API to peek the decoded length without paying for
+    the full inflate. Compromise: ask for the data, then refuse if
+    it's over budget. Memory still spikes briefly but caller can
+    discard. Better than holding the bytes forever as a child
+    Structure that recurses into the analysis tree."""
+    try:
+        data = stream.get_data()
+    except Exception as e:
+        logging.debug("PDF stream decompress failed: %s", e)
+        return None
+    if data is None:
+        return None
+    if len(data) > max_bytes:
+        logging.debug(
+            "PDF stream %d bytes exceeds budget %d — skipping",
+            len(data), max_bytes,
+        )
+        return None
+    return bytes(data)
+
+
 
 class PDFAnalyzer(Analyzer):
     compatible_mime_types = ['application/pdf']
@@ -94,14 +129,23 @@ class PDFAnalyzer(Analyzer):
         emitted = 0
 
         def coerce_js(value) -> bytes | None:
-            """Return the JS source bytes from a /JS value, or None."""
+            """Return the JS source bytes from a /JS value, or None.
+            Stream payloads bounded at _PDF_STREAM_MAX_BYTES (security
+            #3 — unbounded get_data() was a memory-exhaustion vector)."""
             try:
                 if isinstance(value, IndirectObject):
                     value = value.get_object()
                 if isinstance(value, StreamObject):
-                    return value.get_data()
+                    return _bounded_get_data(value)
                 if isinstance(value, (TextStringObject, ByteStringObject, str, bytes)):
-                    return value.encode("utf-8") if isinstance(value, str) else bytes(value)
+                    raw = value.encode("utf-8") if isinstance(value, str) else bytes(value)
+                    if len(raw) > _PDF_STREAM_MAX_BYTES:
+                        logging.debug(
+                            "PDF /JS string %d bytes exceeds budget — skipping",
+                            len(raw),
+                        )
+                        return None
+                    return raw
             except Exception as e:
                 logging.debug("coerce_js failed: %s", e)
             return None
@@ -237,7 +281,10 @@ class PDFAnalyzer(Analyzer):
                 if hasattr(stream, "get_data"):
                     name = (fs_dict.get("/F") or fs_dict.get("/UF")
                             or "embedded.bin")
-                    return str(name), stream.get_data()
+                    payload = _bounded_get_data(stream)
+                    if payload is None:
+                        return None
+                    return str(name), payload
         except Exception as e:
             logging.debug("filespec payload extract failed: %s", e)
         return None
@@ -447,7 +494,12 @@ class PDFAnalyzer(Analyzer):
                             if (hasattr(obj, "get")
                                     and obj.get("/Subtype") == "/Image"):
                                 ext, mime = _filter_to_extmime(obj.get("/Filter"))
-                                data = obj.get_data() if hasattr(obj, "get_data") else b""
+                                # Bounded extract — refuses streams that
+                                # would inflate past _PDF_STREAM_MAX_BYTES.
+                                data = (
+                                    _bounded_get_data(obj) or b""
+                                    if hasattr(obj, "get_data") else b""
+                                )
                                 # Pillow-reconstructable images: try to get
                                 # a real PNG out so QRAnalyzer can decode.
                                 if ext == "bin":
@@ -481,7 +533,9 @@ class PDFAnalyzer(Analyzer):
                                              or font_obj.get("/BaseFont")
                                              or key)
                                 font_name = str(font_name).lstrip("/")
-                                data = stream.get_data()
+                                data = _bounded_get_data(stream)
+                                if data is None:
+                                    continue
                                 emit(
                                     f"page{page_idx + 1}_font_{font_name}.{ext}",
                                     bytes(data) if data else b"",
