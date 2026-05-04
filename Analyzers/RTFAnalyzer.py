@@ -42,9 +42,13 @@ class RTFAnalyzer(Analyzer):
         (re.compile(rb"(?:\\[a-z]+\s*){50,}"), "Excessive control word sequence (possible obfuscation)"),
     ]
 
-    # Known CLSID prefixes for dangerous OLE objects (hex-encoded, little-endian)
+    # Known CLSID prefixes for dangerous OLE objects (hex-encoded,
+    # little-endian — first 4 bytes of the CLSID GUID).
     DANGEROUS_CLSIDS = {
+        # Equation Editor variants — both are the EQNEDT32 family
+        # exploited by CVE-2017-11882 and CVE-2018-0802.
         "0002ce02": "Equation Editor 3.0 (CVE-2017-11882)",
+        "0002ce03": "Equation Editor 2.0 (CVE-2018-0802 — patch-bypass variant)",
         "00021401": "Windows Shell Link (.lnk)",
         "f20da720": "OLE Package object",
         "00020906": "Microsoft Word Document (embedded)",
@@ -55,6 +59,12 @@ class RTFAnalyzer(Analyzer):
         "d5de8d20": "Shell.Explorer / WebBrowser control",
     }
 
+    # Equation Editor CLSIDs are the EQNEDT32 family. When ``\objupdate``
+    # is present alongside one of these, the document is the canonical
+    # CVE-2017-11882 / CVE-2018-0802 exploit shape (load + auto-trigger
+    # the equation parser to overflow the embedded shellcode).
+    _EQNEDT_CLSIDS = ("0002ce02", "0002ce03")
+
     def analysis(self):
         self.modules["parse_rtf"] = self._parse_rtf
         self.modules["detect_suspicious_words"] = self._detect_suspicious_control_words
@@ -62,8 +72,67 @@ class RTFAnalyzer(Analyzer):
         self.modules["detect_obfuscation"] = self._detect_obfuscation
         self.modules["detect_template_injection"] = self._detect_template_injection
         self.modules["detect_fonttbl_exploit"] = self._detect_fonttbl_exploit
+        self.modules["detect_eqnedt_exploit"] = self._detect_eqnedt_exploit
         self.modules["extract_text"] = self._extract_text
         super().analysis()
+
+    def _detect_eqnedt_exploit(self):
+        """Combined-pattern detection for CVE-2017-11882 / CVE-2018-0802.
+
+        Each individual indicator (``\\objupdate`` control word, Equation
+        Editor CLSID in OLE objdata) already produces a finding via
+        ``_detect_suspicious_control_words`` / ``_detect_ole_objects``.
+        When BOTH appear together that's the canonical exploit shape
+        (auto-triggered EQNEDT32 stack buffer overflow), so we emit an
+        explicit CRITICAL report tagging the CVE — analyst doesn't have
+        to assemble the conclusion from two separate findings."""
+        data = self.struct.rawdata.lower()
+
+        has_objupdate = b"\\objupdate" in data
+        # Look for either Equation CLSID prefix anywhere in the bytes.
+        # The CLSID lives inside hex-encoded ``\objdata`` so we search
+        # the raw hex representation.
+        clsid_hits = [c for c in self._EQNEDT_CLSIDS if c.encode() in data]
+
+        if has_objupdate and clsid_hits:
+            cve_label = (
+                "CVE-2017-11882" if "0002ce02" in clsid_hits
+                else "CVE-2018-0802"
+            )
+            if "0002ce02" in clsid_hits and "0002ce03" in clsid_hits:
+                cve_label = "CVE-2017-11882+CVE-2018-0802"
+            self.reports["eqnedt_exploit"] = Report(
+                f"Equation Editor exploit shape detected: ``\\objupdate`` + "
+                f"EQNEDT32 CLSID ({', '.join(clsid_hits)}) — {cve_label}. "
+                "Document auto-triggers the embedded OLE on open, which "
+                "loads EQNEDT32 with attacker-controlled bytes.",
+                short=f"EQNEDT exploit ({cve_label})",
+                label="eqnedt_exploit",
+                severity=Severity.CRITICAL,
+                verbosity=0,
+                order=22,
+                data={
+                    "cve": cve_label,
+                    "clsids": clsid_hits,
+                    "has_objupdate": True,
+                },
+            )
+        elif clsid_hits:
+            # Equation Editor present but no auto-update — still a
+            # warrant-investigation case but not the auto-fire shape.
+            self.reports["eqnedt_present"] = Report(
+                f"Equation Editor CLSID present ({', '.join(clsid_hits)}) "
+                "without ``\\objupdate``: object is reachable but not "
+                "auto-triggered. Equation Editor was end-of-life in 2017 "
+                "(CVE-2017-11882 / CVE-2018-0802) — investigate the OLE "
+                "object body for shellcode.",
+                short=f"EQNEDT CLSID present ({', '.join(clsid_hits)})",
+                label="eqnedt_present",
+                severity=Severity.HIGH,
+                verbosity=0,
+                order=23,
+                data={"clsids": clsid_hits, "has_objupdate": False},
+            )
 
     def _parse_rtf(self):
         data = self.struct.rawdata
