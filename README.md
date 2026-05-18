@@ -40,27 +40,39 @@ python3 matt.py -x <file>
 
 ## Dependencies
 
-Install the core dependencies (required for basic analysis) with pip:
+For normal command-line use, install MATT with `pipx`. This keeps the Python
+dependencies in an isolated environment while making the `matt` command
+available on your `PATH`, avoiding system Python installs such as
+`pip install --break-system-packages`.
 
 ```bash
+pipx install .
+```
+
+Install all optional feature dependencies with:
+
+```bash
+pipx install '.[all]'
+```
+
+For editable local development, use:
+
+```bash
+pipx install -e .
+```
+
+If you prefer a project-local virtual environment instead of `pipx`, create and
+activate a venv first, then install with pip:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
 pip install .
 ```
 
-If you are installing in an offline environment, you can use:
-
-```bash
-pip install . --no-build-isolation
-```
-
-This project uses the legacy `setup.py` build to avoid build-time downloads in restricted environments.
-
-Optional features are provided via extras. For example:
-
-```bash
-pip install .[all]
-```
-
-Available extras include `pdf`, `html`, `msg`, `7z`, `lang`, and `mime`. You can also check what is missing on your system with:
+Optional features are provided via extras. Available extras include `pdf`,
+`html`, `msg`, `7z`, `lang`, `mime`, `tui`, and `yara`. You can also check what
+is missing on your system with:
 
 ```bash
 matt --check
