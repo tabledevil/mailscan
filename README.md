@@ -1,107 +1,86 @@
-# MATT: Mail Analysis and Triage Tool
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
 
-MATT is a modular file analysis tool designed to dissect and extract information from various file types, with a primary focus on email files.
+[project]
+name = "matt"
+version = "0.2.0"
+description = "MATT — Mail Analysis and Triage Tool"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    { name = "MATT Contributors" },
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: OS Independent",
+    "Topic :: Security",
+    "Topic :: Communications :: Email",
+]
 
-## Overall Flow
+dependencies = [
+    "charset-normalizer>=3.0",
+    "python-dateutil>=2.8",
+    "pytz",
+    "rich>=13.0",
+]
 
-The system is designed as a modular file analysis tool. The main entry point is `matt.py`, which is a command-line script that takes one or more files as input.
+[project.optional-dependencies]
+pdf = ["PyPDF2", "pdf2image"]
+html = ["justhtml>=1.0"]
+msg = ["extract-msg"]
+pst = ["libpff-python"]
+7z = ["py7zr"]
+lang = ["lingua-language-detector>=2.0"]
+mime = ["magika"]
+tui = ["textual>=0.40"]
+yara = ["yara-python"]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov",
+    "ruff",
+]
+all = [
+    "matt[pdf,html,msg,pst,7z,lang,mime,tui,yara]",
+]
 
-Here's the general flow:
+[project.scripts]
+matt = "matt:main"
+mailhunt = "mailhunt:main"
 
-1.  **Initialization:** `matt.py` takes a file path from the command line.
+[tool.setuptools]
+py-modules = [
+    "matt",
+    "structure",
+    "reporting",
+    "eml",
+    "attest",
+    "getallfromfields",
+    "mail2timeline",
+    "mailattachments",
+    "maildump",
+    "mailexport",
+    "mailfrom",
+    "mailheader",
+    "mailhunt",
+]
 
-2.  **Structure Creation:** For each file, it creates a `Structure` object (from `structure.py`). The `Structure` object is the central data container for a file and its analysis results. It reads the raw data of the file and determines its MIME type using the `python-magic` library.
+[tool.setuptools.packages.find]
+include = ["Analyzers*", "Config*", "Utils*", "renderers*"]
 
-3.  **Analyzer Selection:** The `Structure` object then uses the `Analyzer.get_analyzer(mimetype)` method to find a suitable analyzer for the file's MIME type. The system looks through all the available `Analyzer` subclasses (defined in the `Analyzers/` directory) and finds one that lists the file's MIME type in its `compatible_mime_types` list.
+[tool.ruff]
+target-version = "py310"
+line-length = 100
 
-4.  **Analysis:** Once the correct analyzer is found, it's instantiated. The analyzer's `analysis()` method is called, which in turn runs various analysis modules. For example, the `EmailAnalyzer` will use the `eml.py` module to parse the email's headers and structure.
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = ["E501"]  # line length handled by formatter
 
-5.  **Report Generation:** During analysis, the analyzer populates the `Structure` object with reports and information it discovers. For example, the `EmailAnalyzer` adds reports for the sender, recipient, and subject of the email.
-
-6.  **Handling of Nested Files:** If the analyzer finds nested files (like email attachments or files in a zip archive), it creates new `Structure` objects for each of them. These children are then analyzed recursively in the same way, creating a hierarchical structure.
-
-7.  **Output:** Finally, `matt.py` calls the `get_report()` method on the top-level `Structure` object. This method generates a formatted, indented report of all the information gathered from the file and its children. If the `--extract` flag is used, the `extract()` method is called to save all the parts of the file (e.g., email attachments) to disk.
-
-In essence, the system uses a flexible, modular design where `Structure` objects represent files and `Analyzer` objects are responsible for processing them based on their type. This makes it easy to extend the tool by simply adding new analyzer classes for different file types.
-
-## Usage
-
-To analyze one or more files, run `matt.py` with the file paths as arguments:
-
-```bash
-python3 matt.py <file1> <file2> ...
-```
-
-You can use the `-x` or `--extract` flag to extract all parts of the file (e.g., email attachments) into a directory named `extract` in the current working directory.
-
-```bash
-python3 matt.py -x <file>
-```
-
-## Dependencies
-
-For normal command-line use, install MATT with `pipx`. This keeps the Python
-dependencies in an isolated environment while making the `matt` command
-available on your `PATH`, avoiding system Python installs such as
-`pip install --break-system-packages`.
-
-```bash
-pipx install .
-```
-
-Install all optional feature dependencies with:
-
-```bash
-pipx install '.[all]'
-```
-
-For editable local development, use:
-
-```bash
-pipx install -e .
-```
-
-If you prefer a project-local virtual environment instead of `pipx`, create and
-activate a venv first, then install with pip:
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install .
-```
-
-Optional features are provided via extras. Available extras include `pdf`,
-`html`, `msg`, `7z`, `lang`, `mime`, `tui`, and `yara`. You can also check what
-is missing on your system with:
-
-```bash
-matt --check
-```
-
-For mbox analysis, the standard library `mailbox` module is used and requires no extra dependencies.
-
-**Note:** The `python-magic` library depends on the `libmagic` library. You may need to install it using your system's package manager. For example, on Debian/Ubuntu:
-
-```bash
-sudo apt-get install libmagic1
-```
-
-## Cloud Testing With Sample Files
-
-The repository keeps encrypted sample archives in `testfiles/` so cloud runners can execute reproducible tests without storing extracted payloads in Git.
-
-Run corpus tests:
-
-```bash
-python -m unittest discover -s tests -p "test_*.py"
-```
-
-Optional decryption test (for environments like Jules) requires a secret:
-
-- `SAMPLE_ZIP_PASSWORD`: password for encrypted ZIP samples (commonly `infected`)
-
-Example:
-
-```bash
-SAMPLE_ZIP_PASSWORD=infected python -m unittest discover -s tests -p "test_*.py"
-```
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]

@@ -34,6 +34,7 @@ dependencies = [
 pdf = ["PyPDF2", "pdf2image"]
 html = ["justhtml>=1.0"]
 msg = ["extract-msg"]
+pst = ["libpff-python"]
 7z = ["py7zr"]
 lang = ["lingua-language-detector>=2.0"]
 mime = ["magika"]
@@ -45,11 +46,12 @@ dev = [
     "ruff",
 ]
 all = [
-    "matt[pdf,html,msg,7z,lang,mime,tui,yara]",
+    "matt[pdf,html,msg,pst,7z,lang,mime,tui,yara]",
 ]
 
 [project.scripts]
 matt = "matt:main"
+mailhunt = "mailhunt:main"
 
 [tool.setuptools]
 py-modules = [
@@ -65,6 +67,7 @@ py-modules = [
     "mailexport",
     "mailfrom",
     "mailheader",
+    "mailhunt",
 ]
 
 [tool.setuptools.packages.find]

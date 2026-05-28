@@ -77,7 +77,8 @@ class Renderer(abc.ABC):
             "mime_type": struct.mime_type,
             "size": struct.size,
             "filename": struct.filename if struct.has_filename else None,
-            "md5": struct.md5,
+            "md5": None if getattr(struct, "path_backed", False) else struct.md5,
+            "path_backed": bool(getattr(struct, "path_backed", False)),
             "analyzer_name": type(struct.analyzer).__name__,
             "analyzer_info": struct.analyzer.info,
         }
@@ -105,6 +106,22 @@ class Renderer(abc.ABC):
                     "severity_value": int(r.severity),
                     "content_type": r.content_type,
                     "data": r.data,
+                }
+            )
+
+        if getattr(struct, "is_duplicate_content", False):
+            reports.append(
+                {
+                    "text": (
+                        "Duplicate content occurrence "
+                        f"{struct.duplicate_occurrence} of {struct.duplicate_count}"
+                    ),
+                    "short": f"duplicate {struct.duplicate_occurrence}/{struct.duplicate_count}",
+                    "label": "duplicate",
+                    "severity": "INFO",
+                    "severity_value": 4,
+                    "content_type": "text/plain",
+                    "data": None,
                 }
             )
 

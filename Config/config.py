@@ -24,6 +24,13 @@ class Flags:
     max_analysis_depth: int = 10
     max_file_size: int = 1024 * 1024 * 1024  # 1 GB
     max_compression_ratio: int = 100
+    plaintext_sample_bytes: int = 256 * 1024
+    plaintext_full_scan_bytes: int = 1024 * 1024
+    plaintext_language_max_chars: int = 100 * 1024
+    plaintext_encoded_min_bytes: int = 4 * 1024
+    plaintext_base64_min_ratio: float = 0.98
+    plaintext_external_tools_enabled: bool = True
+    plaintext_tool_timeout: float = 2.0
 
     # --- MIME detection ---
     mime_provider_order: Optional[List[str]] = None

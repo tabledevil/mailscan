@@ -85,7 +85,8 @@ class RichRenderer(Renderer):
         meta.add_row("info", str(node.info["analyzer_info"] or ""))
         if node.info["filename"]:
             meta.add_row("filename", str(node.info["filename"]))
-        meta.add_row("md5", Text(str(node.info["md5"] or ""), style="dim green"))
+        if node.info["md5"]:
+            meta.add_row("md5", Text(str(node.info["md5"]), style="dim green"))
 
         tree.add(meta)
 

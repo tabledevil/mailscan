@@ -78,8 +78,10 @@ class HtmlRenderer(Renderer):
             fn = html.escape(str(node.info["filename"]))
             parts.append(f'<div class="meta"><span>Filename: {fn}</span></div>')
 
-        md5 = html.escape(str(node.info["md5"] or ""))
-        parts.append(f'<div class="meta"><span class="md5">MD5: {md5}</span></div>')
+        md5_value = node.info["md5"]
+        if md5_value:
+            md5 = html.escape(str(md5_value))
+            parts.append(f'<div class="meta"><span class="md5">MD5: {md5}</span></div>')
 
         for report in node.reports:
             sev = report["severity"]
