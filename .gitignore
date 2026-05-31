@@ -22,6 +22,14 @@ dist/
 test.*
 #ignore the NUL device artifact
 NUL
+# classified / private real-sample fixtures + sealed diagnostic reports — NEVER commit
+pstforensic/tests/fixtures/private/
+**/private/
+*.pst
+*.ost
+*.nst
+sealed_report*.txt
+*.sealed.txt
 .beta-test-*
 .beta-test-headers-*
 .beta-test-route-*
