@@ -12,6 +12,7 @@ from typing import Iterator, Optional
 
 from ..exceptions import WarningSink
 from ..fileio import FileReader
+from ..integrity import Integrity
 from ..variant import Variant
 from .block import BlockReader
 from .btree import BBTEntry, BTreeWalker, NBTEntry
@@ -35,6 +36,8 @@ class NodeRef:
         self._db = db
         self._data: Optional[bytes] = None
         self._subnodes: Optional[dict[int, "NodeRef"]] = None
+        self.touched: set[int] = set()   # every BID this node's reads hit
+        self.page_ib: Optional[int] = None  # NBT page the entry came from
 
     def data_stream(self) -> bytes:
         """Decoded, reassembled data bytes of this node ([MS-PST] §2.2.2.8)."""
@@ -42,18 +45,38 @@ class NodeRef:
             if not self.bid_data:
                 self._data = b""
             else:
-                self._data = self._db._block_reader.read_data_stream(self.bid_data)
+                self._data = self._db._block_reader.read_data_stream(
+                    self.bid_data, touched=self.touched)
         return self._data
 
     def subnodes(self) -> dict[int, "NodeRef"]:
         """Resolve the subnode tree to ``{local_nid: NodeRef}`` ([MS-PST] §2.2.2.8.3.3)."""
         if self._subnodes is None:
             result: dict[int, "NodeRef"] = {}
-            for inner_nid, bdata, bsub in self._db._subnode_reader.iter_subnodes(self.bid_sub):
+            for inner_nid, bdata, bsub in self._db._subnode_reader.iter_subnodes(
+                    self.bid_sub, touched=self.touched):
                 result[inner_nid] = NodeRef(self._db, inner_nid, bdata, bsub,
                                             nid_parent=self.nid)
             self._subnodes = result
         return self._subnodes
+
+    def integrity(self, *, deep: bool = True) -> Integrity:
+        """Findings for every page/block this node (and, if ``deep``, its
+        already-materialised subnodes) touched (PLAN §14.3)."""
+        integ = Integrity()
+        db = self._db
+        pv = getattr(db, "page_verdicts", {}).get(self.page_ib) if self.page_ib is not None else None
+        if pv is not None:
+            integ.extend(pv.findings())
+        verdicts = db._block_reader.verdicts
+        for bid in sorted(self.touched):
+            v = verdicts.get(bid)
+            if v is not None:
+                integ.extend(v.findings())
+        if deep and self._subnodes:
+            for child in self._subnodes.values():
+                integ.extend(child.integrity(deep=True).findings)
+        return integ
 
     def __repr__(self) -> str:  # pragma: no cover - debug aid
         return (f"NodeRef(nid={self.nid:#x}, bidData={self.bid_data:#x}, "
@@ -97,6 +120,8 @@ class NodeDatabase:
             self._bbt[ent.bid] = ent
         for ent in walker.walk(root.bref_nbt, key_kind="NID"):
             self._nbt[ent.nid] = ent
+        self.page_verdicts = walker.page_verdicts
+        self.skipped_pages = walker.skipped_pages
 
     # -- public surface ---------------------------------------------------
     def node(self, nid: int) -> Optional[NodeRef]:
@@ -104,7 +129,13 @@ class NodeDatabase:
         ent = self._nbt.get(nid)
         if ent is None:
             return None
-        return NodeRef(self, ent.nid, ent.bid_data, ent.bid_sub, ent.nid_parent)
+        return self.node_from_entry(ent)
+
+    def node_from_entry(self, ent: NBTEntry) -> NodeRef:
+        """A :class:`NodeRef` for any NBT entry — live or harvested by the scan."""
+        ref = NodeRef(self, ent.nid, ent.bid_data, ent.bid_sub, ent.nid_parent)
+        ref.page_ib = ent.page_ib
+        return ref
 
     def iter_nbt(self) -> Iterator[NBTEntry]:
         """Iterate all leaf NBT entries ([MS-PST] §2.2.2.7.7.4)."""

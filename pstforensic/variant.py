@@ -42,6 +42,15 @@ class Variant:
     # B-tree page entry counts live in the page itself (cEnt/cbEnt); not fixed here.
     block_align: int = 64    # blocks are padded to this multiple
     verified: bool = True    # False => geometry is a working hypothesis (4K-OST)
+    # BTPAGE counters (cEnt/cEntMax/cbEnt/cLevel) sit at this page offset; the
+    # entries region is everything before it.  4K uses u16 cEnt/cEntMax.
+    page_counters_offset: int = 0
+    wide_page_counters: bool = False
+    # Exact BTPAGE geometry: (cEntMax, cbEnt) for NBT leaf / BBT leaf /
+    # intermediate pages — real stores always use these (Kernel checks them).
+    nbt_leaf_geometry: tuple[int, int] = (0, 0)
+    bbt_leaf_geometry: tuple[int, int] = (0, 0)
+    bt_inner_geometry: tuple[int, int] = (0, 0)
 
     @property
     def ib_size(self) -> int:
@@ -60,6 +69,10 @@ ANSI = Variant(
     page_size=512,
     page_trailer_size=12,
     block_trailer_size=12,
+    page_counters_offset=0x1F0,
+    nbt_leaf_geometry=(31, 16),
+    bbt_leaf_geometry=(41, 12),
+    bt_inner_geometry=(41, 12),
 )
 
 # Unicode PST/OST (Outlook 2003+), wVer 23-35.
@@ -74,10 +87,16 @@ UNICODE = Variant(
     page_size=512,
     page_trailer_size=16,
     block_trailer_size=16,
+    page_counters_offset=0x1E8,
+    nbt_leaf_geometry=(15, 32),
+    bbt_leaf_geometry=(20, 24),
+    bt_inner_geometry=(20, 24),
 )
 
 # Unicode 4K-page OST (Outlook 2013+ cached mode), wVer 36/37.
-# UNVERIFIED geometry — see PLAN Appendix A H20.
+# UNVERIFIED against a real OST — see PLAN Appendix A H20.  Trailer offset
+# (0xFE8), counter offset/width (0xFD8, u16) and the 126/169 geometry are taken
+# from Kernel PST Viewer's page validator (PLAN §14.1).
 UNICODE_4K = Variant(
     name="unicode4k",
     is_unicode=True,
@@ -90,7 +109,15 @@ UNICODE_4K = Variant(
     page_trailer_size=24,
     block_trailer_size=16,
     verified=False,
+    page_counters_offset=0xFD8,
+    wide_page_counters=True,
+    nbt_leaf_geometry=(126, 32),
+    bbt_leaf_geometry=(169, 24),
+    bt_inner_geometry=(169, 24),
 )
+
+
+ALL_VARIANTS = (ANSI, UNICODE, UNICODE_4K)
 
 
 def classify(wver: int) -> Variant:

@@ -856,6 +856,88 @@ Each milestone lists **what it unlocks** and **how it's verified**. Nothing wire
 **Critical path:** M0→M1→M2→M3 unlocks clean reads; M5 unlocks recovery; M6 unlocks 4K-OST; M7 unlocks deleted-item forensics; M8 *proves* it; M9 ships into MATT. M4 (MSG) can proceed in parallel after M3 since it reuses layers 5–6 without needing NDB/LTP.
 
 **Ready-to-wire definition (end of M9):** every acceptance criterion (§1.4) passes in CI, the coverage scorecard meets all four axis gates, `MsgAnalyzer` runs on the native parser with no `extract_msg` regression, and `PstAnalyzer` is registered — at which point `pstforensic` is a first-class MATT storage substrate sharing one MAPI object model across MSG and PST/OST.
+
+---
+
+## 14. Resilience redesign — Kernel-parity reading, strict per-object findings (2026-11)
+
+**Trigger.** A classified multi-GB PST opened completely in *Kernel PST Viewer* while readpst/libpff produced nothing. Static RE of Kernel (engine 12.04.01, Ghidra headless in Docker; evidence: memory note `kernel_pst_algorithm`) showed it is not smarter but **more tolerant**, and that it runs a full-file scan on every open. This section supersedes §7.1's "carve only when roots are broken".
+
+### 14.1 Reference behaviour (Kernel, observed in code)
+
+| Stage | Kernel behaviour |
+|---|---|
+| Header | No `!BDN` check, no header CRC. Only `wVer` (14/15 ANSI, 21/23 Unicode, other <35 → ANSI, ≥35 → 4K). |
+| Retry | Auto mode re-runs the parse up to 5× flipping ANSI/Unicode and 512/4K until the folder tree is non-empty. |
+| B-tree walk | Page accepted on `ptype==ptypeRepeat` + exact `cEntMax`/`cbEnt` geometry. No CRC, no wSig, no trailer-bid check. Bad page ⇒ subtree silently skipped. |
+| Full scan (default, every open) | Linear read of the whole file. Pages on 512 B stride (4K: 4096). NBT leaf pages harvested **from every page incl. stale copies, all slots up to capacity (ignoring `cEnt`)**; only NID type 2/4 kept. BBT pages ignored; block index rebuilt from BLOCKTRAILERs (0<cb≤0x2000, accepted if wSig **or** CRC matches). |
+| Merge | Unknown NIDs added; missing Top-of-Personal-Folder (0x8022) / Deleted Items (0x8062) synthesized; messages with unknown `nidParent` → `Orphan Folder_N` (heap bSig 0xEC required). Raw mode dumps all into "All Emails". |
+| 4K geometry | Page trailer @0xFE8 (24 B); counters @0xFD8: cEnt u16, cEntMax u16, cbEnt u8, cLevel u8; NBT leaf cEntMax 126, BT entries 169×24. |
+
+### 14.2 Principle
+
+**Kernel's checks decide what we *read*; our strict checks decide how we *flag* it.** No CRC/signature/header check is a gate any more — every verdict is recorded on the object it concerns. The library exposes everything; *policy* (what to show, in which mode) belongs to consumers (MATT `PstAnalyzer`, a future CLI `extract`) and is out of scope here.
+
+### 14.3 Integrity findings (`pstforensic/integrity.py`)
+
+- Every page and block read produces a verdict: `crc_ok`, `sig_ok`, `trailer_bid_ok`, `cb_ok` / `geometry_ok`, plus its file offset.
+- `NodeRef.integrity` aggregates the verdicts of every page/block that node touched (NBT page of its entry, data blocks, XBLOCKs, subnode blocks). Messages/folders expose `integrity` = union over node + subnodes.
+- Store-level `store.integrity`: magic, header CRCs, wVer/variant evidence, EOF mismatch, AMap validity.
+- Each finding: `code`, `detail`, location (`ib`/`bid`/`nid`). Stable codes extend `WarnCode`.
+
+### 14.4 Interpretation ladder ("try everything, remember what was correct")
+
+Each interpretation carries a **level**: `verified` (an independent check a wrong choice would fail with overwhelming probability: CRC, sig, HN structure, Adler/LZFu CRC) › `consistent` (structure fits, no checksum) › `inferred` (inherited from parent) › `guessed` (heuristic only) › `raw_only` (nothing fits; raw bytes kept).
+
+| Layer | Can a wrong choice "silently succeed"? | Rule |
+|---|---|---|
+| Variant (ANSI/Unicode/4K) | No — different trailer offsets + exact geometry constants + sig/CRC | Test every scan unit under all variants; keep all that validate; flag ambiguity; flag header/evidence disagreement. |
+| Crypt (NONE/PERMUTE/CYCLIC) | **Yes** — decode never fails; block CRC is over the *encoded* bytes | Heap blocks: try all three, `verified` only via HN structure (bSig 0xEC, known bClientSig, consistent HNPAGEMAP). Continuation blocks: `inferred` from the verified first block of the same node; attachment magic may upgrade. |
+| String8 codepage | **Yes** for single-byte codepages | Always keep raw bytes; decode with declared codepage (`declared`), else charset detection (`guessed` + confidence); strict multi-byte decode errors flag a contradiction. PT_UNICODE is unambiguous. |
+| Compression (4K zlib, LZFu) | No — own checksums | Failure is real; fall back to raw + finding. |
+
+Performance: probe the last `verified` choice first; **short-circuit only on `verified`, never on "did not fail"**; on failure try all others.
+
+### 14.5 Always-on full scan (`ScanIndex`)
+
+One linear pass (mmap; numpy fast path, pure-Python fallback with identical output), cached as a sidecar keyed by file hash (≙ Kernel snapshot), with progress/abort callbacks:
+- NBT/BBT pages on the 512 B stride (and 4096 for 4K), every variant; NBT leaf slots read **up to capacity**, slots ≥ `cEnt` tagged `slack_slot`.
+- Blocks from BLOCKTRAILERs on the 64 B stride; sig and CRC both recorded.
+- Unlike Kernel we also keep BBT pages (cRef, cross-check).
+
+### 14.6 Item states & provenance
+
+`state ∈ {live, live_damaged, soft_deleted, deleted, superseded, orphan, carved}`; `provenance ∈ {btree, scan_nbt, stale_page, slack_slot, free_space}`.
+
+- Same NID + same `bidData` as live ⇒ duplicate stale copy, collapsed (counted only).
+- Same NID, different `bidData`, **identical content** ⇒ not an item; recorded as `history` on the live item (e.g. previous parent folder = move trail).
+- Same NID, different content ⇒ `superseded` version.
+- NID absent from the live NBT ⇒ `deleted` (hard delete).
+- Live NBT but unreachable from any folder ⇒ `orphan`.
+- Live in Deleted Items / Recoverable Items ⇒ `soft_deleted`.
+
+`DeletionInfo(kind, original_folder, deleted_on, modifier, source)`: PSTs do **not** log when/who. `deleted_on` only from `PidTagDeletedOn` (Exchange dumpster); `modifier` from `PidTagLastModifierName`; otherwise only bounds (e.g. "not before" = item timestamps), each tagged with its source. Never present a delivery time as a deletion time.
+
+### 14.7 No garbage on healthy stores
+
+Risks: false-positive block trailers (~2⁻¹⁹ per 64 B slot ⇒ hundreds per 10 GB), PSTs embedded as attachments, stale/split page duplicates, internal Outlook objects.
+
+- Unreferenced data never becomes a message unless **sig ∧ CRC ∧ HN structure ∧ `PidTagMessageClass`** hold; OR-rule (Kernel) only for blocks referenced by a node entry.
+- Carving of unreferenced blocks scans only space **not covered by verified live blocks** (H14) ⇒ attachment payloads (incl. embedded PSTs) are out of scope by construction.
+- Dedup per §14.6; FAI/internal classes classified, not dropped.
+
+**Acceptance gate:** a healthy store yields **zero** non-live items; a store with known deletions yields exactly those as `deleted`.
+
+### 14.8 `recover()` — deep salvage for damaged items
+
+Default reading already returns damaged items with everything readable + findings. `item.recover()` additionally tries: other on-disk copies of the same BID, the newest intact `superseded` version, subnodes via the scan index instead of a broken SLBLOCK, an HNPAGEMAP-tolerant heap parse, and finally raw fragments (typed `fragment`, never a message).
+
+### 14.9 Delivery steps
+
+1. Integrity model + per-object verdicts (NDB) + tolerant header + `ScanIndex` + state classification + zero-garbage test.
+2. Crypt ladder + variant evidence + codepage levels.
+3. `recover()` salvage stages.
+4. Corruption matrix (one defect per fixture: item found **and** correctly flagged) + Kernel differential in the Research VM + real Outlook-generated PSTs (healthy, with deletions, with embedded PST, heavy page splits).
 ---
 
 ## Appendix A — Adversarial-review reconciliation & spec-verified constants (authoritative)

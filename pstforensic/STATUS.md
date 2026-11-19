@@ -162,3 +162,33 @@ now the **full cascade** (PLAN §7/§8), each stage backed by `test_recovery.py`
   (the existing knobs plus a `'truncate'` that drops the trailing BBT/NBT pages,
   keeping the message PCs in the survivor prefix — the AC-2 carve oracle).  All
   existing callers are unaffected.
+
+## Resilience pass (PLAN §14 — Kernel parity, strict findings)
+
+Driven by the static RE of Kernel PST Viewer (PLAN §14.1).  Reading is now
+tolerant; every verdict lands on the object it concerns.
+
+- `integrity.py` — `Finding`/`Integrity`, `PageVerdict`/`BlockVerdict`,
+  interpretation levels (verified › consistent › inferred › guessed › raw_only).
+- Header: bad magic / wrong or unknown `wVer` / header CRC are findings; every
+  variant is tried against the NBT root page (`variant_evidence`).  Errors only
+  when no variant validates.
+- B-tree walk: Kernel gate (ptype pair + exact cEntMax/cbEnt geometry); CRC,
+  sig and trailer BID recorded per page; non-pages skipped (subtree recovered
+  by the scan).  4K counter geometry (0xFD8, u16) taken from Kernel.
+- Blocks: per-BID verdicts; BIDs missing from the BBT resolve via the scan
+  (`BLOCK_FROM_SCAN`).  `NodeRef.integrity()` → `MapiMessage.integrity`,
+  `Folder.integrity`, `Store.integrity`.
+- `ndb/scan.py` — always-on full-file scan (numpy fast path ≈ 660 MB/s,
+  pure-Python path identical): NBT/BBT pages under every variant, leaf slots up
+  to capacity (`beyond_cent`), block trailers (sig, or CRC for wanted BIDs).
+  Keeps only material differing from the live index; hits inside verified
+  block extents are suppressed (attached-PST trap test).
+- `messaging/inventory.py` + `Store.items()` — states live / live_damaged /
+  soft_deleted / orphan / deleted / superseded, provenance, move history,
+  `DeletionInfo` (deleted_on only from PidTagDeletedOn; otherwise `not_before`).
+- `tests/test_resilience.py` (15) incl. the zero-garbage gate.
+
+Open (PLAN §14.9 steps 2–4): crypt ladder per heap block, codepage levels,
+4K block trailers in the scan, `item.recover()`, scan sidecar cache, carving
+of unreferenced blocks into items, corruption matrix + Kernel differential.

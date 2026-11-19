@@ -36,14 +36,21 @@ class SubnodeReader:
         self.sink = sink
         self.max_depth = max_depth
 
-    def iter_subnodes(self, bid_sub: int) -> Iterator[tuple[int, int, int]]:
+    def iter_subnodes(self, bid_sub: int,
+                      touched: set[int] | None = None) -> Iterator[tuple[int, int, int]]:
         """Yield ``(internal_nid, bid_data, bid_sub)`` for every SLENTRY leaf.
 
         ``bid_sub == 0`` means the node has no subnodes (empty iterator).
+        SL/SI block BIDs read are added to ``touched``.
         """
         if not bid_sub:
             return
-        yield from self._walk(bid_sub, depth=0, seen=set())
+        seen: set[int] = set()
+        try:
+            yield from self._walk(bid_sub, depth=0, seen=seen)
+        finally:
+            if touched is not None:
+                touched |= seen
 
     def _walk(self, bid: int, depth: int,
               seen: set[int]) -> Iterator[tuple[int, int, int]]:

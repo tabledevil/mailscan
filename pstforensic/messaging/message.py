@@ -97,6 +97,9 @@ def build_message(noderef: NodeRef, variant: Variant, *,
             if att.embedded is not None:
                 msg.embedded_messages.append(att.embedded)
 
+    integ = getattr(noderef, "integrity", None)
+    if callable(integ):
+        msg.integrity = integ()
     return msg
 
 

@@ -72,6 +72,7 @@ class _Block:
     payload: bytes           # cb bytes as they sit on disk (post-encode)
     internal: bool
     ib: int = 0              # filled at layout time
+    free: bool = False       # written to disk but absent from the BBT (freed)
 
 
 def _block_trailer(cb: int, ib: int, bid: int, payload: bytes,
@@ -140,14 +141,23 @@ class _PstBuilder:
         self._next_block_bid = 4   # data block bids: 4, 8, 12 ... (i bit clear)
         self._next_internal_bid = 4 | BID_INTERNAL_BIT
         self._next_page_bid = 1    # page bids use a separate counter (H22)
+        # Deletion residue (what Outlook leaves behind): stale NBT leaf pages
+        # no longer referenced by the tree, and entries left beyond cEnt in the
+        # live NBT leaf page.
+        self.stale_nbt_pages: list[list[tuple[int, int, int, int]]] = []
+        self.nbt_slack: list[tuple[int, int, int, int]] = []
 
     # -- block allocation ------------------------------------------------
-    def add_data_block(self, plaintext: bytes) -> int:
-        """Add a leaf data block (auto-encoded per crypt); return its bid."""
+    def add_data_block(self, plaintext: bytes, *, free: bool = False) -> int:
+        """Add a leaf data block (auto-encoded per crypt); return its bid.
+
+        ``free=True`` writes the block but leaves it out of the BBT, like the
+        block of a hard-deleted item.
+        """
         bid = self._next_block_bid
         self._next_block_bid += 4
         enc = encode_block(plaintext, self.crypt, bid)
-        self.blocks.append(_Block(bid=bid, payload=enc, internal=False))
+        self.blocks.append(_Block(bid=bid, payload=enc, internal=False, free=free))
         return bid
 
     def add_internal_block(self, payload: bytes) -> int:
@@ -303,6 +313,10 @@ class _PstBuilder:
         if len(items) <= per_page:
             ib = start_ib
             ents = b"".join(entry_fn(it) for it in items)
+            if ptype == PTYPE_NBT and self.nbt_slack:
+                # Residue beyond cEnt (what a deletion leaves in the page).
+                room = per_page - len(items)
+                ents += b"".join(entry_fn(it) for it in self.nbt_slack[:room])
             page, bid = self._wrap_btpage(ents, len(items), cb_ent, 0, ptype, ib)
             pages.append((ib, page))
             return bid, ib, pages, ib + v.page_size
@@ -338,9 +352,18 @@ class _PstBuilder:
         block_start = header_region
         after_blocks = self._layout_blocks(block_start)
 
+        stale_pages = []
+        for ents in self.stale_nbt_pages:
+            body = b"".join(self._nbt_entry_bytes(e) for e in ents)
+            page, _bid = self._wrap_btpage(body, len(ents),
+                                           32 if v.is_unicode else 16, 0,
+                                           PTYPE_NBT, after_blocks)
+            stale_pages.append((after_blocks, page))
+            after_blocks += v.page_size
+
         bbt_bid, bbt_ib, bbt_pages, after_bbt = self._emit_btree(
-            self.blocks, self._bbt_entry_bytes, lambda b: b.bid,
-            24 if v.is_unicode else 12, PTYPE_BBT, after_blocks)
+            [blk for blk in self.blocks if not blk.free], self._bbt_entry_bytes,
+            lambda b: b.bid, 24 if v.is_unicode else 12, PTYPE_BBT, after_blocks)
         nbt_bid, nbt_ib, nbt_pages, ib_file_eof = self._emit_btree(
             self.nbt_entries, self._nbt_entry_bytes, lambda e: e[0] & 0xFFFFFFFF,
             32 if v.is_unicode else 16, PTYPE_NBT, after_bbt)
@@ -358,7 +381,7 @@ class _PstBuilder:
         for blk in self.blocks:
             data = _emit_block(blk, v)
             out[blk.ib:blk.ib + len(data)] = data
-        for ib, page in bbt_pages + nbt_pages:
+        for ib, page in stale_pages + bbt_pages + nbt_pages:
             out[ib:ib + len(page)] = page
         return bytes(out)
 
@@ -1011,7 +1034,12 @@ def build_unicode_pst_tree(*, store_name: str = "Personal Folders",
                            named: Optional[list[dict]] = None,
                            pst_password: Optional[int] = None,
                            deleted: bool = False,
-                           corrupt: Optional[str] = None) -> bytes:
+                           corrupt: Optional[str] = None,
+                           hard_deleted: bool = False,
+                           slack_deleted: bool = False,
+                           superseded: bool = False,
+                           moved: bool = False,
+                           filler_block: int = 0) -> bytes:
     """Build a Unicode PST with a folder tree, messages, recipients & attachments.
 
     Layout produced (NIDs share ``nidIndex`` across the PC + 3 TCs, [MS-PST] §2.4):
@@ -1026,6 +1054,19 @@ def build_unicode_pst_tree(*, store_name: str = "Personal Folders",
     This is the canonical messaging-tier oracle; the messaging public API
     (open_store) must round-trip every name/address/byte asserted in
     test_messaging.
+
+    Deletion residue knobs (PLAN §14.6 oracle — what Outlook leaves on disk):
+
+    * ``hard_deleted`` — message 0x7784 ("Hard deleted") removed from the
+      NBT; its block freed (not in BBT); its entry survives in a stale NBT page.
+    * ``slack_deleted`` — message 0x7784+0x20 ("Slack deleted"): same, but
+      the entry survives beyond ``cEnt`` in the live NBT page.
+    * ``superseded`` — an older, different version of message 2 ("Lunch? (draft)")
+      in a freed block, referenced by a stale page entry with msg 2's NID.
+    * ``moved`` — msg 2's identical content in a freed block, referenced by a
+      stale entry whose parent is the root folder (a move trail).
+    * ``filler_block`` — a live, unreferenced data block of that many zero
+      bytes (stands in for attachment payload; tests plant structures in it).
     """
     b = _PstBuilder(UNICODE, crypt)
 
@@ -1226,6 +1267,48 @@ def build_unicode_pst_tree(*, store_name: str = "Personal Folders",
             _PID_BODY: "This message was deleted.".encode("utf-16-le"),
             _PID_MESSAGE_CLASS: "IPM.Note".encode("utf-16-le"),
         }, parent=inbox_pc_nid)
+
+    stale: list[tuple[int, int, int, int]] = []
+    if hard_deleted:
+        hd_nid = make_nid(NID_TYPE_NORMAL_MESSAGE, 0x3BC)
+        hd_bid = b.add_data_block(build_pc_bytes({
+            _PID_SUBJECT: "Hard deleted".encode("utf-16-le"),
+            _PID_SENDER_NAME: "Mallory".encode("utf-16-le"),
+            _PID_SENDER_EMAIL: "mallory@evil.example".encode("utf-16-le"),
+            _PID_BODY: "Gone from the NBT, still on disk.".encode("utf-16-le"),
+            _PID_MESSAGE_CLASS: "IPM.Note".encode("utf-16-le"),
+            # 2021-06-15T12:00:00Z — a delivery time, NOT a deletion time.
+            _PID_DELIVERY_TIME: struct.pack("<Q", 132682320000000000),
+        }), free=True)
+        stale.append((hd_nid, hd_bid, 0, inbox_pc_nid))
+    if slack_deleted:
+        sd_nid = make_nid(NID_TYPE_NORMAL_MESSAGE, 0x3BD)
+        sd_bid = b.add_data_block(build_pc_bytes({
+            _PID_SUBJECT: "Slack deleted".encode("utf-16-le"),
+            _PID_SENDER_NAME: "Trent".encode("utf-16-le"),
+            _PID_MESSAGE_CLASS: "IPM.Note".encode("utf-16-le"),
+        }), free=True)
+        b.nbt_slack.append((sd_nid, sd_bid, 0, inbox_pc_nid))
+    if superseded:
+        old_bid = b.add_data_block(build_pc_bytes({
+            _PID_SUBJECT: "Lunch? (draft)".encode("utf-16-le"),
+            _PID_SENDER_NAME: "Frank".encode("utf-16-le"),
+            _PID_SENDER_EMAIL: "frank@example.com".encode("utf-16-le"),
+            _PID_MESSAGE_CLASS: "IPM.Note".encode("utf-16-le"),
+        }), free=True)
+        stale.append((msg2_nid, old_bid, 0, inbox_pc_nid))
+    if moved:
+        mv_bid = b.add_data_block(build_pc_bytes({
+            _PID_SUBJECT: "Lunch?".encode("utf-16-le"),
+            _PID_SENDER_NAME: "Frank".encode("utf-16-le"),
+            _PID_SENDER_EMAIL: "frank@example.com".encode("utf-16-le"),
+            _PID_MESSAGE_CLASS: "IPM.Note".encode("utf-16-le"),
+        }), free=True)
+        stale.append((msg2_nid, mv_bid, 0, NID_ROOT_FOLDER))
+    if stale:
+        b.stale_nbt_pages.append(stale)
+    if filler_block:
+        b.add_data_block(b"\x00" * filler_block)
 
     image = b.build()
     if corrupt == "truncate":

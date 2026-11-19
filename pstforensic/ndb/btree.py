@@ -18,10 +18,11 @@ Guards:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterator
+from typing import Iterator, Optional
 
 from ..exceptions import WarnCode, WarningSink
 from ..fileio import FileReader
+from ..integrity import PageVerdict
 from ..variant import Variant
 from .bref import BREF, parse_bref
 from .crc import compute_crc, compute_sig
@@ -54,6 +55,7 @@ class BBTEntry:
     bref: BREF
     cb: int       # number of raw bytes of the block (excludes trailer padding)
     c_ref: int    # reference count
+    page_ib: Optional[int] = None  # BBT leaf page this entry was read from
 
     @property
     def bid(self) -> int:
@@ -69,6 +71,8 @@ class NBTEntry:
     bid_data: int   # normalized
     bid_sub: int    # normalized (0 if none)
     nid_parent: int
+    page_ib: Optional[int] = None  # NBT leaf page this entry was read from
+    slot: int = -1                 # entry index within that page
 
 
 @dataclass
@@ -101,22 +105,52 @@ def parse_page_trailer(page: bytes, variant: Variant) -> PageTrailer:
 def _page_counters(page: bytes, variant: Variant) -> tuple[int, int, int, int]:
     """Return (cEnt, cEntMax, cbEnt, cLevel) from a BTPAGE ([MS-PST] §2.2.2.7.7).
 
-    The four 1-byte counters sit immediately before the PAGETRAILER, after a
-    4-byte ``dwPadding`` on Unicode (no padding on ANSI).
+    512-byte pages: four 1-byte counters right before the (Unicode: padding +)
+    PAGETRAILER.  4K pages: u16 cEnt, u16 cEntMax, u8 cbEnt, u8 cLevel at 0xFD8.
     """
-    pad = 4 if variant.is_unicode else 0
-    base = len(page) - variant.page_trailer_size - pad - 4
-    c_ent = page[base]
-    c_ent_max = page[base + 1]
-    cb_ent = page[base + 2]
-    c_level = page[base + 3]
-    return c_ent, c_ent_max, cb_ent, c_level
+    o = variant.page_counters_offset
+    if variant.wide_page_counters:
+        return (int.from_bytes(page[o:o + 2], "little"),
+                int.from_bytes(page[o + 2:o + 4], "little"),
+                page[o + 4], page[o + 5])
+    return page[o], page[o + 1], page[o + 2], page[o + 3]
 
 
 def entries_region_size(variant: Variant) -> int:
-    """Bytes available for rgentries before counters+padding+trailer."""
-    pad = 4 if variant.is_unicode else 0
-    return variant.page_size - variant.page_trailer_size - pad - 4
+    """Bytes available for rgentries before the counters."""
+    return variant.page_counters_offset
+
+
+def expected_geometry(variant: Variant, ptype: int, c_level: int) -> tuple[int, int]:
+    """The exact ``(cEntMax, cbEnt)`` a real BTPAGE of this kind carries."""
+    if c_level > 0:
+        return variant.bt_inner_geometry
+    if ptype == PTYPE_NBT:
+        return variant.nbt_leaf_geometry
+    return variant.bbt_leaf_geometry
+
+
+def verify_page(page: bytes, ib: int, expected_ptype: int, variant: Variant,
+                bref_bid: Optional[int] = None) -> PageVerdict:
+    """Strict verdict over one BTPAGE; never raises, never warns.
+
+    ``ptype_ok`` and ``geometry_ok`` are what Kernel PST Viewer gates on; CRC,
+    signature and trailer BID are recorded but do not decide readability.
+    """
+    tr = parse_page_trailer(page, variant)
+    ptype_ok = tr.ptype == tr.ptype_repeat == expected_ptype
+    if variant.wide_page_counters:  # 4K: ptypeRepeat layout unverified
+        ptype_ok = tr.ptype == expected_ptype
+    c_ent, c_ent_max, cb_ent, c_level = _page_counters(page, variant)
+    geometry_ok = ((c_ent_max, cb_ent) == expected_geometry(variant, expected_ptype, c_level)
+                   and c_ent <= c_ent_max)
+    body = page[:variant.page_size - variant.page_trailer_size]
+    crc_ok = compute_crc(body) == tr.dw_crc
+    sig_ok = compute_sig(ib, tr.bid) == tr.w_sig
+    bid_ok = bref_bid is None or tr.bid == bref_bid
+    return PageVerdict(ib=ib, ptype=tr.ptype, ptype_ok=ptype_ok,
+                       geometry_ok=geometry_ok, crc_ok=crc_ok, sig_ok=sig_ok,
+                       bid_ok=bid_ok)
 
 
 def _parse_bbt_entry(buf: bytes, off: int, variant: Variant) -> BBTEntry:
@@ -162,29 +196,15 @@ def _parse_bt_entry(buf: bytes, off: int, variant: Variant) -> BTEntry:
     return BTEntry(btkey=btkey, bref=bref)
 
 
-def _verify_trailer(reader: FileReader, page: bytes, ib: int, expected_ptype: int,
-                    variant: Variant, sink: WarningSink) -> PageTrailer:
-    tr = parse_page_trailer(page, variant)
-    where = f"page@{ib:#x}"
-    if tr.ptype != tr.ptype_repeat:
-        sink.warn(WarnCode.SIG_MISMATCH,
-                  f"ptype {tr.ptype:#x} != ptypeRepeat {tr.ptype_repeat:#x}", where)
-    if tr.ptype != expected_ptype:
-        sink.warn(WarnCode.SIG_MISMATCH,
-                  f"ptype {tr.ptype:#x} != expected {expected_ptype:#x}", where)
-    # Advisory CRC: covers the page bytes before the dwCRC/bid section
-    # ([MS-PST] §2.2.2.7.1: CRC of the page data excluding the trailer's
-    # dwCRC/bid).  We compute over the first (page_size - trailer) bytes.
-    body = page[:variant.page_size - variant.page_trailer_size]
-    calc = compute_crc(body)
-    if calc != tr.dw_crc:
-        sink.warn(WarnCode.PAGE_CRC_FAIL,
-                  f"page CRC stored={tr.dw_crc:#010x} calc={calc:#010x}", where)
-    sig = compute_sig(ib, tr.bid)
-    if sig != tr.w_sig:
-        sink.warn(WarnCode.SIG_MISMATCH,
-                  f"wSig stored={tr.w_sig:#06x} calc={sig:#06x}", where)
-    return tr
+def _warn_verdict(v: PageVerdict, sink: WarningSink) -> None:
+    """Mirror a page verdict into the shared sink (legacy surface)."""
+    where = f"page@{v.ib:#x}"
+    if not v.ptype_ok:
+        sink.warn(WarnCode.SIG_MISMATCH, f"ptype {v.ptype:#x} unexpected", where)
+    if not v.crc_ok:
+        sink.warn(WarnCode.PAGE_CRC_FAIL, "page CRC mismatch", where)
+    if not v.sig_ok or not v.bid_ok:
+        sink.warn(WarnCode.SIG_MISMATCH, "wSig/trailer bid mismatch", where)
 
 
 class BTreeWalker:
@@ -200,6 +220,9 @@ class BTreeWalker:
         self.variant = variant
         self.sink = sink
         self.max_depth = max_depth
+        # Every page this walker read, with its strict verdict (PLAN §14.3).
+        self.page_verdicts: dict[int, PageVerdict] = {}
+        self.skipped_pages: list[int] = []
 
     def walk(self, root_bref: BREF, *, key_kind: str) -> Iterator:
         """Yield all leaf entries reachable from ``root_bref`` (depth-first)."""
@@ -228,8 +251,16 @@ class BTreeWalker:
                            f"page@{bref.ib:#x}")
             return
 
-        _verify_trailer(self.reader, page, bref.ib, expected_ptype,
-                        self.variant, self.sink)
+        verdict = verify_page(page, bref.ib, expected_ptype, self.variant,
+                              bref_bid=bref.raw_bid)
+        self.page_verdicts[bref.ib] = verdict
+        _warn_verdict(verdict, self.sink)
+        if not verdict.ptype_ok and not verdict.geometry_ok:
+            # Neither the page type nor its geometry fit: this BREF does not
+            # point at a B-tree page.  Skip the subtree; the full-file scan
+            # still harvests its leaves (PLAN §14.5).
+            self.skipped_pages.append(bref.ib)
+            return
 
         c_ent, c_ent_max, cb_ent, c_level = _page_counters(page, self.variant)
         region = entries_region_size(self.variant)
@@ -259,6 +290,9 @@ class BTreeWalker:
                                            visited, depth + 1)
             else:
                 if key_kind == "NID":
-                    yield _parse_nbt_entry(page, off, self.variant)
+                    ent = _parse_nbt_entry(page, off, self.variant)
+                    ent.page_ib, ent.slot = bref.ib, i
                 else:
-                    yield _parse_bbt_entry(page, off, self.variant)
+                    ent = _parse_bbt_entry(page, off, self.variant)
+                    ent.page_ib = bref.ib
+                yield ent
