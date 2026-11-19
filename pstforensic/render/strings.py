@@ -70,6 +70,26 @@ def lcid_to_codepage(lcid: int) -> int:
     return _LCID_TO_CP.get(lcid & 0xFFFF, 1252)
 
 
+def resolve_codepage_ex(
+    *,
+    internet_cpid: Optional[int] = None,
+    message_cpid: Optional[int] = None,
+    store_cpid: Optional[int] = None,
+    locale_id: Optional[int] = None,
+) -> tuple[Optional[int], Optional[str]]:
+    """Like :func:`resolve_codepage` but returns ``(codepage, source)`` and
+    ``(None, None)`` when nothing declares one."""
+    if internet_cpid:
+        return internet_cpid, "PidTagInternetCodepage"
+    if message_cpid:
+        return message_cpid, "PidTagMessageCodepage"
+    if store_cpid:
+        return store_cpid, "store"
+    if locale_id is not None and (locale_id & 0xFFFF) in _LCID_TO_CP:
+        return lcid_to_codepage(locale_id), "PidTagMessageLocaleId"
+    return None, None
+
+
 def resolve_codepage(
     *,
     internet_cpid: Optional[int] = None,
@@ -93,13 +113,22 @@ def resolve_codepage(
 
 
 class _Decoded:
-    """Tiny record carrying the decoded text and the codec actually used."""
+    """Decoded text, the codec used, and how sure we are (PLAN §14.4).
 
-    __slots__ = ("text", "encoding")
+    ``level``: ``verified`` (UTF-16 or pure ASCII — no codepage can change
+    it), ``consistent`` (declared codepage decoded strictly), ``inferred``
+    (codepage from the locale), ``guessed`` (nothing declared: detection or
+    the 1252 default), ``raw_only`` (lossless latin-1 fallback).
+    """
 
-    def __init__(self, text: str, encoding: str) -> None:
+    __slots__ = ("text", "encoding", "level", "source")
+
+    def __init__(self, text: str, encoding: str, level: str = "verified",
+                 source: Optional[str] = None) -> None:
         self.text = text
         self.encoding = encoding
+        self.level = level
+        self.source = source
 
 
 def decode_string(
@@ -125,6 +154,7 @@ def decode_string_ex(
     prop_type: int,
     *,
     codepage: Optional[int] = None,
+    codepage_source: Optional[str] = None,
 ) -> _Decoded:
     """Like :func:`decode_string` but also reports the codec used.
 
@@ -145,22 +175,34 @@ def decode_string_ex(
         return _Decoded(raw.decode("utf-16-le", "replace"), "utf-16-le")
 
     # PT_STRING8 (0x001E) and anything else: codepage path.
-    cp = codepage if codepage else 1252
-    codec = codepage_to_codec(cp) or "cp1252"
-    try:
-        return _Decoded(raw.decode(codec), codec)
-    except (UnicodeDecodeError, LookupError):
-        pass
+    if all(b < 0x80 for b in raw):
+        # Every ASCII-compatible codepage yields the same text.
+        return _Decoded(raw.decode("ascii"), "ascii", "verified", codepage_source)
+    declared = codepage is not None and codepage_source in (
+        "PidTagInternetCodepage", "PidTagMessageCodepage", "store")
+    if codepage is not None:
+        codec = codepage_to_codec(codepage)
+        if codec is not None:
+            try:
+                text = raw.decode(codec)
+                level = "consistent" if declared else "inferred"
+                return _Decoded(text, codec, level, codepage_source)
+            except UnicodeDecodeError:
+                pass  # declared/inferred codepage contradicted by the bytes
 
-    # charset_normalizer fallback (optional dependency).
+    # Nothing (usable) declared: Outlook's Western default, then detection —
+    # either way only a guess, and said so.
+    try:
+        return _Decoded(raw.decode("cp1252"), "cp1252", "guessed", "default-1252")
+    except UnicodeDecodeError:
+        pass
     try:
         from charset_normalizer import from_bytes  # type: ignore
 
         best = from_bytes(raw).best()
-        if best is not None:
-            return _Decoded(str(best), best.encoding or "latin-1")
+        if best is not None and best.encoding:
+            return _Decoded(str(best), best.encoding, "guessed", "charset-detection")
     except Exception:
         pass
-
     # Last resort: latin-1 is lossless for any byte sequence.
-    return _Decoded(raw.decode("latin-1", "replace"), "latin-1")
+    return _Decoded(raw.decode("latin-1"), "latin-1", "raw_only", None)

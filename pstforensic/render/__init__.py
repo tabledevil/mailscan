@@ -139,11 +139,13 @@ def _render_scalar(
 ) -> Any:
     """Render a single (non-MV) scalar value of base type ``bt``."""
     if bt == PropType.STRING or bt == PropType.STRING8:
-        cp = _resolve_cp(mapi_obj)
+        cp, source = _resolve_cp(mapi_obj)
         from .strings import decode_string_ex
 
-        d = decode_string_ex(raw, bt, codepage=cp)
+        d = decode_string_ex(raw, bt, codepage=cp, codepage_source=source)
         v.encoding = d.encoding
+        v.encoding_level = d.level
+        v.encoding_source = d.source
         return d.text
 
     if bt == PropType.TIME:
@@ -186,15 +188,16 @@ def _render_scalar(
     return raw
 
 
-def _resolve_cp(mapi_obj: MapiObject) -> int:
-    """Resolve the PT_STRING8 codepage for ``mapi_obj`` (§9.7 precedence)."""
+def _resolve_cp(mapi_obj: MapiObject) -> tuple[Optional[int], Optional[str]]:
+    """Resolve the PT_STRING8 codepage + its source for ``mapi_obj`` (§9.7)."""
     def _u32(pid: int) -> Optional[int]:
         mv = mapi_obj.by_id(pid)
         if mv is None or len(mv.raw) < 4:
             return None
         return int.from_bytes(mv.raw[:4], "little")
 
-    return resolve_codepage(
+    from .strings import resolve_codepage_ex
+    return resolve_codepage_ex(
         internet_cpid=_u32(_PID_INTERNET_CPID),
         message_cpid=_u32(_PID_MESSAGE_CPID),
         store_cpid=None,
