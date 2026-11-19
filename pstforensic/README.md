@@ -43,6 +43,34 @@ for item in RecoveryEngine("mailbox.pst").recover():   # deleted/orphaned items
     print(item.meta.method, item.meta.confidence)
 ```
 
+### Everything the file holds (PLAN §14)
+
+```python
+store = pstforensic.open_store("mailbox.pst")
+for item in store.items():          # live, soft/hard-deleted, orphaned, superseded
+    print(item.state, item.provenance, item.folder_path, item.subject,
+          sorted(item.integrity.codes))
+print(store.integrity.codes)        # header / B-tree / scan findings
+```
+
+Reading never stops on a bad header, CRC or signature; every such verdict is a
+finding on the object it affects.
+
+## Check a store
+
+Count-only summary (states, finding codes, scan statistics — no content):
+
+```bash
+python3 -m pstforensic.tools.summary --progress /path/to/mailbox.pst
+python3 -m pstforensic.tools.summary --json /path/to/mailbox.pst
+```
+
+Header and root-page structure only (stdlib-only, copyable as a single file):
+
+```bash
+python3 pstforensic/tools/fingerprint.py --scan /path/to/mailbox.pst
+```
+
 ## Run the tests
 
 No external dependencies for the synthetic suite (pure stdlib; `olefile` only if
@@ -50,7 +78,7 @@ you exercise the MSG round-trip writer).
 
 ```bash
 # from the repo root
-python3 -m pytest pstforensic/tests -q          # → 224 passed, 7 skipped
+python3 -m pytest pstforensic/tests -q          # → 253 passed, 7 skipped
 ```
 
 The 7 skipped are the **content-sealed real-sample harness** — they run only when

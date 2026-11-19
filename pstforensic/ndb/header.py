@@ -33,7 +33,10 @@ from ..exceptions import (
     WarningSink,
 )
 from ..fileio import FileReader
+from .. import integrity as I
+from ..integrity import Integrity
 from ..variant import (
+    ALL_VARIANTS,
     CRYPT_EDPCRYPTED,
     MAGIC,
     MAGIC_CLIENT,
@@ -88,6 +91,11 @@ class Header:
     wip_capable: bool
     crc_partial_ok: bool
     crc_full_ok: bool | None  # None for ANSI (no dwCRCFull)
+    integrity: Integrity = None  # store-level header findings (PLAN §14.3)
+    magic_ok: bool = True
+    # Variants whose NBT root page validates under their geometry:
+    # name -> "verified" (sig+CRC too) | "consistent" (ptype+geometry only).
+    variant_evidence: dict = None
 
 
 def _parse_root(buf: bytes, variant: Variant, sink: WarningSink) -> Root:
@@ -122,32 +130,84 @@ def _parse_root(buf: bytes, variant: Variant, sink: WarningSink) -> Root:
     )
 
 
+def _root_evidence(reader: FileReader, variant: Variant) -> str | None:
+    """Does the NBT root page under ``variant``'s geometry look real?
+
+    Returns ``"verified"`` (ptype+geometry+sig+CRC), ``"consistent"``
+    (ptype+geometry — Kernel's gate) or ``None``.
+    """
+    from .btree import PTYPE_NBT, verify_page  # local: btree imports header deps
+    raw = reader.read_exact(variant.root_offset, variant.root_size, where="ROOT probe")
+    if raw is None:
+        return None
+    o = 4 + 4 * variant.bid_size  # dwReserved + 4 size fields
+    bref = parse_bref(raw, o, variant.bid_size)
+    if not (0 < bref.ib and bref.ib + variant.page_size <= reader.size):
+        return None
+    page = reader.read_exact(bref.ib, variant.page_size, where="ROOT probe")
+    if page is None:
+        return None
+    v = verify_page(page, bref.ib, PTYPE_NBT, variant, bref_bid=bref.raw_bid)
+    if not (v.ptype_ok and v.geometry_ok):
+        return None
+    return I.VERIFIED if (v.crc_ok and v.sig_ok and v.bid_ok) else I.CONSISTENT
+
+
 def detect(reader: FileReader, *, sink: WarningSink | None = None) -> Header:
     """Detect + parse the store header and ROOT ([MS-PST] §2.2.2.6).
 
-    Raises :class:`NotAPstError` if the ``!BDN`` magic is absent,
-    :class:`EncryptedStoreError` if ``bCryptMethod == 0x10`` (WIP/EDP), and
-    :class:`UnsupportedStoreError` for an unrecognisable ``wVer``.  Every other
-    anomaly (bad client magic, CRC mismatch, invalid AMap) is a warning so the
-    recovery engine can still proceed.
+    Tolerant (PLAN §14.2): a bad ``!BDN`` magic, bad client magic, header CRC
+    mismatch or an unknown/wrong ``wVer`` are *findings*, not errors.  Every
+    variant is tried against the NBT root page; the one(s) whose geometry
+    validates are recorded in ``variant_evidence``.
+
+    Raises :class:`NotAPstError` only if the magic is wrong **and** no variant
+    validates, :class:`UnsupportedStoreError` if the magic is right but no
+    variant can be resolved, and :class:`EncryptedStoreError` for
+    ``bCryptMethod == 0x10`` (WIP/EDP).
     """
     # An empty WarningSink is falsy (__len__ == 0); use an explicit None check.
     sink = sink if sink is not None else reader.sink
+    integ = Integrity()
 
     magic = reader.read(OFF_MAGIC, 4, where="header")
-    if magic != MAGIC:
-        raise NotAPstError(f"bad magic {magic!r}, expected {MAGIC!r}")
+    magic_ok = magic == MAGIC
+    if not magic_ok:
+        integ.add(I.HEADER_MAGIC_BAD, f"{magic!r}", ib=OFF_MAGIC)
+        sink.warn(WarnCode.SIG_MISMATCH, f"bad magic {magic!r}", where="header")
 
     client = reader.read(OFF_MAGIC_CLIENT, 2, where="header")
     if client != MAGIC_CLIENT:
+        integ.add(I.HEADER_CLIENT_MAGIC_BAD, f"{client!r}", ib=OFF_MAGIC_CLIENT)
         sink.warn(WarnCode.SIG_MISMATCH,
                   f"wMagicClient {client!r} != {MAGIC_CLIENT!r}", where="header")
 
     wver = reader.u16(OFF_WVER)
     try:
-        variant = classify(wver)
-    except ValueError as exc:
-        raise UnsupportedStoreError(str(exc)) from exc
+        declared: Variant | None = classify(wver)
+    except ValueError:
+        declared = None
+
+    evidence = {v.name: lv for v in ALL_VARIANTS
+                if (lv := _root_evidence(reader, v)) is not None}
+    by_name = {v.name: v for v in ALL_VARIANTS}
+
+    if declared is not None and (declared.name in evidence or not evidence):
+        variant = declared
+    elif evidence:
+        # Header disagrees with (or cannot name) the geometry the file has:
+        # prefer the strongest evidence, flag the override.
+        best = sorted(evidence, key=lambda n: I.LEVELS.index(evidence[n]))[0]
+        variant = by_name[best]
+        integ.add(I.VARIANT_FROM_EVIDENCE,
+                  f"wVer={wver} declares {declared.name if declared else 'nothing'}; "
+                  f"root page validates as {best}")
+    else:
+        if not magic_ok:
+            raise NotAPstError(f"bad magic {magic!r} and no variant validates")
+        raise UnsupportedStoreError(f"unrecognised wVer={wver}; no variant validates")
+    if not magic_ok and not evidence:
+        raise NotAPstError(f"bad magic {magic!r}, expected {MAGIC!r}")
 
     if not variant.verified:
         sink.warn(WarnCode.UNVERIFIED_CONST,
@@ -161,10 +221,19 @@ def detect(reader: FileReader, *, sink: WarningSink | None = None) -> Header:
 
     root_bytes = reader.read(variant.root_offset, variant.root_size, where="ROOT")
     root = _parse_root(root_bytes, variant, sink)
+    if root.f_amap_valid == 0:
+        integ.add(I.AMAP_INVALID, "fAMapValid=0")
+    if root.ib_file_eof != reader.size:
+        integ.add(I.EOF_MISMATCH,
+                  f"ibFileEof={root.ib_file_eof:#x} file size={reader.size:#x}")
 
     # --- Advisory CRC checks (never abort — AC-4) ---
     crc_partial_ok = _check_crc_partial(reader, sink)
     crc_full_ok = _check_crc_full(reader, variant, sink)
+    if not crc_partial_ok:
+        integ.add(I.HEADER_CRC_FAIL, "dwCRCPartial", ib=OFF_CRC_PARTIAL)
+    if crc_full_ok is False:
+        integ.add(I.HEADER_CRC_FAIL, "dwCRCFull", ib=OFF_CRC_FULL_UNICODE)
 
     return Header(
         variant=variant,
@@ -174,6 +243,9 @@ def detect(reader: FileReader, *, sink: WarningSink | None = None) -> Header:
         wip_capable=wver_is_wip_capable(wver),
         crc_partial_ok=crc_partial_ok,
         crc_full_ok=crc_full_ok,
+        integrity=integ,
+        magic_ok=magic_ok,
+        variant_evidence=evidence,
     )
 
 

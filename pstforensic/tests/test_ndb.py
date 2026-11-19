@@ -126,10 +126,46 @@ def test_not_a_pst_raises():
         NodeDatabase.open(FileReader(b"NOTAPST!" + b"\x00" * 600))
 
 
-def test_unknown_wver_unsupported():
+def test_unknown_wver_opens_from_root_evidence():
+    # PLAN §14.2: a wrong wVer is a finding, not an error, when the root page
+    # validates under some variant's geometry.
     img = bytearray(synth.build_unicode_pst(messages=MSGS))
     import struct
     struct.pack_into("<H", img, 0x0A, 9)  # wVer=9 unrecognised
+    db = NodeDatabase.open(FileReader(bytes(img)))
+    assert db.variant is UNICODE
+    assert "VARIANT_FROM_EVIDENCE" in db.header.integrity.codes
+    for idx, exp in enumerate(_expected_payloads(MSGS)):
+        nid = bref.make_nid(bref.NID_TYPE_NORMAL_MESSAGE, idx + 1)
+        assert db.node(nid).data_stream() == exp
+
+
+def test_wrong_wver_overridden_by_root_evidence():
+    # wVer=14 claims ANSI, but the file is Unicode: evidence wins, flagged.
+    img = bytearray(synth.build_unicode_pst(messages=MSGS))
+    import struct
+    struct.pack_into("<H", img, 0x0A, 14)
+    db = NodeDatabase.open(FileReader(bytes(img)))
+    assert db.variant is UNICODE
+    assert "VARIANT_FROM_EVIDENCE" in db.header.integrity.codes
+
+
+def test_bad_magic_opens_and_is_flagged():
+    img = bytearray(synth.build_unicode_pst(messages=MSGS))
+    img[0:4] = b"XXXX"
+    db = NodeDatabase.open(FileReader(bytes(img)))
+    assert db.header.magic_ok is False
+    assert "HEADER_MAGIC_BAD" in db.header.integrity.codes
+    assert sum(1 for _ in db.iter_nbt()) == len(MSGS)
+
+
+def test_unknown_wver_without_evidence_unsupported():
+    img = bytearray(synth.build_unicode_pst(messages=MSGS))
+    import struct
+    struct.pack_into("<H", img, 0x0A, 9)
+    # Smash the root BREF so no variant's NBT root page validates.
+    img[UNICODE.root_offset + 4:UNICODE.root_offset + 72] = b"\xff" * 68
+    img[0xA4:0xA4 + 40] = b"\xff" * 40
     with pytest.raises(UnsupportedStoreError):
         NodeDatabase.open(FileReader(bytes(img)))
 

@@ -482,12 +482,11 @@ class RecoveryEngine:
                     recovery_class = "pc_plus_subnode"
                 subject = self._render_str(message, PID_SUBJECT)
                 # Provenance: a deletion timestamp if the item carries one (H9).
+                # Only PidTagDeletedOn is a deletion time; a delivery time is
+                # merely a lower bound and must never be reported as one.
                 dval = message.render(PID_DELETED_ON)
                 if isinstance(dval, datetime):
                     deleted_on, deleted_on_source = dval, "PidTagDeletedOn"
-                elif isinstance(message.render(PID_MESSAGE_DELIVERY), datetime):
-                    deleted_on = message.render(PID_MESSAGE_DELIVERY)
-                    deleted_on_source = "PidTagMessageDeliveryTime"
             except Exception:
                 truncated = True
                 self.sink.warn(WarnCode.TRUNCATED,

@@ -21,6 +21,8 @@ from typing import Iterator, List, Optional
 
 from ..exceptions import WarnCode, WarningSink
 from ..fileio import FileReader
+from .. import integrity as I
+from ..integrity import Integrity
 from ..ltp.pc import PropertyContext
 from ..mapi import MapiObject
 from ..ndb.bref import (
@@ -70,6 +72,8 @@ class Store:
         self._bootstrap()
         self.named_props = self._load_named_props()
         self.root_folder = self._open_root_folder()
+        self._scan = None
+        self.inventory_stats = None
 
     # -- bootstrap --------------------------------------------------------
     def _bootstrap(self) -> None:
@@ -135,7 +139,7 @@ class Store:
             return None
         pc = PropertyContext.from_node(ref, self.variant, sink=self.sink)
         self.renderer_installer(pc)
-        return Folder(self, pc, nid, sink=self.sink, visited={nid})
+        return Folder(self, pc, nid, sink=self.sink, visited={nid}, noderef=ref)
 
     # -- public surface ---------------------------------------------------
     def folders(self) -> Iterator[Folder]:
@@ -148,6 +152,61 @@ class Store:
     def warnings(self) -> List:
         """The accumulated parse warnings."""
         return self.sink.warnings
+
+    # -- resilience surface (PLAN §14) -------------------------------------
+    def scan(self, *, progress=None, should_abort=None, use_numpy=None):
+        """Run (once) the full-file scan and wire it into block resolution.
+
+        After this, BIDs missing from the BBT (freed blocks of deleted items,
+        a damaged BBT subtree) resolve from on-disk block trailers and are
+        flagged ``BLOCK_FROM_SCAN``.
+        """
+        if self._scan is None or not self._scan.complete:
+            from ..ndb.scan import scan_file
+            db = self.nodedb
+            self._scan = scan_file(
+                db.reader, self.variant, live_nbt=db._nbt, live_bbt=db._bbt,
+                live_page_ibs=set(getattr(db, "page_verdicts", {})),
+                use_numpy=use_numpy, progress=progress, should_abort=should_abort)
+            db._block_reader.attach_scan(self._scan.locate)
+        return self._scan
+
+    def items(self, *, include_fai: bool = False, progress=None,
+              should_abort=None) -> List:
+        """Every message the file holds — live, soft/hard-deleted, orphaned,
+        superseded — each with state, provenance, findings and deletion info
+        (PLAN §14.6).  Policy (what to show) is the caller's."""
+        from .inventory import Inventory
+        scan = self.scan(progress=progress, should_abort=should_abort)
+        inv = Inventory(self, scan, include_fai=include_fai)
+        out = list(inv.items())
+        self.inventory_stats = inv.stats
+        return out
+
+    @property
+    def integrity(self) -> Integrity:
+        """Store-level findings: header, skipped B-tree pages, scan anomalies."""
+        integ = Integrity()
+        hdr = self.nodedb.header.integrity
+        if hdr is not None:
+            integ.extend(hdr.findings)
+        for ib in getattr(self.nodedb, "skipped_pages", ()):
+            integ.add(I.PAGE_UNREADABLE, "B-tree page skipped (not a page)", ib=ib)
+        for ib, v in getattr(self.nodedb, "page_verdicts", {}).items():
+            integ.extend(v.findings())
+        if self._scan is not None:
+            st = self._scan.stats
+            if st.foreign_variant_pages:
+                integ.add("FOREIGN_VARIANT_PAGES",
+                          f"{st.foreign_variant_pages} pages validate only under "
+                          "another variant's geometry")
+            if not self._scan.complete:
+                integ.add("SCAN_INCOMPLETE", "full-file scan aborted")
+        if self.inventory_stats is not None and self.inventory_stats.unresolved_deleted:
+            integ.add("DELETED_CONTENT_LOST",
+                      f"{self.inventory_stats.unresolved_deleted} deleted entries "
+                      "whose data is gone or unparseable")
+        return integ
 
     def __repr__(self) -> str:  # pragma: no cover - debug aid
         return (f"Store(name={self.display_name!r}, variant={self.variant.name}, "

@@ -19,6 +19,7 @@ import struct
 from typing import Iterator, Optional
 
 from ..exceptions import WarnCode, WarningSink
+from ..integrity import Integrity
 from ..ltp.pc import PropertyContext
 from ..ltp.tc import TableContext, PID_LTP_ROW_ID
 from ..mapi import MapiMessage, MapiObject
@@ -44,12 +45,15 @@ class Folder:
     def __init__(self, store, pc: MapiObject, pc_nid: int, *,
                  parent_path: str = "", sink: WarningSink,
                  visited: Optional[set[int]] = None,
-                 include_fai: bool = False):
+                 include_fai: bool = False, noderef=None):
         self._store = store
+        self.integrity = noderef.integrity() if noderef is not None else Integrity()
         self.pc = pc
         self.nid = pc_nid
         self.sink = sink
-        self._visited = visited if visited is not None else set()
+        # Ancestor chain (incl. self): the cycle guard is per path, so walking
+        # the tree twice yields the same folders.
+        self._visited = frozenset(visited or ()) | {pc_nid}
         self._include_fai = include_fai
         self.name = _string_prop(pc, PID_DISPLAY_NAME) or f"0x{pc_nid:08X}"
         self.path = f"{parent_path}/{self.name}" if parent_path else f"/{self.name}"
@@ -88,13 +92,13 @@ class Folder:
                                f"subfolder PC node {child_nid:#x} absent",
                                where=f"folder nid={self.nid:#x}")
                 continue
-            self._visited.add(child_nid)
             child_pc = PropertyContext.from_node(
                 child_ref, self._store.variant, sink=self.sink)
             out.append(Folder(self._store, child_pc, child_nid,
                               parent_path=self.path, sink=self.sink,
-                              visited=self._visited,
-                              include_fai=self._include_fai))
+                              visited=self._visited | {child_nid},
+                              include_fai=self._include_fai,
+                              noderef=child_ref))
         return out
 
     def messages(self) -> list[MapiMessage]:

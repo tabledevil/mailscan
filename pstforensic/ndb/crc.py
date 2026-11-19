@@ -11,6 +11,8 @@ VERIFIED (PLAN Appendix A H3/H4):
 """
 from __future__ import annotations
 
+import zlib
+
 POLY = 0xEDB88320  # reflected CRC-32 polynomial
 
 
@@ -45,11 +47,9 @@ def compute_crc(data: bytes, seed: int = 0) -> int:
     ``seed`` defaults to 0 per the spec (the optional dwCRC argument). No final
     inversion is applied — the running value is returned directly.
     """
-    crc = seed & 0xFFFFFFFF
-    table = _CRC_TABLE
-    for b in data:
-        crc = table[(crc ^ b) & 0xFF] ^ (crc >> 8)
-    return crc & 0xFFFFFFFF
+    # zlib.crc32 pre/post-inverts its running value; feeding it the inverted
+    # seed and inverting the result yields the raw table-driven value.
+    return zlib.crc32(data, (seed & 0xFFFFFFFF) ^ 0xFFFFFFFF) ^ 0xFFFFFFFF
 
 
 def compute_crc_bitwise(data: bytes, seed: int = 0) -> int:

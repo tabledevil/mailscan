@@ -118,3 +118,5 @@ class MapiMessage(MapiObject):
     embedded_messages: list["MapiMessage"] = field(default_factory=list)
     # Recovery provenance (None for live items); set by the recovery engine.
     recovery: Any = None
+    # Per-object integrity findings (pstforensic.integrity.Integrity).
+    integrity: Any = None

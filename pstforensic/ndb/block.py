@@ -22,8 +22,9 @@ from dataclasses import dataclass
 
 from ..exceptions import WarnCode, WarningSink
 from ..fileio import FileReader
+from ..integrity import BlockVerdict
 from ..variant import Variant
-from .bref import bid_is_internal
+from .bref import bid_is_internal, normalize_bid
 from .btree import BBTEntry
 from .crc import compute_crc, compute_sig
 
@@ -66,7 +67,12 @@ def parse_block_trailer(buf: bytes, variant: Variant) -> BlockTrailer:
 
 
 class BlockReader:
-    """Reads and reassembles blocks given a BBT index ``{bid: BBTEntry}``."""
+    """Reads and reassembles blocks given a BBT index ``{bid: BBTEntry}``.
+
+    Every read records a strict :class:`BlockVerdict` in :attr:`verdicts`.
+    BIDs absent from the BBT (freed blocks of deleted items) are located via
+    an attached scan locator (:meth:`attach_scan`) and flagged ``from_scan``.
+    """
 
     def __init__(self, reader: FileReader, variant: Variant, *,
                  bbt: dict[int, BBTEntry], sink: WarningSink,
@@ -77,59 +83,87 @@ class BlockReader:
         self.sink = sink
         self.crypt_method = crypt_method
         self.max_depth = max_depth
+        self.verdicts: dict[int, BlockVerdict] = {}
+        self._scan_locate = None  # Callable[[bid], Optional[(ib, cb)]]
+
+    def attach_scan(self, locate) -> None:
+        """Use ``locate(bid) -> (ib, cb) | None`` for BIDs missing from the BBT."""
+        self._scan_locate = locate
+
+    def locate(self, bid: int) -> tuple[int, int, bool] | None:
+        """Return ``(ib, cb, from_scan)`` for ``bid``, or ``None``."""
+        ent = self.bbt.get(bid)
+        if ent is not None:
+            return ent.bref.ib, ent.cb, False
+        if self._scan_locate is not None:
+            hit = self._scan_locate(bid)
+            if hit is not None:
+                return hit[0], hit[1], True
+        return None
 
     # -- raw block bytes --------------------------------------------------
     def read_raw(self, bid: int) -> bytes | None:
         """Return the ``cb`` payload bytes of block ``bid`` (no decode).
 
-        Verifies the trailer ``bid``/``cb`` and the advisory CRC; on a CRC/sig
-        mismatch it warns but still returns the data ([MS-PST] §4.6 advisory).
+        Never gates on CRC/signature: a mismatch is recorded in the block's
+        verdict (and mirrored to the sink) and the data is still returned.
         """
-        ent = self.bbt.get(bid)
-        if ent is None:
+        loc = self.locate(bid)
+        where = f"bid={bid:#x}"
+        if loc is None:
+            self.verdicts[bid] = BlockVerdict(bid=bid, ib=None, missing=True)
             self.sink.warn(WarnCode.OUT_OF_BOUNDS, f"bid {bid:#x} not in BBT",
-                           where=f"bid={bid:#x}")
+                           where=where)
             return None
-        cb = ent.cb
+        ib, cb, from_scan = loc
         disk = block_disk_size(cb, self.variant)
-        buf = self.reader.read(ent.bref.ib, disk, where=f"block@{ent.bref.ib:#x}")
-        if len(buf) < disk:
-            self.sink.warn(WarnCode.TRUNCATED,
-                           f"short block {len(buf)}/{disk}",
-                           where=f"bid={bid:#x}")
+        buf = self.reader.read(ib, disk, where=f"block@{ib:#x}")
+        complete = len(buf) >= disk
+        if not complete:
+            self.sink.warn(WarnCode.TRUNCATED, f"short block {len(buf)}/{disk}",
+                           where=where)
+            self.verdicts[bid] = BlockVerdict(bid=bid, ib=ib, complete=False,
+                                              crc_ok=False, sig_ok=False,
+                                              from_scan=from_scan)
             if len(buf) < cb:
                 return buf[:cb] if buf else None
+            return buf[:cb]
         payload = buf[:cb]
         tr = parse_block_trailer(buf, self.variant)
-        where = f"bid={bid:#x}"
-        if tr.cb != cb:
+        cb_ok = tr.cb == cb
+        bid_ok = normalize_bid(tr.bid) == bid
+        crc_ok = compute_crc(payload) == tr.dw_crc
+        sig_ok = compute_sig(ib, tr.bid) == tr.w_sig
+        self.verdicts[bid] = BlockVerdict(bid=bid, ib=ib, crc_ok=crc_ok,
+                                          sig_ok=sig_ok, bid_ok=bid_ok,
+                                          cb_ok=cb_ok, from_scan=from_scan)
+        if not cb_ok:
             self.sink.warn(WarnCode.BLOCK_CRC_FAIL,
                            f"trailer cb {tr.cb} != BBT cb {cb}", where)
-        from .bref import normalize_bid
-        if normalize_bid(tr.bid) != bid:
+        if not bid_ok:
             self.sink.warn(WarnCode.SIG_MISMATCH,
                            f"trailer bid {tr.bid:#x} != {bid:#x}", where)
-        # CRC over cb bytes only (excludes padding — explicit spec rule).
-        calc = compute_crc(payload)
-        if calc != tr.dw_crc:
-            self.sink.warn(WarnCode.BLOCK_CRC_FAIL,
-                           f"block CRC stored={tr.dw_crc:#010x} calc={calc:#010x}",
-                           where)
-        sig = compute_sig(ent.bref.ib, tr.bid)
-        if sig != tr.w_sig:
-            self.sink.warn(WarnCode.SIG_MISMATCH,
-                           f"wSig stored={tr.w_sig:#06x} calc={sig:#06x}", where)
+        if not crc_ok:
+            self.sink.warn(WarnCode.BLOCK_CRC_FAIL, "block CRC mismatch", where)
+        if not sig_ok:
+            self.sink.warn(WarnCode.SIG_MISMATCH, "block wSig mismatch", where)
         return payload
 
     # -- decoded data stream ---------------------------------------------
-    def read_data_stream(self, bid: int) -> bytes:
+    def read_data_stream(self, bid: int, touched: set[int] | None = None) -> bytes:
         """Resolve a node's data BID into its full decoded byte stream.
 
         Handles a single data block, or fans out an XBLOCK (cLevel 1) /
         XXBLOCK (cLevel 2) tree, concatenating child data blocks in order.
         Decode is applied to leaf data blocks only.  Depth- and cycle-guarded.
+        Every BID read is added to ``touched`` (per-node integrity).
         """
-        return self._read_data(bid, depth=0, seen=set())
+        seen: set[int] = set()
+        try:
+            return self._read_data(bid, depth=0, seen=seen)
+        finally:
+            if touched is not None:
+                touched |= seen
 
     def _read_data(self, bid: int, depth: int, seen: set[int]) -> bytes:
         if depth > self.max_depth:
@@ -170,9 +204,7 @@ class BlockReader:
         base = 8
         for i in range(c_ent):
             o = base + i * w
-            child = int.from_bytes(raw[o:o + w], "little")
-            from .bref import normalize_bid
-            child = normalize_bid(child)
+            child = normalize_bid(int.from_bytes(raw[o:o + w], "little"))
             out += self._read_data(child, depth + 1, seen)
         if lcb_total and len(out) != lcb_total:
             self.sink.warn(WarnCode.TRUNCATED,
