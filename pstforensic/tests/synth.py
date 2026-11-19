@@ -1039,7 +1039,8 @@ def build_unicode_pst_tree(*, store_name: str = "Personal Folders",
                            slack_deleted: bool = False,
                            superseded: bool = False,
                            moved: bool = False,
-                           filler_block: int = 0) -> bytes:
+                           filler_block: int = 0,
+                           extra_messages: int = 0) -> bytes:
     """Build a Unicode PST with a folder tree, messages, recipients & attachments.
 
     Layout produced (NIDs share ``nidIndex`` across the PC + 3 TCs, [MS-PST] §2.4):
@@ -1067,6 +1068,8 @@ def build_unicode_pst_tree(*, store_name: str = "Personal Folders",
       stale entry whose parent is the root folder (a move trail).
     * ``filler_block`` — a live, unreferenced data block of that many zero
       bytes (stands in for attachment payload; tests plant structures in it).
+    * ``extra_messages`` — that many more Inbox messages ("Bulk N"), enough
+      to make the NBT multi-level (leaf pages under an intermediate page).
     """
     b = _PstBuilder(UNICODE, crypt)
 
@@ -1162,10 +1165,13 @@ def build_unicode_pst_tree(*, store_name: str = "Personal Folders",
     # Inbox hierarchy TC: empty (no subfolders).
     _add_empty_tc(b, make_nid(NID_TYPE_HIERARCHY_TABLE, inbox_index))
     # Inbox contents TC: two rows (dwRowID = message NID).
+    extra = [(make_nid(NID_TYPE_NORMAL_MESSAGE, 0x100 + i), f"Bulk {i}")
+             for i in range(extra_messages)]
     c_heap, c_mat = build_tc_bytes(
         [(_PID_SUBJECT, 4)],
         [(msg1_nid, {_PID_SUBJECT: "Wire transfer".encode("utf-16-le")}),
-         (msg2_nid, {_PID_SUBJECT: "Lunch?".encode("utf-16-le")})])
+         (msg2_nid, {_PID_SUBJECT: "Lunch?".encode("utf-16-le")})]
+        + [(n, {_PID_SUBJECT: subj.encode("utf-16-le")}) for n, subj in extra])
     add_raw_node(make_nid(NID_TYPE_CONTENTS_TABLE, inbox_index), c_heap,
                  parent=inbox_pc_nid, subnodes=[_only_sub(b, c_mat)])
     _add_empty_tc(b, make_nid(NID_TYPE_ASSOC_CONTENTS_TABLE, inbox_index))
@@ -1265,6 +1271,12 @@ def build_unicode_pst_tree(*, store_name: str = "Personal Folders",
             _PID_SENDER_NAME: "Mallory".encode("utf-16-le"),
             _PID_SENDER_EMAIL: "mallory@evil.example".encode("utf-16-le"),
             _PID_BODY: "This message was deleted.".encode("utf-16-le"),
+            _PID_MESSAGE_CLASS: "IPM.Note".encode("utf-16-le"),
+        }, parent=inbox_pc_nid)
+
+    for n, subj in extra:
+        add_pc_node(n, {
+            _PID_SUBJECT: subj.encode("utf-16-le"),
             _PID_MESSAGE_CLASS: "IPM.Note".encode("utf-16-le"),
         }, parent=inbox_pc_nid)
 

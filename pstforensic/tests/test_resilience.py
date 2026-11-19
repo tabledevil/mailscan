@@ -199,3 +199,69 @@ def test_folder_walk_is_repeatable():
     first = [f.path for f in st.folders()]
     assert first == [f.path for f in st.folders()] == [
         "/Personal Folders", "/Personal Folders/Inbox"]
+
+
+# --- damaged NBT: the Kernel case ------------------------------------------------
+def _nbt_pages(img):
+    db = NodeDatabase.open(FileReader(bytes(img)))
+    root = db.header.root.bref_nbt.ib
+    leaves = [ib for ib, v in db.page_verdicts.items()
+              if v.ptype == 0x81 and ib != root]
+    return db, root, leaves
+
+
+def test_destroyed_inner_nbt_page_items_stay_live():
+    img = bytearray(synth.build_unicode_pst_tree(extra_messages=40))
+    _db, root, _leaves = _nbt_pages(img)
+    img[root + 0x1E8:root + 0x200] = b"\x00" * 0x18    # counters + trailer gone
+    st = open_store(bytes(img))
+    items = st.items()
+    assert len(items) == 42
+    assert {i.state for i in items} == {"live_damaged"}
+    assert all(i.provenance == "scan_nbt" for i in items)
+    assert all("NODE_FROM_SCAN" in i.integrity.codes for i in items)
+    assert {i.folder_path for i in items} == {"/Personal Folders/Inbox"}
+    assert "PAGE_UNREADABLE" in st.integrity.codes
+
+
+def test_nbt_leaf_crc_damage_flagged_not_fatal():
+    img = bytearray(synth.build_unicode_pst_tree(extra_messages=40))
+    _db, _root, leaves = _nbt_pages(img)
+    leaf = sorted(leaves)[-1]
+    img[leaf + 0x1F0 + 4] ^= 0xFF                        # page dwCRC only
+    st = open_store(bytes(img))
+    items = st.items()
+    assert len(items) == 42
+    hit = [i for i in items if "PAGE_CRC_FAIL" in i.integrity.codes]
+    assert hit and all(i.state == "live_damaged" for i in hit)
+    assert all(i.provenance == "btree" for i in items)
+
+
+def test_unreachable_entry_with_damaged_nbt_is_lost_not_deleted():
+    img = bytearray(synth.build_unicode_pst_tree(hard_deleted=True, extra_messages=40))
+    _db, root, _leaves = _nbt_pages(img)
+    img[root + 0x1E8:root + 0x200] = b"\x00" * 0x18
+    st = open_store(bytes(img))
+    by = {i.subject: i for i in st.items()}
+    assert by["Hard deleted"].state == "lost"
+    assert by["Hard deleted"].deletion.kind == "unknown"
+
+
+# --- crypt ladder ------------------------------------------------------------
+@pytest.mark.parametrize("header_value", [CRYPT_NONE, CRYPT_CYCLIC, 0x55])
+def test_wrong_crypt_header_decodes_from_evidence(header_value):
+    img = bytearray(synth.build_unicode_pst_tree(crypt=CRYPT_PERMUTE))
+    img[UNICODE.crypt_method_offset] = header_value
+    st = open_store(bytes(img))
+    by = {i.subject: i for i in st.items()}
+    assert set(by) == {"Wire transfer", "Lunch?"}
+    assert by["Wire transfer"].message.render(0x1000) == "Please wire $1,000,000 today."
+    assert all("CRYPT_FROM_EVIDENCE" in i.integrity.codes for i in by.values())
+    if header_value == 0x55:
+        assert "CRYPT_METHOD_UNKNOWN" in st.integrity.codes
+
+
+def test_correct_crypt_header_has_no_crypt_findings():
+    st = open_store(synth.build_unicode_pst_tree(crypt=CRYPT_CYCLIC))
+    for i in st.items():
+        assert not {c for c in i.integrity.codes if c.startswith("CRYPT")}
