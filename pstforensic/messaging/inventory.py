@@ -8,6 +8,9 @@
   * ``deleted`` — NID absent from the live NBT; entry survives in a stale NBT
     page (``provenance="stale_page"``) or beyond ``cEnt`` (``"slack_slot"``).
   * ``superseded`` — an older, *different* version of a live or deleted item.
+  * ``carved`` — a freed message PC block no entry references any more;
+    taken only when signature ∧ CRC ∧ heap structure ∧ PidTagMessageClass
+    hold, no other item uses the block and the content is new.
   * ``lost`` — only when the NBT itself is damaged: the newest on-disk entry
     of a NID no folder lists.  Deleted or cut off by the damage — undecidable.
 
@@ -106,6 +109,14 @@ class Item:
     history: list[HistoryEntry] = field(default_factory=list)
     supersedes: Optional[int] = None   # for superseded: the NID of the newer item
     copies: int = 1                    # identical on-disk copies collapsed
+    bid: Optional[int] = None          # carved items: the PC block (no NID survives)
+    entry: Optional[object] = field(default=None, repr=False)   # NBT entry used
+    _store: Optional[object] = field(default=None, repr=False, compare=False)
+
+    def recover(self):
+        """Deep salvage (PLAN §14.8) — see :func:`pstforensic.messaging.salvage.salvage`."""
+        from .salvage import salvage
+        return salvage(self._store, self)
 
     @property
     def subject(self) -> Optional[str]:
@@ -120,6 +131,41 @@ class InventoryStats:
     unresolved_deleted: int = 0    # deleted entries whose data is gone/unparseable
     unresolved_stale: int = 0      # stale versions of live items unparseable
     identical_stale: int = 0       # stale copies identical to the live item
+    carved_duplicates: int = 0     # carved PCs whose content another item has
+
+
+def all_touched(ref) -> set[int]:
+    """BIDs a node and its materialised subnodes read."""
+    out = set(getattr(ref, "touched", ()))
+    for child in (getattr(ref, "_subnodes", None) or {}).values():
+        out |= all_touched(child)
+    return out
+
+
+class _CarvedRef:
+    """A NodeRef stand-in for a single carved, already-decoded PC block."""
+
+    def __init__(self, bid: int, plain: bytes, ib: int):
+        self.nid = 0
+        self.bid_data = bid
+        self.bid_sub = 0
+        self.nid_parent = 0
+        self.touched = {bid}
+        self.from_scan = True
+        self._plain = plain
+        self._ib = ib
+
+    def data_stream(self) -> bytes:
+        return self._plain
+
+    def subnodes(self) -> dict:
+        return {}
+
+    def integrity(self, *, deep: bool = True) -> Integrity:
+        integ = Integrity(level=I.CONSISTENT)
+        integ.add(I.BLOCK_FROM_SCAN, bid=self.bid_data, ib=self._ib)
+        integ.add(I.SUBNODES_UNKNOWN, "recipients/attachments not bound", bid=self.bid_data)
+        return integ
 
 
 def content_fingerprint(msg: MapiMessage) -> bytes:
@@ -193,6 +239,7 @@ class Inventory:
         self.reachable: set[int] = set()
         self.deleted_folder_names: dict[int, str] = {}
         self.history: dict[int, list[HistoryEntry]] = {}
+        self.used_bids: set[int] = set()   # every BID some item's read touched
 
     # -- helpers ----------------------------------------------------------
     def _message_types(self) -> tuple[int, ...]:
@@ -204,6 +251,8 @@ class Inventory:
                                 renderer_installer=self.store.renderer_installer)
         except Exception:
             return None
+        finally:
+            self.used_bids |= all_touched(ref)
         mclass = _render_text(msg, PID_MESSAGE_CLASS)
         if mclass is None:
             return None
@@ -317,6 +366,7 @@ class Inventory:
             versions: dict[bytes, list] = {}
             order: list[bytes] = []
             for slot in sorted(slots, key=lambda s: s.entry.bid_data, reverse=True):
+                self.used_bids.update(b for b in (slot.entry.bid_data, slot.entry.bid_sub) if b)
                 ref = self.db.node_from_entry(slot.entry)
                 msg = self._build(ref)
                 if msg is None:
@@ -363,7 +413,8 @@ class Inventory:
                 integ.level = I.INFERRED if state == "superseded" else I.CONSISTENT
                 yield Item(nid=nid, state=state, provenance=prov, message=msg,
                            folder_path=folder, integrity=integ, deletion=deletion,
-                           supersedes=supersedes, copies=len(versions[fp]))
+                           supersedes=supersedes, copies=len(versions[fp]),
+                           entry=slot.entry)
 
     def _orphans(self) -> Iterator[Item]:
         for ent in self.db.iter_nbt():
@@ -381,10 +432,51 @@ class Inventory:
             yield Item(nid=ent.nid, state="orphan", provenance="btree", message=msg,
                        folder_path=folder, integrity=integ,
                        deletion=_deletion_info(msg, "orphan", folder, ent.nid_parent),
-                       history=self.history.get(ent.nid, []))
+                       history=self.history.get(ent.nid, []), entry=ent)
+
+    def _carved(self, known: set[bytes]) -> Iterator[Item]:
+        """Freed message PC blocks that no surviving entry references."""
+        from ..ndb.block import looks_like_heap
+        from ..ndb.crypt import decode_block
+        br = self.db._block_reader
+        for bid, copies in self.scan.blocks.items():
+            if bid & 0x2 or bid in self.used_bids or bid in self.db._bbt:
+                continue
+            strong = [c for c in copies if c.strong and c.variant == self.variant.name]
+            if not strong:
+                continue
+            blk = strong[0]
+            raw = self.db.reader.read(blk.ib, blk.cb)
+            plain = None
+            for m in br.crypt_order:
+                cand = decode_block(raw, m, bid)
+                if looks_like_heap(cand) and cand[3] == 0xBC:
+                    plain = cand
+                    break
+            if plain is None:
+                continue
+            msg = self._build(_CarvedRef(bid, plain, blk.ib))
+            if msg is None:
+                continue
+            fp = content_fingerprint(msg)
+            if fp in known:
+                self.stats.carved_duplicates += 1
+                continue
+            known.add(fp)
+            yield Item(nid=0, state="carved", provenance="free_space", message=msg,
+                       folder_path=None, integrity=msg.integrity or Integrity(),
+                       deletion=_deletion_info(msg, "hard", None, None), bid=bid)
 
     # -- public ---------------------------------------------------------------
     def items(self) -> Iterator[Item]:
+        produced = list(self._items())
+        known = {content_fingerprint(i.message) for i in produced if i.message is not None}
+        produced.extend(self._carved(known))
+        for it in produced:
+            it._store = self.store
+        return iter(produced)
+
+    def _items(self) -> Iterator[Item]:
         pairs = self._walk_live()
         self._collect_deleted_folders()
         scan_items = list(self._scan_items())   # fills self.history first
@@ -406,6 +498,7 @@ class Inventory:
                        provenance="scan_nbt" if ref.from_scan else "btree", message=msg,
                        folder_path=folder.path, integrity=integ,
                        deletion=_deletion_info(msg, "soft", None, None) if soft else None,
-                       history=self.history.get(nid, []))
+                       history=self.history.get(nid, []),
+                       entry=self.db._nbt.get(nid) or self.db.scan_entry(nid))
         yield from self._orphans()
         yield from scan_items

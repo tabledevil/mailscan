@@ -117,6 +117,7 @@ class BlockReader:
         self.max_depth = max_depth
         self.verdicts: dict[int, BlockVerdict] = {}
         self._scan_locate = None  # Callable[[bid], Optional[(ib, cb)]]
+        self.prefer: dict[int, tuple[int, int]] = {}  # recover(): alternate copies
         # Crypt ladder (PLAN §14.4): try every method on a stream's first
         # block, accept only on heap-structure evidence, learn the order.
         self.crypt_order = ([crypt_method] if crypt_method in _CRYPT_METHODS else []) + \
@@ -131,6 +132,9 @@ class BlockReader:
 
     def locate(self, bid: int) -> tuple[int, int, bool] | None:
         """Return ``(ib, cb, from_scan)`` for ``bid``, or ``None``."""
+        alt = self.prefer.get(bid)
+        if alt is not None:
+            return alt[0], alt[1], True
         ent = self.bbt.get(bid)
         if ent is not None:
             return ent.bref.ib, ent.cb, False

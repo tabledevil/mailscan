@@ -78,6 +78,7 @@ class Store:
         self.root_folder = self._open_root_folder()
         self._scan = nodedb._scan
         self.inventory_stats = None
+        self._last_items = []
 
     # -- bootstrap --------------------------------------------------------
     def _bootstrap(self) -> None:
@@ -179,7 +180,13 @@ class Store:
         inv = Inventory(self, scan, include_fai=include_fai)
         out = list(inv.items())
         self.inventory_stats = inv.stats
+        self._last_items = out
         return out
+
+    def recover(self, item):
+        """Deep salvage of one item (PLAN §14.8); same as ``item.recover()``."""
+        from .salvage import salvage
+        return salvage(self, item)
 
     @property
     def integrity(self) -> Integrity:

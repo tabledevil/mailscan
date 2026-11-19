@@ -23,6 +23,8 @@ class MapiValue:
     # split element byte-strings once parsed by the LTP/MSG reader.
     elements: Optional[list[bytes]] = None
     encoding: Optional[str] = None  # filled by the string renderer when relevant
+    encoding_level: Optional[str] = None   # verified/consistent/inferred/guessed/raw_only
+    encoding_source: Optional[str] = None  # which property/heuristic chose the codepage
     _decoded: Any = None
     _decoded_set: bool = False
 

@@ -265,3 +265,55 @@ def test_correct_crypt_header_has_no_crypt_findings():
     st = open_store(synth.build_unicode_pst_tree(crypt=CRYPT_CYCLIC))
     for i in st.items():
         assert not {c for c in i.integrity.codes if c.startswith("CRYPT")}
+
+
+# --- carving & salvage --------------------------------------------------------------
+def test_unreferenced_freed_message_is_carved_once():
+    st = open_store(synth.build_unicode_pst_tree(carvable=True))
+    items = st.items()
+    carved = [i for i in items if i.state == "carved"]
+    assert [i.subject for i in carved] == ["Only in free space"]
+    c = carved[0]
+    assert c.provenance == "free_space" and c.nid == 0 and c.bid
+    assert {"BLOCK_FROM_SCAN", "SUBNODES_UNKNOWN"} <= c.integrity.codes
+    assert c.deletion.kind == "hard"
+    # The freed exact copy of a live message collapses into it.
+    assert st.inventory_stats.carved_duplicates == 1
+    assert sum(1 for i in items if i.subject == "Lunch?") == 1
+
+
+def test_embedded_message_pc_is_not_carved_twice():
+    st = open_store(synth.build_unicode_pst_tree(hard_deleted=True, carvable=True))
+    subjects = [i.subject for i in st.items()]
+    assert "Embedded note" not in subjects
+
+
+def test_recover_offers_older_versions_and_fragments():
+    st = open_store(synth.build_unicode_pst_tree(**RESIDUE))
+    items = st.items()
+    lunch = next(i for i in items if i.state == "live" and i.subject == "Lunch?")
+    res = lunch.recover()
+    assert [a.subject for a in res.alternatives] == ["Lunch? (draft)"]
+    assert "Lunch?" in " ".join(res.fragments)
+    hard = next(i for i in items if i.subject == "Hard deleted")
+    assert any("Gone from the NBT" in f for f in hard.recover().fragments)
+
+
+def test_recover_rereads_from_a_verified_copy():
+    # Damage msg 2's live PC block payload; plant an intact copy of the same
+    # BID elsewhere (as a freed block) — recover() must prefer it.
+    img = bytearray(synth.build_unicode_pst_tree())
+    db = NodeDatabase.open(FileReader(bytes(img)))
+    ent = db._bbt[db.node(0x44).bid_data]
+    good = bytes(img[ent.bref.ib:ent.bref.ib + ent.cb])
+    tail = len(img) + (-len(img) % 512)               # copy lives past the old EOF
+    img.extend(b"\x00" * (tail - len(img)))
+    copy = synth._Block(bid=ent.bref.raw_bid, payload=good, internal=False, ib=tail)
+    img.extend(synth._emit_block(copy, UNICODE))
+    img[ent.bref.ib + 8] ^= 0xFF                      # corrupt the live payload
+    st = open_store(bytes(img))
+    lunch = next(i for i in st.items() if i.nid == 0x44)
+    assert "BLOCK_CRC_FAIL" in lunch.integrity.codes
+    res = lunch.recover()
+    assert "RECOVERED_ALT_COPY" in res.item.integrity.codes
+    assert res.item.subject == "Lunch?"

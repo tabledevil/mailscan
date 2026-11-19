@@ -1040,7 +1040,8 @@ def build_unicode_pst_tree(*, store_name: str = "Personal Folders",
                            superseded: bool = False,
                            moved: bool = False,
                            filler_block: int = 0,
-                           extra_messages: int = 0) -> bytes:
+                           extra_messages: int = 0,
+                           carvable: bool = False) -> bytes:
     """Build a Unicode PST with a folder tree, messages, recipients & attachments.
 
     Layout produced (NIDs share ``nidIndex`` across the PC + 3 TCs, [MS-PST] §2.4):
@@ -1070,6 +1071,9 @@ def build_unicode_pst_tree(*, store_name: str = "Personal Folders",
       bytes (stands in for attachment payload; tests plant structures in it).
     * ``extra_messages`` — that many more Inbox messages ("Bulk N"), enough
       to make the NBT multi-level (leaf pages under an intermediate page).
+    * ``carvable`` — a freed message PC ("Only in free space") that no NBT
+      entry anywhere references, plus a freed exact copy of msg 2's PC
+      (must collapse, not become an item).
     """
     b = _PstBuilder(UNICODE, crypt)
 
@@ -1321,6 +1325,18 @@ def build_unicode_pst_tree(*, store_name: str = "Personal Folders",
         b.stale_nbt_pages.append(stale)
     if filler_block:
         b.add_data_block(b"\x00" * filler_block)
+    if carvable:
+        b.add_data_block(build_pc_bytes({
+            _PID_SUBJECT: "Only in free space".encode("utf-16-le"),
+            _PID_SENDER_NAME: "Oscar".encode("utf-16-le"),
+            _PID_MESSAGE_CLASS: "IPM.Note".encode("utf-16-le"),
+        }), free=True)
+        b.add_data_block(build_pc_bytes({
+            _PID_SUBJECT: "Lunch?".encode("utf-16-le"),
+            _PID_SENDER_NAME: "Frank".encode("utf-16-le"),
+            _PID_SENDER_EMAIL: "frank@example.com".encode("utf-16-le"),
+            _PID_MESSAGE_CLASS: "IPM.Note".encode("utf-16-le"),
+        }), free=True)
 
     image = b.build()
     if corrupt == "truncate":

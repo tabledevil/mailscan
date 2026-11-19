@@ -342,7 +342,37 @@ def test_render_value_string_records_encoding():
     tag = make_tag(0x0037, PropType.STRING8)
     obj.add(MapiValue(tag, "abc".encode("cp1252")))
     assert render_value(obj, tag) == "abc"
-    assert obj.get_tag(tag).encoding == "cp1252"
+    # Pure ASCII: every codepage agrees, so the decode is verified.
+    assert obj.get_tag(tag).encoding == "ascii"
+    assert obj.get_tag(tag).encoding_level == "verified"
+
+
+def test_string8_levels_follow_the_evidence():
+    from pstforensic.render.strings import decode_string_ex
+    raw = "Grüße".encode("cp1252")
+    d = decode_string_ex(raw, PropType.STRING8)
+    assert (d.text, d.level, d.source) == ("Grüße", "guessed", "default-1252")
+    d = decode_string_ex(raw, PropType.STRING8, codepage=1252,
+                         codepage_source="PidTagInternetCodepage")
+    assert (d.text, d.level) == ("Grüße", "consistent")
+    d = decode_string_ex("Привет".encode("cp1251"), PropType.STRING8, codepage=1251,
+                         codepage_source="PidTagMessageLocaleId")
+    assert (d.text, d.level) == ("Привет", "inferred")
+    # A declared multi-byte codepage the bytes contradict is not trusted.
+    d = decode_string_ex(b"\xff\xfe\xfd", PropType.STRING8, codepage=65001,
+                         codepage_source="PidTagInternetCodepage")
+    assert d.level in ("guessed", "raw_only")
+    assert decode_string_ex("x".encode("utf-16-le"), PropType.STRING).level == "verified"
+
+
+def test_string8_level_recorded_on_value_from_message_codepage():
+    obj = MapiObject()
+    obj.add(MapiValue(make_tag(0x3FFD, PropType.INTEGER32), (1251).to_bytes(4, "little")))
+    tag = make_tag(0x0037, PropType.STRING8)
+    obj.add(MapiValue(tag, "Отчёт".encode("cp1251")))
+    assert render_value(obj, tag) == "Отчёт"
+    v = obj.get_tag(tag)
+    assert (v.encoding_level, v.encoding_source) == ("consistent", "PidTagMessageCodepage")
 
 
 def test_render_value_multivalue_strings():
