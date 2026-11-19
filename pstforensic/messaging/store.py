@@ -69,10 +69,14 @@ class Store:
         self.has_password: bool = False
         self._root_folder_nid: Optional[int] = None
 
+        if nodedb.nbt_damaged:
+            # The B-tree cannot reach every node: harvest the file first so
+            # the bootstrap and folder walk resolve nodes from the scan.
+            nodedb.scan()
         self._bootstrap()
         self.named_props = self._load_named_props()
         self.root_folder = self._open_root_folder()
-        self._scan = None
+        self._scan = nodedb._scan
         self.inventory_stats = None
 
     # -- bootstrap --------------------------------------------------------
@@ -161,14 +165,8 @@ class Store:
         a damaged BBT subtree) resolve from on-disk block trailers and are
         flagged ``BLOCK_FROM_SCAN``.
         """
-        if self._scan is None or not self._scan.complete:
-            from ..ndb.scan import scan_file
-            db = self.nodedb
-            self._scan = scan_file(
-                db.reader, self.variant, live_nbt=db._nbt, live_bbt=db._bbt,
-                live_page_ibs=set(getattr(db, "page_verdicts", {})),
-                use_numpy=use_numpy, progress=progress, should_abort=should_abort)
-            db._block_reader.attach_scan(self._scan.locate)
+        self._scan = self.nodedb.scan(progress=progress, should_abort=should_abort,
+                                      use_numpy=use_numpy)
         return self._scan
 
     def items(self, *, include_fai: bool = False, progress=None,

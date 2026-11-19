@@ -8,6 +8,11 @@
   * ``deleted`` — NID absent from the live NBT; entry survives in a stale NBT
     page (``provenance="stale_page"``) or beyond ``cEnt`` (``"slack_slot"``).
   * ``superseded`` — an older, *different* version of a live or deleted item.
+  * ``lost`` — only when the NBT itself is damaged: the newest on-disk entry
+    of a NID no folder lists.  Deleted or cut off by the damage — undecidable.
+
+Nodes a live folder still lists are live even when only the scan can place
+them (``provenance="scan_nbt"``, finding ``NODE_FROM_SCAN``).
 
 Identical stale copies are never items: same entry ⇒ counted by the scan;
 same content under another parent ⇒ a ``moved`` entry in the live item's
@@ -293,10 +298,19 @@ class Inventory:
                 continue
             groups.setdefault(slot.entry.nid, []).append(slot)
 
+        nbt_damaged = self.db.nbt_damaged
         for nid, slots in groups.items():
             live_ent = live_nbt.get(nid)
+            if live_ent is None and nid in self.reachable:
+                live_ent = self.db.scan_entry(nid)   # listed by a folder: current
+            newest = self.db.scan_entry(nid)
             live_fp = None
             if live_ent is not None:
+                cur = (live_ent.bid_data, live_ent.bid_sub, live_ent.nid_parent)
+                slots = [sl for sl in slots if (sl.entry.bid_data, sl.entry.bid_sub,
+                                                sl.entry.nid_parent) != cur]
+                if not slots:
+                    continue
                 live_msg = self._build(self.db.node(nid))
                 live_fp = content_fingerprint(live_msg) if live_msg else None
             # Newest first: BIDs are allocated monotonically.
@@ -337,8 +351,10 @@ class Inventory:
                 folder = self._folder_path(parent)
                 prov = "slack_slot" if slot.beyond_cent else "stale_page"
                 if live_ent is None and i == 0:
-                    state = "deleted"
-                    deletion = _deletion_info(msg, "hard", folder, parent)
+                    lost = (nbt_damaged and slot.entry is newest and not slot.beyond_cent)
+                    state = "lost" if lost else "deleted"
+                    deletion = _deletion_info(msg, "unknown" if lost else "hard",
+                                              folder, parent)
                     supersedes = None
                 else:
                     state = "superseded"
@@ -385,7 +401,9 @@ class Inventory:
                 integ.extend(msg.integrity.findings)
             soft = folder.nid in self.soft_folders
             state = "soft_deleted" if soft else ("live_damaged" if not integ.ok else "live")
-            yield Item(nid=nid, state=state, provenance="btree", message=msg,
+            integ.level = msg.integrity.level if msg.integrity is not None else integ.level
+            yield Item(nid=nid, state=state,
+                       provenance="scan_nbt" if ref.from_scan else "btree", message=msg,
                        folder_path=folder.path, integrity=integ,
                        deletion=_deletion_info(msg, "soft", None, None) if soft else None,
                        history=self.history.get(nid, []))

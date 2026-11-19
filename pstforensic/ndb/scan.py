@@ -53,8 +53,10 @@ except ImportError:  # pragma: no cover - exercised via use_numpy=False
     _np = None
 
 MAX_BLOCK_CB = 8192
-# NID types worth harvesting: folders, search folders, messages, FAI messages.
-HARVEST_NID_TYPES = frozenset({0x02, 0x03, 0x04, 0x08})
+# NID types worth harvesting: internal (store PC 0x21, name map 0x61), folders,
+# search folders, messages, FAI messages and the folder tables — enough to
+# rebuild a store whose NBT root or inner pages are destroyed.
+HARVEST_NID_TYPES = frozenset({0x01, 0x02, 0x03, 0x04, 0x08, 0x0D, 0x0E, 0x0F})
 CHUNK = 64 * 1024 * 1024
 
 
@@ -91,6 +93,7 @@ class ScannedSlot:
     entry: NBTEntry
     variant: str
     beyond_cent: bool
+    page_bid: int           # trailer BID of the page: higher = newer copy
     page_live: bool         # the page it sits in is a live B-tree page
     page_crc_ok: bool
     page_sig_ok: bool
@@ -417,7 +420,8 @@ def _take_page(idx: ScanIndex, mv, ib: int, v: Variant, store_variant: Variant,
                 st.live_duplicate_slots += 1
                 continue
             idx.slots.append(ScannedSlot(entry=ent, variant=v.name,
-                                         beyond_cent=slot >= c_ent, page_live=is_live,
+                                         beyond_cent=slot >= c_ent, page_bid=tr.bid,
+                                         page_live=is_live,
                                          page_crc_ok=crc_ok, page_sig_ok=sig_ok))
             if v is store_variant:
                 for b in (ent.bid_data, ent.bid_sub):

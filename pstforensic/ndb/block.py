@@ -22,7 +22,7 @@ from dataclasses import dataclass
 
 from ..exceptions import WarnCode, WarningSink
 from ..fileio import FileReader
-from ..integrity import BlockVerdict
+from ..integrity import GUESSED, INFERRED, VERIFIED, BlockVerdict
 from ..variant import Variant
 from .bref import bid_is_internal, normalize_bid
 from .btree import BBTEntry
@@ -30,6 +30,38 @@ from .crc import compute_crc, compute_sig
 
 BTYPE_XBLOCK = 0x01   # XBLOCK / XXBLOCK ([MS-PST] §2.2.2.8.3.2)
 BTYPE_SUBNODE = 0x02  # SLBLOCK / SIBLOCK ([MS-PST] §2.2.2.8.3.3)
+
+
+# bClientSig values of a real Heap-on-Node ([MS-PST] §2.3.1.2).
+HN_CLIENT_SIGS = frozenset({0x6C, 0x7C, 0x8C, 0x9C, 0xA5, 0xAC, 0xB5, 0xBC})
+_CRYPT_METHODS = (0, 1, 2)
+
+
+def looks_like_heap(plain: bytes) -> bool:
+    """True iff ``plain`` is the first block of a Heap-on-Node.
+
+    HNHDR bSig 0xEC + known bClientSig + an HNPAGEMAP whose rgibAlloc starts
+    right after the 12-byte HNHDR, never decreases and ends at or before
+    ``ibHnpm``.  A wrongly decoded block passes this with negligible
+    probability — the evidence the crypt ladder relies on (PLAN §14.4).
+    """
+    if len(plain) < 16 or plain[2] != 0xEC or plain[3] not in HN_CLIENT_SIGS:
+        return False
+    ib_hnpm = int.from_bytes(plain[0:2], "little")
+    if ib_hnpm < 12 or ib_hnpm + 4 > len(plain):
+        return False
+    c_alloc = int.from_bytes(plain[ib_hnpm:ib_hnpm + 2], "little")
+    end = ib_hnpm + 4 + 2 * (c_alloc + 1)
+    if end > len(plain):
+        return False
+    prev = 12
+    for k in range(c_alloc + 1):
+        o = ib_hnpm + 4 + 2 * k
+        v = int.from_bytes(plain[o:o + 2], "little")
+        if (k == 0 and v != 12) or v < prev or v > ib_hnpm:
+            return False
+        prev = v
+    return True
 
 
 @dataclass
@@ -85,6 +117,13 @@ class BlockReader:
         self.max_depth = max_depth
         self.verdicts: dict[int, BlockVerdict] = {}
         self._scan_locate = None  # Callable[[bid], Optional[(ib, cb)]]
+        # Crypt ladder (PLAN §14.4): try every method on a stream's first
+        # block, accept only on heap-structure evidence, learn the order.
+        self.crypt_order = ([crypt_method] if crypt_method in _CRYPT_METHODS else []) + \
+            [m for m in _CRYPT_METHODS if m != crypt_method]
+        self.verified_counts = {m: 0 for m in _CRYPT_METHODS}
+        self.stream_crypt: dict[int, tuple[int, str]] = {}  # root bid -> (method, level)
+        self._stream: list = [None, None]  # [method, level] of the stream being read
 
     def attach_scan(self, locate) -> None:
         """Use ``locate(bid) -> (ib, cb) | None`` for BIDs missing from the BBT."""
@@ -159,11 +198,39 @@ class BlockReader:
         Every BID read is added to ``touched`` (per-node integrity).
         """
         seen: set[int] = set()
+        saved, self._stream = self._stream, [None, None]
         try:
             return self._read_data(bid, depth=0, seen=seen)
         finally:
+            if self._stream[0] is not None:
+                self.stream_crypt[bid] = (self._stream[0], self._stream[1])
+            self._stream = saved
             if touched is not None:
                 touched |= seen
+
+    def _settled(self) -> bool:
+        """Store-wide evidence: only the preferred method has ever verified."""
+        first = self.crypt_order[0]
+        return self.verified_counts[first] > 0 and not any(
+            n for m, n in self.verified_counts.items() if m != first)
+
+    def _decode_first(self, raw: bytes, bid: int) -> bytes:
+        """Decode a stream's first leaf block via the crypt ladder."""
+        from .crypt import decode_block
+        for m in self.crypt_order:
+            plain = decode_block(raw, m, bid)
+            if looks_like_heap(plain):
+                self.verified_counts[m] += 1
+                if self.crypt_order[0] != m:
+                    self.crypt_order.remove(m)
+                    self.crypt_order.insert(0, m)
+                self._stream[:] = [m, VERIFIED]
+                return plain
+            if m == self.crypt_order[0] and self._settled():
+                break   # unverifiable (non-heap) stream; store-wide evidence holds
+        m = self.crypt_order[0]
+        self._stream[:] = [m, INFERRED if self._settled() else GUESSED]
+        return decode_block(raw, m, bid)
 
     def _read_data(self, bid: int, depth: int, seen: set[int]) -> bytes:
         if depth > self.max_depth:
@@ -183,8 +250,10 @@ class BlockReader:
         if not bid_is_internal(bid):
             # Leaf data block: maybe 4K-compressed, then decode.
             raw = self._maybe_inflate(raw, bid)
+            if self._stream[0] is None:
+                return self._decode_first(raw, bid)
             from .crypt import decode_block
-            return decode_block(raw, self.crypt_method, bid)
+            return decode_block(raw, self._stream[0], bid)
 
         # Internal block: XBLOCK (cLevel 1) or XXBLOCK (cLevel 2).
         if len(raw) < 8:

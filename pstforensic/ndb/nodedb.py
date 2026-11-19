@@ -12,7 +12,8 @@ from typing import Iterator, Optional
 
 from ..exceptions import WarningSink
 from ..fileio import FileReader
-from ..integrity import Integrity
+from .. import integrity as I
+from ..integrity import Integrity, weakest
 from ..variant import Variant
 from .block import BlockReader
 from .btree import BBTEntry, BTreeWalker, NBTEntry
@@ -38,6 +39,7 @@ class NodeRef:
         self._subnodes: Optional[dict[int, "NodeRef"]] = None
         self.touched: set[int] = set()   # every BID this node's reads hit
         self.page_ib: Optional[int] = None  # NBT page the entry came from
+        self.from_scan = False              # entry resolved by the full-file scan
 
     def data_stream(self) -> bytes:
         """Decoded, reassembled data bytes of this node ([MS-PST] §2.2.2.8)."""
@@ -68,14 +70,27 @@ class NodeRef:
         pv = getattr(db, "page_verdicts", {}).get(self.page_ib) if self.page_ib is not None else None
         if pv is not None:
             integ.extend(pv.findings())
-        verdicts = db._block_reader.verdicts
+        if self.from_scan:
+            integ.add(I.NODE_FROM_SCAN, "NBT entry found by the scan, not the B-tree",
+                      nid=self.nid, ib=self.page_ib)
+        br = db._block_reader
         for bid in sorted(self.touched):
-            v = verdicts.get(bid)
+            v = br.verdicts.get(bid)
             if v is not None:
                 integ.extend(v.findings())
+        sc = getattr(br, "stream_crypt", {}).get(self.bid_data)
+        if sc is not None:
+            method, level = sc
+            integ.level = weakest((integ.level, level))
+            if method != db.crypt_method:
+                integ.add(I.CRYPT_FROM_EVIDENCE,
+                          f"header bCryptMethod={db.crypt_method}; data decodes as {method}",
+                          nid=self.nid)
+            elif level == I.GUESSED:
+                integ.add(I.CRYPT_GUESSED, nid=self.nid)
         if deep and self._subnodes:
             for child in self._subnodes.values():
-                integ.extend(child.integrity(deep=True).findings)
+                integ.merge(child.integrity(deep=True))
         return integ
 
     def __repr__(self) -> str:  # pragma: no cover - debug aid
@@ -106,6 +121,47 @@ class NodeDatabase:
             crypt_method=self.crypt_method)
         self._subnode_reader = SubnodeReader(
             self._block_reader, self.variant, sink=self.sink)
+        self._scan = None
+        self._scan_nodes: dict[int, NBTEntry] = {}
+
+    # -- full-file scan (PLAN §14.5) ---------------------------------------
+    @property
+    def nbt_damaged(self) -> bool:
+        """The live NBT walk is known to be incomplete."""
+        if not self._nbt or self.skipped_pages:
+            return True
+        v = self.page_verdicts.get(self.header.root.bref_nbt.ib)
+        return v is None or not (v.ptype_ok and v.geometry_ok)
+
+    def scan(self, *, progress=None, should_abort=None, use_numpy=None):
+        """Run (once) the full-file scan and wire it into resolution.
+
+        Afterwards BIDs missing from the BBT resolve from block trailers, and
+        :meth:`node` resolves NIDs missing from the NBT from the newest
+        scanned entry (``from_scan``).
+        """
+        if self._scan is None or not self._scan.complete:
+            from .scan import scan_file
+            self._scan = scan_file(
+                self.reader, self.variant, live_nbt=self._nbt, live_bbt=self._bbt,
+                live_page_ibs=set(self.page_verdicts), use_numpy=use_numpy,
+                progress=progress, should_abort=should_abort)
+            self._block_reader.attach_scan(self._scan.locate)
+            self._scan_nodes = {}
+            rank: dict[int, tuple] = {}
+            for slot in self._scan.slots:
+                if slot.variant != self.variant.name:
+                    continue
+                ent = slot.entry
+                key = (not slot.beyond_cent, slot.page_bid)
+                if ent.nid not in rank or key > rank[ent.nid]:
+                    rank[ent.nid] = key
+                    self._scan_nodes[ent.nid] = ent
+        return self._scan
+
+    def scan_entry(self, nid: int) -> Optional[NBTEntry]:
+        """Newest scanned NBT entry for ``nid`` (live page copies preferred)."""
+        return self._scan_nodes.get(nid)
 
     # -- construction helpers --------------------------------------------
     @classmethod
@@ -122,14 +178,21 @@ class NodeDatabase:
             self._nbt[ent.nid] = ent
         self.page_verdicts = walker.page_verdicts
         self.skipped_pages = walker.skipped_pages
+        if not self._nbt and not self.skipped_pages:
+            self.skipped_pages = [root.bref_nbt.ib]
 
     # -- public surface ---------------------------------------------------
     def node(self, nid: int) -> Optional[NodeRef]:
         """Return a :class:`NodeRef` for ``nid``, or ``None`` if absent."""
         ent = self._nbt.get(nid)
+        if ent is not None:
+            return self.node_from_entry(ent)
+        ent = self._scan_nodes.get(nid)
         if ent is None:
             return None
-        return self.node_from_entry(ent)
+        ref = self.node_from_entry(ent)
+        ref.from_scan = True
+        return ref
 
     def node_from_entry(self, ent: NBTEntry) -> NodeRef:
         """A :class:`NodeRef` for any NBT entry — live or harvested by the scan."""

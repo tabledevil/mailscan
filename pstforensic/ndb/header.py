@@ -218,6 +218,9 @@ def detect(reader: FileReader, *, sink: WarningSink | None = None) -> Header:
     if crypt_method == CRYPT_EDPCRYPTED:
         raise EncryptedStoreError(
             f"bCryptMethod=0x10 (WIP/EDP) at offset {variant.crypt_method_offset:#x}")
+    if crypt_method not in (0, 1, 2):
+        integ.add(I.CRYPT_METHOD_UNKNOWN, f"bCryptMethod={crypt_method:#x}",
+                  ib=variant.crypt_method_offset)
 
     root_bytes = reader.read(variant.root_offset, variant.root_size, where="ROOT")
     root = _parse_root(root_bytes, variant, sink)
