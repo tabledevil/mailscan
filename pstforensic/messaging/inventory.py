@@ -40,6 +40,7 @@ from ..ltp.pc import PropertyContext
 from ..ltp.tc import PID_LTP_ROW_ID, TableContext
 from ..mapi import MapiMessage
 from ..ndb.bref import (
+    NID_ROOT_FOLDER,
     NID_TYPE_ASSOC_CONTENTS_TABLE,
     NID_TYPE_ASSOC_MESSAGE,
     NID_TYPE_CONTENTS_TABLE,
@@ -239,7 +240,8 @@ class Inventory:
         self.reachable: set[int] = set()
         self.deleted_folder_names: dict[int, str] = {}
         self.history: dict[int, list[HistoryEntry]] = {}
-        self.used_bids: set[int] = set()   # every BID some item's read touched
+        self.used_bids: set[int] = set()   # freed BIDs some item's read touched
+        self._scan_bids = set(scan.blocks)
 
     # -- helpers ----------------------------------------------------------
     def _message_types(self) -> tuple[int, ...]:
@@ -252,7 +254,8 @@ class Inventory:
         except Exception:
             return None
         finally:
-            self.used_bids |= all_touched(ref)
+            # Only freed (scanned, non-live) blocks are carving candidates.
+            self.used_bids |= all_touched(ref) & self._scan_bids
         mclass = _render_text(msg, PID_MESSAGE_CLASS)
         if mclass is None:
             return None
@@ -284,12 +287,35 @@ class Inventory:
             return None
         return struct.unpack_from("<I", v.raw, 20)[0]
 
+    def _all_folders(self):
+        """The IPM subtree first, then every other subtree of the store root
+        (search roots, Freebusy Data, views …) under ``/~root``."""
+        ipm = self.store.root_folder
+        yield from self.store.folders()
+        root_ref = self.db.node(NID_ROOT_FOLDER)
+        if root_ref is None or (ipm is not None and ipm.nid == NID_ROOT_FOLDER):
+            return
+        try:
+            pc = PropertyContext.from_node(root_ref, self.variant, sink=self.sink)
+            self.store.renderer_installer(pc)
+            from .folder import Folder
+            root = Folder(self.store, pc, NID_ROOT_FOLDER, sink=self.sink,
+                          noderef=root_ref)
+            root.path = "/~root"
+            self.folder_paths[NID_ROOT_FOLDER] = root.path
+            for sub in root.subfolders():
+                if ipm is not None and sub.nid == ipm.nid:
+                    continue
+                yield from sub.walk()
+        except Exception:
+            return
+
     def _walk_live(self) -> list[tuple]:
         """Folder walk; returns ``[(folder, msg_nid)]`` and fills path maps."""
         waste = self._wastebasket_nid()
         pairs = []
         soft_roots: set[int] = set()
-        for folder in self.store.folders():
+        for folder in self._all_folders():
             self.folder_paths[folder.nid] = folder.path
             parent_soft = any(folder.path.startswith(self.folder_paths[r] + "/")
                               for r in soft_roots)
@@ -306,7 +332,7 @@ class Inventory:
                 if ref is None:
                     continue
                 for row in TableContext.from_node(ref, self.variant, sink=self.sink):
-                    v = row.get_tag(PID_LTP_ROW_ID) or row.by_id(0x6748)
+                    v = row.get_tag(PID_LTP_ROW_ID) or row.by_id(0x67F2)
                     if v is None or len(v.raw) < 4:
                         continue
                     nid = struct.unpack_from("<I", v.raw, 0)[0]
@@ -336,12 +362,14 @@ class Inventory:
             if name:
                 self.deleted_folder_names[ent.nid] = name
 
-    def _scan_items(self) -> Iterator[Item]:
+    def _scan_items(self, only_nid: Optional[int] = None) -> Iterator[Item]:
         """Deleted and superseded items from the scan's non-live NBT slots."""
         live_nbt = self.db._nbt
         groups: dict[int, list[ScannedSlot]] = {}
         for slot in self.scan.slots:
             if slot.variant != self.variant.name:
+                continue
+            if only_nid is not None and slot.entry.nid != only_nid:
                 continue
             if nid_type(slot.entry.nid) not in self._message_types():
                 continue
@@ -469,12 +497,23 @@ class Inventory:
 
     # -- public ---------------------------------------------------------------
     def items(self) -> Iterator[Item]:
-        produced = list(self._items())
-        known = {content_fingerprint(i.message) for i in produced if i.message is not None}
-        produced.extend(self._carved(known))
-        for it in produced:
+        """Stream every item; only content hashes are retained (for carving
+        dedup), so memory does not grow with the store."""
+        known: set[bytes] = set()
+
+        def remember(msg) -> None:
+            known.add(content_fingerprint(msg))
+            for emb in msg.embedded_messages:   # e.g. recurring-meeting exceptions
+                remember(emb)
+
+        for it in self._items():
             it._store = self.store
-        return iter(produced)
+            if it.message is not None:
+                remember(it.message)
+            yield it
+        for it in self._carved(known):
+            it._store = self.store
+            yield it
 
     def _items(self) -> Iterator[Item]:
         pairs = self._walk_live()

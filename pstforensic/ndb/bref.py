@@ -88,7 +88,7 @@ def bid_is_internal(bid: int) -> bool:
     return bool(bid & BID_INTERNAL_BIT)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class BREF:
     """A Block Reference: a (normalized) BID plus its file offset IB.
 

@@ -329,7 +329,7 @@ def _build_tc(columns, rows, *, with_row_index=True):
     """Build a TC heap whose Row Matrix lives in a subnode.
 
     ``columns`` = list of (tag, cb_data) for variable/inline cells; the dwRowID
-    column (PidTagLtpRowId 0x67480003, ibData=0, 4B) is added implicitly.
+    column (PidTagLtpRowId 0x67F20003, ibData=0, 4B) is added implicitly.
     ``rows`` = list of (row_id, {tag: value_or_None}) where None ⇒ absent cell.
 
     Returns ``(heap_bytes, {subnode_nid: matrix_bytes})``.
@@ -446,7 +446,7 @@ def test_tc_ceb_null_cell_omitted():
     heap_bytes, subs = _build_tc([(tag_subject, 4), (tag_flags, 4)], rows)
     noderef, sink = _open_node_with_data(heap_bytes, subnodes=subs)
     out = list(TableContext.from_node(noderef, UNICODE, sink=sink))
-    by_id = {struct.unpack("<I", o.get_tag(make_tag(0x6748, PropType.INTEGER32)).raw[:4])[0]: o
+    by_id = {struct.unpack("<I", o.get_tag(make_tag(0x67F2, PropType.INTEGER32)).raw[:4])[0]: o
              for o in out}
     assert by_id[0x01].get_tag(tag_subject) is not None
     assert by_id[0x02].get_tag(tag_subject) is None  # CEB null → omitted

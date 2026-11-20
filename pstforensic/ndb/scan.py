@@ -243,10 +243,11 @@ def _block_candidates(mv, base: int, n: int, size: int, v: Variant,
 
 def _block_candidates_4k(mv, base: int, n: int, size: int, wanted: set[int],
                          wanted_arr, use_np: bool):
-    """4K-OST block trailers, per Kernel PST Viewer's scanner (UNVERIFIED).
+    """4K-OST block trailers (layout as in Kernel PST Viewer's scanner).
 
-    Each 512-byte unit holds, at +0x1E8: cb(2) wSig(2) dwCRC(4) bid(8); the
-    block starts ``roundup512(cb + 16)`` before the unit's end.
+    Each 512-byte unit may end a block: its last 24 bytes, at +0x1E8, are the
+    BLOCKTRAILER cb(2) wSig(2) dwCRC(4) bid(8) + 8; the block starts
+    ``roundup512(cb + 24)`` before the unit's end (verified on a real OST).
     """
     first = base
     last = min(base + n, size - 512 + 1)
@@ -260,7 +261,7 @@ def _block_candidates_4k(mv, base: int, n: int, size: int, wanted: set[int],
         wsig = tr[:, 2:4].copy().view("<u2")[:, 0].astype(_np.int64)
         crc = tr[:, 4:8].copy().view("<u4")[:, 0].astype(_np.int64)
         rbid = tr[:, 8:16].copy().view("<u8")[:, 0]
-        ib = units + 512 - ((cb + 16 + 511) // 512) * 512
+        ib = units + 512 - ((cb + 24 + 511) // 512) * 512
         ok = (cb > 0) & (rbid > 0) & (ib >= 0)
         x = (ib.astype(_np.uint64) ^ rbid) & _np.uint64(0xFFFFFFFF)
         sig_ok = (((x >> _np.uint64(16)) ^ x) & _np.uint64(0xFFFF)).astype(_np.int64) == wsig
@@ -273,7 +274,7 @@ def _block_candidates_4k(mv, base: int, n: int, size: int, wanted: set[int],
         return
     for unit in range(first, last, 512):
         cb, wsig, crc, rbid = struct.unpack_from("<HHIQ", mv, unit + 0x1E8)
-        ib = unit + 512 - ((cb + 16 + 511) // 512) * 512
+        ib = unit + 512 - ((cb + 24 + 511) // 512) * 512
         if cb == 0 or rbid == 0 or ib < 0:
             continue
         sig_ok = _sig(ib, rbid) == wsig
@@ -424,9 +425,7 @@ _BY_NAME = {v.name: v for v in (ANSI, UNICODE, UNICODE_4K)}
 
 
 def _disk(cb: int, v: Variant) -> int:
-    """On-disk footprint of a block (4K: Kernel's 512-granular model)."""
-    if v.page_size == 4096:
-        return ((cb + 16 + 511) // 512) * 512
+    """On-disk footprint of a block."""
     return block_disk_size(cb, v)
 
 

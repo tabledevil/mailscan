@@ -39,7 +39,7 @@ SUBNODE_RECIPIENT_TC = 0x692
 SUBNODE_ATTACHMENT_TC = 0x671
 
 # dwRowID column id (PidTagLtpRowId) used to read a TC row's encoded child NID.
-_PID_LTP_ROW_ID = PID_LTP_ROW_ID  # 0x67480003
+_PID_LTP_ROW_ID = PID_LTP_ROW_ID  # 0x67F20003
 
 _MAX_EMBED_DEPTH = 16  # recursion guard for embedded messages.
 
@@ -114,8 +114,15 @@ def _build_one_attachment(att_pc_ref: NodeRef, variant: Variant, *,
     # Embedded message: PidTagAttachDataObject (0x3701000D) → subnode PC.
     data_obj = pc.get_tag(TAG_ATTACH_DATA_OBJ)
     if data_obj is not None:
-        embed_nid = _EMBED_SUBNODE_NID
-        embed_ref = att_pc_ref.subnodes().get(embed_nid)
+        # PtypObject value = {dwNid, ulSize}: dwNid names the subnode holding
+        # the embedded message's PC ([MS-PST] §2.3.3.5).
+        subs = att_pc_ref.subnodes()
+        embed_nid = (struct.unpack_from("<I", data_obj.raw, 0)[0]
+                     if data_obj.raw and len(data_obj.raw) >= 4 else 0)
+        embed_ref = subs.get(embed_nid)
+        if embed_ref is None and _EMBED_SUBNODE_NID in subs:
+            embed_nid = _EMBED_SUBNODE_NID          # legacy writers keyed it by tag
+            embed_ref = subs[embed_nid]
         if embed_ref is not None:
             if depth + 1 > _MAX_EMBED_DEPTH:
                 sink.warn(WarnCode.CYCLE_DETECTED,
@@ -140,16 +147,14 @@ def _build_one_attachment(att_pc_ref: NodeRef, variant: Variant, *,
                             renderer_installer=renderer_installer)
 
 
-# Conventional embedded-message subnode local NID = the full object tag
-# 0x3701000D ([MS-PST] §2.4.6.2; Appendix A H7).  The attachment PC's
-# PidTagAttachDataObject HNID resolves to this subnode whose data stream is the
-# embedded message's own Property Context.
+# Fallback only: some writers key the embedded message's subnode by the
+# object tag 0x3701000D itself instead of naming it in the {dwNid, ulSize} value.
 _EMBED_SUBNODE_NID = make_tag(0x3701, PropType.OBJECT)  # 0x3701000D
 
 
 def _row_id(row: MapiObject) -> Optional[int]:
     """Return a TC row's ``dwRowID`` (PidTagLtpRowId), which encodes the child NID."""
-    v = row.get_tag(_PID_LTP_ROW_ID) or row.by_id(0x6748)
+    v = row.get_tag(_PID_LTP_ROW_ID) or row.by_id(0x67F2)
     if v is None or len(v.raw) < 4:
         return None
     return struct.unpack_from("<I", v.raw, 0)[0]

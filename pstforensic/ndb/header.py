@@ -177,7 +177,7 @@ def detect(reader: FileReader, *, sink: WarningSink | None = None) -> Header:
         sink.warn(WarnCode.SIG_MISMATCH, f"bad magic {magic!r}", where="header")
 
     client = reader.read(OFF_MAGIC_CLIENT, 2, where="header")
-    if client != MAGIC_CLIENT:
+    if client not in (MAGIC_CLIENT, b"SO", b"AB"):   # PST / OST / PAB
         integ.add(I.HEADER_CLIENT_MAGIC_BAD, f"{client!r}", ib=OFF_MAGIC_CLIENT)
         sink.warn(WarnCode.SIG_MISMATCH,
                   f"wMagicClient {client!r} != {MAGIC_CLIENT!r}", where="header")

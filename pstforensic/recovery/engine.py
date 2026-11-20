@@ -441,7 +441,7 @@ class RecoveryEngine:
                 if ref is None:
                     continue
                 for row in TableContext.from_node(ref, self.variant, sink=self.sink):
-                    v = row.get_tag(PID_LTP_ROW_ID) or row.by_id(0x6748)
+                    v = row.get_tag(PID_LTP_ROW_ID) or row.by_id(0x67F2)
                     if v is None or len(v.raw) < 4:
                         continue
                     reachable.add(struct.unpack_from("<I", v.raw, 0)[0])

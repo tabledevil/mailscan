@@ -767,7 +767,7 @@ from ..ltp.heap import HN_CLIENT_PC, HN_CLIENT_TC  # noqa: E402
 from ..proptypes import is_inline_in_pc, make_tag, PropType, split_tag  # noqa: E402
 
 # PidTagLtpRowId column tag (the dwRowID column at row offset 0, [MS-PST] §2.3.4.3.1).
-_PID_LTP_ROW_ID = make_tag(0x6748, PropType.INTEGER32)        # 0x67480003
+_PID_LTP_ROW_ID = make_tag(0x67F2, PropType.INTEGER32)        # 0x67F20003
 _PID_LTP_ROW_VER = make_tag(0x67E9, PropType.INTEGER32)       # 0x67E90003
 
 # Envelope PidTag ids the messaging tier reads.
@@ -799,7 +799,10 @@ _PID_MESSAGE_CLASS = make_tag(0x001A, PropType.STRING)        # PidTagMessageCla
 # Subnode local-NID templates ([MS-PST] §2.4.5.3 / §2.4.6.1).
 SUBNODE_RECIPIENT_TC = 0x692
 SUBNODE_ATTACHMENT_TC = 0x671
-SUBNODE_EMBEDDED_MSG = _PID_ATTACH_DATA_OBJ  # 0x3701000D as a subnode local-NID
+# Local subnode NID of the embedded message under its attachment PC.  The
+# attachment's PidTagAttachDataObject (PtypObject) value is the 8-byte
+# {dwNid, ulSize} structure naming it ([MS-PST] §2.3.3.5).
+SUBNODE_EMBEDDED_MSG = 0x7E4
 
 # Recipient types ([MS-OXOMSG] §2.2.3.1).
 MAPI_TO = 1
@@ -1202,7 +1205,7 @@ def build_unicode_pst_tree(*, store_name: str = "Personal Folders",
           {_PID_ATTACH_LONG_FN: "invoice.pdf".encode("utf-16-le"),
            _PID_ATTACH_METHOD: struct.pack("<I", ATTACH_BY_VALUE)})])
 
-    # Embedded-message PC: a nested subnode (0x3701000D) under the attachment PC.
+    # Embedded-message PC: a nested subnode under the attachment PC.
     embed_props = {
         _PID_SUBJECT: "Embedded note".encode("utf-16-le"),
         _PID_SENDER_NAME: "Carol".encode("utf-16-le"),
@@ -1220,13 +1223,13 @@ def build_unicode_pst_tree(*, store_name: str = "Personal Folders",
          _PID_ATTACH_SIZE: struct.pack("<I", len(attach_data)),
          _PID_ATTACH_DATA_BIN: attach_data})
 
-    # Attachment 2 PC (embedded message): method 5 + 0x3701000D subnode ref.
+    # Attachment 2 PC (embedded message): method 5 + PtypObject {dwNid, ulSize}.
     attach2_local_nid = 0x25  # nidType 0x05 attachment, non-zero low bits
     attach2 = sub_pc(
         attach2_local_nid,
         {_PID_ATTACH_LONG_FN: "forwarded.msg".encode("utf-16-le"),
-         _PID_ATTACH_METHOD: struct.pack("<I", ATTACH_EMBEDDED_MSG)},
-        sub_refs={_PID_ATTACH_DATA_OBJ: SUBNODE_EMBEDDED_MSG},
+         _PID_ATTACH_METHOD: struct.pack("<I", ATTACH_EMBEDDED_MSG),
+         _PID_ATTACH_DATA_OBJ: struct.pack("<II", SUBNODE_EMBEDDED_MSG, 0)},
         nested=[embedded_sub])
 
     # Second attachment row in the attachment TC.
