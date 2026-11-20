@@ -127,6 +127,17 @@ def check_dependencies():
 # ------------------------------------------------------------------
 # Main
 # ------------------------------------------------------------------
+def _parse_size(text: str) -> int:
+    """'1048576', '512K', '64M', '8G' -> bytes."""
+    t = text.strip().upper().rstrip("B")
+    mult = {"K": 1 << 10, "M": 1 << 20, "G": 1 << 30, "T": 1 << 40}.get(t[-1:], 1)
+    num = t[:-1] if t[-1:] in "KMGT" else t
+    try:
+        return int(float(num) * mult)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid size: {text!r}")
+
+
 def main():
     # A6: Force UTF-8 on stdout/stderr to avoid encoding errors on Windows
     if sys.stdout and hasattr(sys.stdout, "reconfigure"):
@@ -203,12 +214,19 @@ def main():
         choices=["offline", "passive", "online"],
         default=flags.network_policy,
     )
+    parser.add_argument(
+        "--max-file-size",
+        help="Largest input file to read, e.g. 512M, 8G [default: 1G]",
+        type=_parse_size,
+        default=flags.max_file_size,
+    )
 
     args = parser.parse_args()
 
     # Apply flags from CLI
     flags.debug = args.debug
     flags.network_policy = args.network_policy
+    flags.max_file_size = args.max_file_size
 
     # Configure logging
     setup_logging(verbosity=args.verbosity, debug=args.debug)

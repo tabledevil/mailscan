@@ -21,6 +21,8 @@ python matt.py --network-policy offline <file>   # no outbound connections
 python matt.py -x <file>                 # extract attachments to ./extract/
 python matt.py -d <file>                 # debug mode
 python matt.py --check                   # verify all analyzer dependencies
+python matt.py --max-file-size 8G <file> # raise the 1 GB input limit (e.g. large PST/OST)
+python -m pstforensic.tools.summary <file.pst>   # count-only PST/OST inventory (no content)
 ```
 
 ## Architecture
@@ -51,7 +53,7 @@ Each analyzer declares:
 - `pip_dependencies` / `system_dependencies` — for `--check` validation
 - `analysis()` — populates `self.reports` dict with `Report` objects and `self.childitems` with child `Structure` objects
 
-Current analyzers: `EmailAnalyzer`, `PlainTextAnalyzer`, `ZipAnalyzer`, `SevenZipAnalyzer`, `HTMLAnalyzer`, `PDFAnalyzer`, `MsgAnalyzer`, `MboxAnalyzer`, `OfficeDocumentAnalyzer` (handles DOCX/XLSX/PPTX), `OLEOfficeAnalyzer` (legacy .doc/.xls/.ppt), `OfficeRelationshipAnalyzer`, `OfficeXMLAnalyzer`, `VBAProjectAnalyzer`, `RTFAnalyzer`, `ImageAnalyzer`, `QRAnalyzer`, `ICSAnalyzer`, `RARAnalyzer`, `ScriptAnalyzer`.
+Current analyzers: `EmailAnalyzer`, `PlainTextAnalyzer`, `ZipAnalyzer`, `SevenZipAnalyzer`, `HTMLAnalyzer`, `PDFAnalyzer`, `MsgAnalyzer`, `PstAnalyzer` (native PST/OST via the in-repo `pstforensic` package; detects by `!BDN` magic or `.pst/.ost` extension, specificity 21 so it beats `MsgAnalyzer` on the shared Outlook MIME type), `MboxAnalyzer`, `OfficeDocumentAnalyzer` (handles DOCX/XLSX/PPTX), `OLEOfficeAnalyzer` (legacy .doc/.xls/.ppt), `OfficeRelationshipAnalyzer`, `OfficeXMLAnalyzer`, `VBAProjectAnalyzer`, `RTFAnalyzer`, `ImageAnalyzer`, `QRAnalyzer`, `ICSAnalyzer`, `RARAnalyzer`, `ScriptAnalyzer`.
 
 To add a new analyzer: copy `Analyzers/TEMPLATE_ANALYZER.py`, set `compatible_mime_types`, implement `analysis()`, add the module name to `analyzers_list` in `Analyzers/__init__.py`.
 
@@ -78,7 +80,7 @@ Passwords discovered by other analyzers (e.g., PlainTextAnalyzer finding "passwo
 
 ## Packaging
 
-- **`pyproject.toml`** is canonical (PEP 517, `setuptools.build_meta` backend). Optional extras: `office`, `pdf`, `html`, `msg`, `7z`, `lang`, `mime`, `tui`, `fuzzy`, `fuzzy-ssdeep`, `yara`, `js`, `qr`, `rar`, `dev`, `all`.
+- **`pyproject.toml`** is canonical (PEP 517, `setuptools.build_meta` backend). Optional extras: `office`, `pdf`, `html`, `msg`, `pst` (numpy fast path), `7z`, `lang`, `mime`, `tui`, `fuzzy`, `fuzzy-ssdeep`, `yara`, `js`, `qr`, `rar`, `dev`, `all`.
 - Core dependencies: `charset-normalizer>=3.0`, `python-dateutil>=2.8`, `pytz`, `rich>=13.0`.
 - System dependencies (per-extra): `libmagic` (mime), `libzbar0` + `zbar-tools` (qr), `poppler-utils` (pdf preview), `unrar` (rar), `box-js` via npm (js dynamic).
 
