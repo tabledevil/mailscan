@@ -317,3 +317,112 @@ def test_recover_rereads_from_a_verified_copy():
     res = lunch.recover()
     assert "RECOVERED_ALT_COPY" in res.item.integrity.codes
     assert res.item.subject == "Lunch?"
+
+
+def test_wiped_header_store_still_reads_everything():
+    # First two header pages zeroed (e.g. wiped sectors): magic, wVer, ROOT,
+    # bCryptMethod all gone.  Kernel opens such files; so must we.
+    img = bytearray(synth.build_unicode_pst_tree(crypt=CRYPT_PERMUTE, extra_messages=5))
+    img[0:0x400] = b"\x00" * 0x400
+    st = open_store(bytes(img))
+    items = st.items()
+    assert {i.subject for i in items} >= {"Wire transfer", "Lunch?", "Bulk 0", "Bulk 4"}
+    assert all(i.state == "live_damaged" for i in items)
+    assert {i.folder_path for i in items} == {"/Personal Folders/Inbox"}
+    assert {"HEADER_UNUSABLE", "CRYPT_METHOD_UNKNOWN"} <= st.integrity.codes
+    wire = next(i for i in items if i.subject == "Wire transfer")
+    assert wire.message.render(0x1000) == "Please wire $1,000,000 today."
+
+
+@pytest.mark.parametrize("use_numpy", [True, False])
+def test_scan_finds_4k_block_per_kernel_layout(use_numpy):
+    from pstforensic.ndb.crc import compute_sig
+    from pstforensic.variant import UNICODE_4K
+    if use_numpy:
+        pytest.importorskip("numpy")
+    buf = bytearray(8192)
+    payload = b"X" * 100
+    ib, bid = 1024, 0x44
+    buf[ib:ib + 100] = payload
+    struct.pack_into("<HHIQ", buf, ib + 0x1E8, 100, compute_sig(ib, bid),
+                     compute_crc(payload), bid)
+    ix = scan_file(FileReader(bytes(buf)), UNICODE_4K, variants=(UNICODE_4K,),
+                   use_numpy=use_numpy)
+    (blk,) = ix.blocks[0x44]
+    assert (blk.ib, blk.cb, blk.strong, blk.variant) == (1024, 100, True, "unicode4k")
+
+
+# --- corruption matrix: one defect each — found AND flagged -------------------------
+def _patch(img, off, data):
+    img[off:off + len(data)] = data
+
+
+def _defect(name):
+    img = bytearray(synth.build_unicode_pst_tree(extra_messages=20))
+    db = NodeDatabase.open(FileReader(bytes(img)))
+    root = db.header.root
+    nbt_leaves = sorted(ib for ib, v in db.page_verdicts.items()
+                        if v.ptype == 0x81 and ib != root.bref_nbt.ib)
+    msg2 = db._bbt[db.node(0x44).bid_data]
+    msg2_tr = msg2.bref.ib + block_disk_size(msg2.cb, UNICODE) - UNICODE.block_trailer_size
+    if name == "magic":
+        _patch(img, 0, b"XXXX")
+    elif name == "header_crc":
+        img[4] ^= 0xFF
+    elif name == "wver":
+        _patch(img, 0x0A, struct.pack("<H", 99))
+    elif name == "crypt_field":
+        img[UNICODE.crypt_method_offset] = 0x33
+    elif name == "amap":
+        img[UNICODE.root_offset + 4 + 4 * 8 + 2 * 16] = 0
+    elif name == "nbt_root_trailer":
+        _patch(img, root.bref_nbt.ib + 0x1E8, b"\x00" * 0x18)
+    elif name == "nbt_leaf_crc":
+        img[nbt_leaves[0] + 0x1F4] ^= 0xFF
+    elif name == "nbt_leaf_sig":
+        img[nbt_leaves[0] + 0x1F2] ^= 0xFF
+    elif name == "bbt_root_trailer":
+        _patch(img, root.bref_bbt.ib + 0x1E8, b"\x00" * 0x18)
+    elif name == "block_crc":
+        img[msg2_tr + 4] ^= 0xFF
+    elif name == "block_sig":
+        img[msg2_tr + 2] ^= 0xFF
+    elif name == "block_bid":
+        img[msg2_tr + 8] ^= 0x40
+    elif name == "header_wiped":
+        _patch(img, 0, b"\x00" * 0x400)
+    return bytes(img)
+
+
+MATRIX = {
+    # defect: (store-level codes, codes on at least one item)
+    "magic": ({"HEADER_MAGIC_BAD"}, set()),
+    "header_crc": ({"HEADER_CRC_FAIL"}, set()),
+    "wver": ({"WVER_UNUSUAL"}, set()),
+    "crypt_field": ({"CRYPT_METHOD_UNKNOWN"}, {"CRYPT_FROM_EVIDENCE"}),
+    "amap": ({"AMAP_INVALID"}, set()),
+    "nbt_root_trailer": ({"PAGE_UNREADABLE"}, {"NODE_FROM_SCAN"}),
+    "nbt_leaf_crc": ({"PAGE_CRC_FAIL"}, {"PAGE_CRC_FAIL"}),
+    "nbt_leaf_sig": ({"PAGE_SIG_FAIL"}, {"PAGE_SIG_FAIL"}),
+    "bbt_root_trailer": ({"PAGE_UNREADABLE"}, {"BLOCK_FROM_SCAN"}),
+    "block_crc": (set(), {"BLOCK_CRC_FAIL"}),
+    "block_sig": (set(), {"BLOCK_SIG_FAIL"}),
+    "block_bid": (set(), {"BLOCK_BID_MISMATCH"}),
+    "header_wiped": ({"HEADER_UNUSABLE"}, {"NODE_FROM_SCAN"}),
+}
+
+
+@pytest.mark.parametrize("defect", sorted(MATRIX))
+def test_corruption_matrix(defect):
+    store_codes, item_codes = MATRIX[defect]
+    st = open_store(_defect(defect))
+    items = st.items()
+    # Every message is still there, and nothing else appears.
+    assert sorted(i.subject for i in items) == sorted(
+        ["Wire transfer", "Lunch?"] + [f"Bulk {n}" for n in range(20)])
+    assert {i.state for i in items} <= {"live", "live_damaged"}
+    assert store_codes <= st.integrity.codes, st.integrity.codes
+    found = set().union(*(i.integrity.codes for i in items))
+    assert item_codes <= found, found
+    if not item_codes:
+        assert all(i.state == "live" for i in items)

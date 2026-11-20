@@ -183,6 +183,8 @@ def detect(reader: FileReader, *, sink: WarningSink | None = None) -> Header:
                   f"wMagicClient {client!r} != {MAGIC_CLIENT!r}", where="header")
 
     wver = reader.u16(OFF_WVER)
+    if wver not in (14, 15, 21, 23, 36, 37):
+        integ.add(I.WVER_UNUSUAL, f"wVer={wver}", ib=OFF_WVER)
     try:
         declared: Variant | None = classify(wver)
     except ValueError:
@@ -250,6 +252,42 @@ def detect(reader: FileReader, *, sink: WarningSink | None = None) -> Header:
         magic_ok=magic_ok,
         variant_evidence=evidence,
     )
+
+
+def headerless(reader: FileReader, cause: Exception, *,
+               sink: WarningSink | None = None) -> Header:
+    """A stand-in header for a store whose header is unusable (PLAN §14.2).
+
+    The variant is the one under whose geometry the full-file scan finds the
+    most NBT pages; the crypt method is left unknown for the crypt ladder; the
+    ROOT points nowhere, so every node is resolved from the scan.  Raises
+    ``cause`` again if the file holds no B-tree page under any variant.
+    """
+    from .scan import scan_file
+    from ..variant import UNICODE
+    probe = scan_file(reader, UNICODE)
+    counts: dict[str, int] = {}
+    for p in probe.pages:
+        if p.ptype == 0x81:
+            counts[p.variant] = counts.get(p.variant, 0) + 1
+    if not counts:
+        raise cause
+    by_name = {v.name: v for v in ALL_VARIANTS}
+    best = max(counts, key=lambda n: counts[n])
+    variant = by_name[best]
+    integ = Integrity()
+    integ.add(I.HEADER_UNUSABLE, str(cause))
+    integ.add(I.VARIANT_FROM_EVIDENCE,
+              f"{counts[best]} NBT pages validate as {best} (scan)")
+    integ.add(I.CRYPT_METHOD_UNKNOWN, "header unusable; crypt ladder decides")
+    nowhere = BREF(bid=0, ib=0, raw_bid=0)
+    root = Root(ib_file_eof=reader.size, ib_amap_last=0, cb_amap_free=0,
+                cb_pmap_free=0, bref_nbt=nowhere, bref_bbt=nowhere, f_amap_valid=0)
+    return Header(variant=variant, wver=reader.u16(OFF_WVER), crypt_method=0xFF,
+                  root=root, wip_capable=False, crc_partial_ok=False,
+                  crc_full_ok=None if not variant.is_unicode else False,
+                  integrity=integ, magic_ok=reader.read(OFF_MAGIC, 4) == MAGIC,
+                  variant_evidence={best: I.CONSISTENT})
 
 
 def _check_crc_partial(reader: FileReader, sink: WarningSink) -> bool:

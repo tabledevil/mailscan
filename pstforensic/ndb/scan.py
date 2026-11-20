@@ -241,13 +241,53 @@ def _block_candidates(mv, base: int, n: int, size: int, v: Variant,
             yield ib, cb, wsig, crc, rbid, sig_ok
 
 
+def _block_candidates_4k(mv, base: int, n: int, size: int, wanted: set[int],
+                         wanted_arr, use_np: bool):
+    """4K-OST block trailers, per Kernel PST Viewer's scanner (UNVERIFIED).
+
+    Each 512-byte unit holds, at +0x1E8: cb(2) wSig(2) dwCRC(4) bid(8); the
+    block starts ``roundup512(cb + 16)`` before the unit's end.
+    """
+    first = base
+    last = min(base + n, size - 512 + 1)
+    if last <= first:
+        return
+    if use_np:
+        units = _np.arange(first, last, 512, dtype=_np.int64)
+        arr = _np.frombuffer(mv, dtype=_np.uint8)
+        tr = _np.ascontiguousarray(arr[(units + 0x1E8)[:, None] + _np.arange(16)[None, :]])
+        cb = tr[:, 0:2].copy().view("<u2")[:, 0].astype(_np.int64)
+        wsig = tr[:, 2:4].copy().view("<u2")[:, 0].astype(_np.int64)
+        crc = tr[:, 4:8].copy().view("<u4")[:, 0].astype(_np.int64)
+        rbid = tr[:, 8:16].copy().view("<u8")[:, 0]
+        ib = units + 512 - ((cb + 16 + 511) // 512) * 512
+        ok = (cb > 0) & (rbid > 0) & (ib >= 0)
+        x = (ib.astype(_np.uint64) ^ rbid) & _np.uint64(0xFFFFFFFF)
+        sig_ok = (((x >> _np.uint64(16)) ^ x) & _np.uint64(0xFFFF)).astype(_np.int64) == wsig
+        keep = ok & sig_ok
+        if wanted_arr is not None and len(wanted_arr):
+            keep |= ok & _np.isin(rbid & ~_np.uint64(1), wanted_arr)
+        for i in _np.nonzero(keep)[0].tolist():
+            yield (int(ib[i]), int(cb[i]), int(wsig[i]), int(crc[i]),
+                   int(rbid[i]), bool(sig_ok[i]))
+        return
+    for unit in range(first, last, 512):
+        cb, wsig, crc, rbid = struct.unpack_from("<HHIQ", mv, unit + 0x1E8)
+        ib = unit + 512 - ((cb + 16 + 511) // 512) * 512
+        if cb == 0 or rbid == 0 or ib < 0:
+            continue
+        sig_ok = _sig(ib, rbid) == wsig
+        if sig_ok or normalize_bid(rbid) in wanted:
+            yield ib, cb, wsig, crc, rbid, sig_ok
+
+
 # ---------------------------------------------------------------------------
 # The scan
 # ---------------------------------------------------------------------------
 class _Extents:
     """``[start, end)`` extents of blocks (each at most ~8.3 KB) with point queries."""
 
-    _MAX_LEN = block_disk_size(MAX_BLOCK_CB, UNICODE)
+    _MAX_LEN = 0x10000 + 512   # 4K blocks: cb is a u16
 
     def __init__(self, spans):
         spans = sorted(spans)
@@ -318,18 +358,23 @@ def scan_file(reader: FileReader, store_variant: Variant, *,
         if aborted():
             return idx
         n = min(CHUNK, size - base)
-        for v in (ANSI, UNICODE):
+        for v in (ANSI, UNICODE, UNICODE_4K):
             if v not in variants:
                 continue
-            for ib, cb, _wsig, crc, rbid, sig_ok in _block_candidates(
-                    mv, base, n, size, v, wanted, wanted_arr, use_np):
+            if v is UNICODE_4K:
+                cands = _block_candidates_4k(mv, base, n, size, wanted, wanted_arr, use_np)
+            else:
+                cands = _block_candidates(mv, base, n, size, v, wanted, wanted_arr, use_np)
+            for ib, cb, _wsig, crc, rbid, sig_ok in cands:
+                if ib + cb > size:
+                    continue
                 st.block_candidates += 1
                 bid = normalize_bid(rbid)
                 live = live_bbt.get(bid)
                 if v is store_variant and live is not None and live.bref.ib == ib and sig_ok:
                     # Exactly where the live BBT says: only an extent.
                     st.blocks_live += 1
-                    live_extents.append((ib, ib + block_disk_size(cb, v)))
+                    live_extents.append((ib, ib + _disk(cb, v)))
                     continue
                 crc_ok = _crc(mv[ib:ib + cb]) == crc
                 if not (sig_ok or crc_ok):
@@ -343,7 +388,7 @@ def scan_file(reader: FileReader, store_variant: Variant, *,
     # ---- Suppression: hits inside verified block extents ----------------
     live_x = _Extents(live_extents)
     strong = [b for b in pending if b.strong and live_x.containing(b.ib + 1) is None]
-    strong_x = _Extents([(b.ib, b.ib + block_disk_size(b.cb, _variant(b.variant)))
+    strong_x = _Extents([(b.ib, b.ib + _disk(b.cb, _variant(b.variant)))
                          for b in strong])
 
     def inside(pos: int, own_start: Optional[int] = None) -> bool:
@@ -353,7 +398,7 @@ def scan_file(reader: FileReader, store_variant: Variant, *,
         return hit is not None and hit[0] != own_start
 
     for b in pending:
-        tr_pos = b.ib + block_disk_size(b.cb, _variant(b.variant)) - 1
+        tr_pos = b.ib + _disk(b.cb, _variant(b.variant)) - 1
         if inside(b.ib, own_start=b.ib) or inside(tr_pos, own_start=b.ib):
             st.blocks_suppressed += 1
             continue
@@ -376,6 +421,13 @@ def scan_file(reader: FileReader, store_variant: Variant, *,
 
 
 _BY_NAME = {v.name: v for v in (ANSI, UNICODE, UNICODE_4K)}
+
+
+def _disk(cb: int, v: Variant) -> int:
+    """On-disk footprint of a block (4K: Kernel's 512-granular model)."""
+    if v.page_size == 4096:
+        return ((cb + 16 + 511) // 512) * 512
+    return block_disk_size(cb, v)
 
 
 def _variant(name: str) -> Variant:
