@@ -46,11 +46,17 @@ def salvage(store, item: Item) -> Salvage:
     result = Salvage(item=item)
 
     # 2. older versions of the same NID, newest (highest BID) first
-    pool = getattr(store, "_last_items", None) or []
-    result.alternatives = sorted(
-        (i for i in pool if i.state == "superseded" and item.nid and i.nid == item.nid
-         and i is not item),
-        key=lambda i: i.entry.bid_data if i.entry is not None else 0, reverse=True)
+    if item.nid:
+        from .inventory import Inventory
+        inv = Inventory(store, scan)
+        inv._walk_live()
+        inv._collect_deleted_folders()
+        result.alternatives = sorted(
+            (i for i in inv._scan_items(only_nid=item.nid)
+             if i.state == "superseded" and i.entry is not item.entry),
+            key=lambda i: i.entry.bid_data if i.entry is not None else 0, reverse=True)
+        for alt in result.alternatives:
+            alt._store = store
 
     # 1. re-read with verified alternate copies of unverified blocks
     ref = None
@@ -68,7 +74,7 @@ def salvage(store, item: Item) -> Salvage:
         prefer = {}
         for bid in touched:
             v = br.verdicts.get(bid)
-            if v is not None and v.verified:
+            if v is None or v.verified:     # no verdict kept == clean block
                 continue
             for c in scan.copies(bid):
                 if c.strong and c.ib != (v.ib if v is not None else None):

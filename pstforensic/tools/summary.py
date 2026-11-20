@@ -33,14 +33,24 @@ def summarize(path: str, *, progress: bool = False) -> dict:
     def report(done: int, total: int) -> None:
         print(f"\rscan {100 * done // max(total, 1):3d}%", end="", file=sys.stderr)
 
-    items = store.items(progress=report if progress else None)
+    states, provs, findings = Counter(), Counter(), Counter()
+    with_history = with_deleted_on = n = 0
+    for item in store.iter_items(progress=report if progress else None):
+        n += 1
+        states[item.state] += 1
+        provs[item.provenance] += 1
+        findings.update(item.integrity.codes)
+        with_history += bool(item.history)
+        with_deleted_on += bool(item.deletion and item.deletion.deleted_on)
+        if progress and n % 500 == 0:
+            print(f"\ritems {n}", end="", file=sys.stderr)
     if progress:
-        print(file=sys.stderr)
-    out["items_by_state"] = dict(Counter(i.state for i in items))
-    out["items_by_provenance"] = dict(Counter(i.provenance for i in items))
-    out["item_findings"] = dict(Counter(c for i in items for c in i.integrity.codes))
-    out["items_with_history"] = sum(1 for i in items if i.history)
-    out["items_with_deleted_on"] = sum(1 for i in items if i.deletion and i.deletion.deleted_on)
+        print(f"\ritems {n}", file=sys.stderr)
+    out["items_by_state"] = dict(states)
+    out["items_by_provenance"] = dict(provs)
+    out["item_findings"] = dict(findings)
+    out["items_with_history"] = with_history
+    out["items_with_deleted_on"] = with_deleted_on
     out["store_findings"] = dict(Counter(f.code for f in store.integrity.findings))
     out["inventory"] = asdict(store.inventory_stats)
     out["scan"] = asdict(store.scan().stats)

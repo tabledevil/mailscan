@@ -131,7 +131,24 @@ def render_value(mapi_obj: MapiObject, tag: int) -> Any:
         return v.set_decoded(rendered)
 
     result = _render_scalar(mapi_obj, v, v.raw, bt)
+    if v.prop_id == _PID_SUBJECT and isinstance(result, str):
+        result = strip_subject_prefix(result)
     return v.set_decoded(result)
+
+
+_PID_SUBJECT = 0x0037
+
+
+def strip_subject_prefix(subject: str) -> str:
+    """Drop the stored subject-prefix marker.
+
+    Stores keep ``PidTagSubject`` as ``"\x01" + chr(len(prefix)) + subject``;
+    the two marker characters are not part of the text (libpff/readpst strip
+    them the same way).
+    """
+    if len(subject) >= 2 and subject[0] == "\x01":
+        return subject[2:]
+    return subject
 
 
 def _render_scalar(

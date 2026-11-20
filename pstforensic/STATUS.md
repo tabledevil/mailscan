@@ -189,6 +189,23 @@ tolerant; every verdict lands on the object it concerns.
   `DeletionInfo` (deleted_on only from PidTagDeletedOn; otherwise `not_before`).
 - `tests/test_resilience.py` (15) incl. the zero-garbage gate.
 
-Open (PLAN §14.9 steps 2–4): crypt ladder per heap block, codepage levels,
-4K block trailers in the scan, `item.recover()`, scan sidecar cache, carving
-of unreferenced blocks into items, corruption matrix + Kernel differential.
+Then (same day): crypt ladder (heap-structure evidence, learned order),
+scan-backed reading of a damaged NBT (`NODE_FROM_SCAN`, state `lost`),
+headerless fallback, codepage levels on every string value, carving of freed
+message PCs (`carved`), `item.recover()`, streaming `iter_items()`, 13-defect
+corruption matrix.
+
+**First real-sample axis (D) results** — java-libpst's public stores (two
+Unicode PSTs, one Outlook 2013 4K OST) exposed and locked
+(`tests/test_real_corpus.py`):
+- PidTagLtpRowId is 0x67F20003 (self-oracle used 0x6748 → no folder rows).
+- PtypObject value is {dwNid, ulSize}; the embedded message lives at dwNid.
+- PidTagSubject carries a 2-char prefix marker ("\x01" + len).
+- Non-IPM folders (Freebusy, search roots) are walked under `/~root`.
+- 4K geometry verified: blocks 512-aligned, 24-byte trailer, BBTENTRY with
+  cbInflated; `UNICODE_4K.verified = True`.
+- A stale index entry whose location was reused by another block is treated
+  as missing (never attribute foreign bytes).
+
+Open: scan sidecar cache, zlib-compressed 4K blocks against a real sample,
+Kernel differential in the VM, MATT `PstAnalyzer`.

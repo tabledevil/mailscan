@@ -63,7 +63,7 @@ SUBNODES_UNKNOWN = "SUBNODES_UNKNOWN"
 RECOVERED_ALT_COPY = "RECOVERED_ALT_COPY"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Finding:
     """One anomaly, located by file offset / BID / NID where known."""
 
@@ -120,7 +120,7 @@ class Integrity:
         return len(self.findings)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class PageVerdict:
     """What reading one B-tree page established ([MS-PST] §2.2.2.7.1)."""
 
@@ -147,7 +147,7 @@ class PageVerdict:
         return out
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class BlockVerdict:
     """What reading one block established ([MS-PST] §2.2.2.8.1)."""
 

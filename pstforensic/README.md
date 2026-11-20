@@ -47,11 +47,16 @@ for item in RecoveryEngine("mailbox.pst").recover():   # deleted/orphaned items
 
 ```python
 store = pstforensic.open_store("mailbox.pst")
-for item in store.items():          # live, soft/hard-deleted, orphaned, superseded
+for item in store.iter_items():     # streams; store.items() returns a list
     print(item.state, item.provenance, item.folder_path, item.subject,
           sorted(item.integrity.codes))
 print(store.integrity.codes)        # header / B-tree / scan findings
+
+salvage = item.recover()            # verified copies, older versions, text fragments
 ```
+
+States: `live`, `live_damaged`, `soft_deleted`, `orphan`, `deleted`,
+`superseded`, `carved`, `lost`.
 
 Reading never stops on a bad header, CRC or signature; every such verdict is a
 finding on the object it affects.
@@ -78,7 +83,7 @@ you exercise the MSG round-trip writer).
 
 ```bash
 # from the repo root
-python3 -m pytest pstforensic/tests -q          # → 253 passed, 7 skipped
+python3 -m pytest pstforensic/tests -q          # → 283 passed, 10 skipped
 ```
 
 The 7 skipped are the **content-sealed real-sample harness** — they run only when
@@ -88,6 +93,13 @@ output. See **[`tests/REAL_SAMPLE_TESTING.md`](tests/REAL_SAMPLE_TESTING.md)**:
 ```bash
 PSTFORENSIC_PRIVATE_SAMPLE=/secure/path/evidence.pst \
   python3 -m pytest pstforensic/tests/test_real_sample.py -q --tb=line -p no:cacheprovider
+```
+
+Regression against real Outlook stores (the public java-libpst test files
+`dist-list.pst`, `passworded.pst`, `example-2013.ost` in one directory):
+
+```bash
+PSTFORENSIC_REAL_CORPUS=/path/to/dir python3 -m pytest pstforensic/tests/test_real_corpus.py -q
 ```
 
 Optional independent oracle for the sealed differential (Axis D):

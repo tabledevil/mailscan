@@ -94,9 +94,12 @@ UNICODE = Variant(
 )
 
 # Unicode 4K-page OST (Outlook 2013+ cached mode), wVer 36/37.
-# UNVERIFIED against a real OST — see PLAN Appendix A H20.  Trailer offset
-# (0xFE8), counter offset/width (0xFD8, u16) and the 126/169 geometry are taken
-# from Kernel PST Viewer's page validator (PLAN §14.1).
+# Verified against a real Outlook 2013 OST (java-libpst example-2013.ost):
+# pages — trailer @0xFE8 (24 B), counters @0xFD8 (u16 cEnt/cEntMax), 126/169
+# geometry (also Kernel PST Viewer's validator, PLAN §14.1); blocks — 512-byte
+# aligned, 24-byte BLOCKTRAILER cb wSig dwCRC bid + 8 (cbInflated @+18);
+# BBTENTRY bref cb cbInflated cRef.  zlib compression (cbInflated != cb) is
+# implemented but not yet seen in a real sample.
 UNICODE_4K = Variant(
     name="unicode4k",
     is_unicode=True,
@@ -107,8 +110,9 @@ UNICODE_4K = Variant(
     bref_size=16,
     page_size=4096,
     page_trailer_size=24,
-    block_trailer_size=16,
-    verified=False,
+    block_trailer_size=24,
+    block_align=512,
+    verified=True,
     page_counters_offset=0xFD8,
     wide_page_counters=True,
     nbt_leaf_geometry=(126, 32),

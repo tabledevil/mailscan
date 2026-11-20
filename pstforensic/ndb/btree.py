@@ -48,7 +48,7 @@ class PageTrailer:
     bid: int
 
 
-@dataclass
+@dataclass(slots=True)
 class BBTEntry:
     """A leaf Block-BTree entry ([MS-PST] §2.2.2.7.7.3)."""
 
@@ -56,6 +56,7 @@ class BBTEntry:
     cb: int       # number of raw bytes of the block (excludes trailer padding)
     c_ref: int    # reference count
     page_ib: Optional[int] = None  # BBT leaf page this entry was read from
+    cb_inflated: Optional[int] = None  # 4K: size after zlib (== cb if stored raw)
 
     @property
     def bid(self) -> int:
@@ -63,7 +64,7 @@ class BBTEntry:
         return self.bref.bid
 
 
-@dataclass
+@dataclass(slots=True)
 class NBTEntry:
     """A leaf Node-BTree entry ([MS-PST] §2.2.2.7.7.4)."""
 
@@ -139,8 +140,6 @@ def verify_page(page: bytes, ib: int, expected_ptype: int, variant: Variant,
     """
     tr = parse_page_trailer(page, variant)
     ptype_ok = tr.ptype == tr.ptype_repeat == expected_ptype
-    if variant.wide_page_counters:  # 4K: ptypeRepeat layout unverified
-        ptype_ok = tr.ptype == expected_ptype
     c_ent, c_ent_max, cb_ent, c_level = _page_counters(page, variant)
     geometry_ok = ((c_ent_max, cb_ent) == expected_geometry(variant, expected_ptype, c_level)
                    and c_ent <= c_ent_max)
@@ -154,10 +153,17 @@ def verify_page(page: bytes, ib: int, expected_ptype: int, variant: Variant,
 
 
 def _parse_bbt_entry(buf: bytes, off: int, variant: Variant) -> BBTEntry:
-    """[MS-PST] §2.2.2.7.7.3 — BREF(8/16) + cb(2) + cRef(2) [+ pad]."""
+    """[MS-PST] §2.2.2.7.7.3 — BREF(8/16) + cb(2) + cRef(2) [+ pad].
+
+    4K: BREF(16) + cb(2) + cbInflated(2) + cRef(2) + pad(2).
+    """
     bref = parse_bref(buf, off, variant.bid_size)
     p = off + variant.bref_size
     cb = int.from_bytes(buf[p:p + 2], "little")
+    if variant.page_size == 4096:
+        return BBTEntry(bref=bref, cb=cb,
+                        c_ref=int.from_bytes(buf[p + 4:p + 6], "little"),
+                        cb_inflated=int.from_bytes(buf[p + 2:p + 4], "little"))
     c_ref = int.from_bytes(buf[p + 2:p + 4], "little")
     return BBTEntry(bref=bref, cb=cb, c_ref=c_ref)
 

@@ -18,6 +18,7 @@ data blocks only**; XBLOCK metadata is never encrypted.
 from __future__ import annotations
 
 import zlib
+from typing import Optional
 from dataclasses import dataclass
 
 from ..exceptions import WarnCode, WarningSink
@@ -123,7 +124,9 @@ class BlockReader:
         self.crypt_order = ([crypt_method] if crypt_method in _CRYPT_METHODS else []) + \
             [m for m in _CRYPT_METHODS if m != crypt_method]
         self.verified_counts = {m: 0 for m in _CRYPT_METHODS}
-        self.stream_crypt: dict[int, tuple[int, str]] = {}  # root bid -> (method, level)
+        # root bid -> (method, level), kept only when it deviates from the header
+        # or is merely a guess (clean streams carry no findings).
+        self.stream_crypt: dict[int, tuple[int, str]] = {}
         self._stream: list = [None, None]  # [method, level] of the stream being read
 
     def attach_scan(self, locate) -> None:
@@ -175,11 +178,24 @@ class BlockReader:
         tr = parse_block_trailer(buf, self.variant)
         cb_ok = tr.cb == cb
         bid_ok = normalize_bid(tr.bid) == bid
+        if from_scan and not bid_ok:
+            # Placed only by a stale index entry, and the trailer there names
+            # another block: the bytes provably belong to someone else.  Using
+            # them would attribute foreign content to this node.
+            self.verdicts[bid] = BlockVerdict(bid=bid, ib=ib, missing=True)
+            self.sink.warn(WarnCode.OUT_OF_BOUNDS,
+                           f"bid {bid:#x}: location reused by bid {tr.bid:#x}",
+                           where=where)
+            return None
         crc_ok = compute_crc(payload) == tr.dw_crc
         sig_ok = compute_sig(ib, tr.bid) == tr.w_sig
-        self.verdicts[bid] = BlockVerdict(bid=bid, ib=ib, crc_ok=crc_ok,
-                                          sig_ok=sig_ok, bid_ok=bid_ok,
-                                          cb_ok=cb_ok, from_scan=from_scan)
+        verdict = BlockVerdict(bid=bid, ib=ib, crc_ok=crc_ok, sig_ok=sig_ok,
+                               bid_ok=bid_ok, cb_ok=cb_ok, from_scan=from_scan)
+        if verdict.verified and not from_scan:
+            # Clean blocks carry no findings: keep memory proportional to damage.
+            self.verdicts.pop(bid, None)
+        else:
+            self.verdicts[bid] = verdict
         if not cb_ok:
             self.sink.warn(WarnCode.BLOCK_CRC_FAIL,
                            f"trailer cb {tr.cb} != BBT cb {cb}", where)
@@ -206,7 +222,8 @@ class BlockReader:
         try:
             return self._read_data(bid, depth=0, seen=seen)
         finally:
-            if self._stream[0] is not None:
+            if self._stream[0] is not None and (
+                    self._stream[0] != self.crypt_method or self._stream[1] == GUESSED):
                 self.stream_crypt[bid] = (self._stream[0], self._stream[1])
             self._stream = saved
             if touched is not None:
@@ -253,7 +270,7 @@ class BlockReader:
 
         if not bid_is_internal(bid):
             # Leaf data block: maybe 4K-compressed, then decode.
-            raw = self._maybe_inflate(raw, bid)
+            raw = self._maybe_inflate(raw, bid, self._inflated_size(bid, raw))
             if self._stream[0] is None:
                 return self._decode_first(raw, bid)
             from .crypt import decode_block
@@ -285,14 +302,40 @@ class BlockReader:
                            where=f"bid={bid:#x}")
         return bytes(out)
 
-    def _maybe_inflate(self, raw: bytes, bid: int) -> bytes:
-        """4K-OST: blocks may be zlib-deflated (Appendix A H20, UNVERIFIED).
-
-        Only attempted for the 4K variant; on failure, returns raw bytes and
-        warns ``COMPRESS_FAIL`` (never aborts).
-        """
+    def _inflated_size(self, bid: int, raw: bytes) -> Optional[int]:
+        """4K: cbInflated from the BBT entry, else from the block trailer."""
         if self.variant.page_size != 4096:
+            return None
+        ent = self.bbt.get(bid)
+        if ent is not None and ent.cb_inflated is not None:
+            return ent.cb_inflated
+        loc = self.locate(bid)
+        if loc is None:
+            return None
+        ib, cb, _ = loc
+        disk = block_disk_size(cb, self.variant)
+        tr = self.reader.read(ib + disk - self.variant.block_trailer_size,
+                              self.variant.block_trailer_size)
+        return int.from_bytes(tr[18:20], "little") if len(tr) >= 20 else None
+
+    def _maybe_inflate(self, raw: bytes, bid: int, inflated: Optional[int]) -> bytes:
+        """4K-OST: a block whose cbInflated differs from cb is zlib-deflated.
+
+        On failure returns the raw bytes and warns ``COMPRESS_FAIL``.
+        """
+        if self.variant.page_size != 4096 or not inflated or inflated == len(raw):
             return raw
+        try:
+            out = zlib.decompress(raw)
+        except zlib.error:
+            self.sink.warn(WarnCode.COMPRESS_FAIL, "zlib.decompress failed",
+                           where=f"bid={bid:#x}")
+            return raw
+        if len(out) != inflated:
+            self.sink.warn(WarnCode.COMPRESS_FAIL,
+                           f"inflated {len(out)} != cbInflated {inflated}",
+                           where=f"bid={bid:#x}")
+        return out
         if not self.variant.verified:
             self.sink.warn(WarnCode.UNVERIFIED_CONST,
                            "4K block compression order is a working hypothesis",

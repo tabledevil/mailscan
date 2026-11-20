@@ -57,6 +57,8 @@ class Folder:
         self._include_fai = include_fai
         self.name = _string_prop(pc, PID_DISPLAY_NAME) or f"0x{pc_nid:08X}"
         self.path = f"{parent_path}/{self.name}" if parent_path else f"/{self.name}"
+        if pc_nid == 0x122 and not parent_path and _string_prop(pc, PID_DISPLAY_NAME) is None:
+            self.path = ""   # unnamed store root (OSTs): children read "/Root - Mailbox/…"
 
     # -- container classification -----------------------------------------
     @property
@@ -137,7 +139,7 @@ class Folder:
         ids: list[int] = []
         for row in TableContext.from_node(ref, self._store.variant,
                                           sink=self.sink):
-            v = row.get_tag(PID_LTP_ROW_ID) or row.by_id(0x6748)
+            v = row.get_tag(PID_LTP_ROW_ID) or row.by_id(0x67F2)
             if v is None or len(v.raw) < 4:
                 continue
             ids.append(struct.unpack_from("<I", v.raw, 0)[0])

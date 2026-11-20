@@ -47,8 +47,9 @@ TCI_2b = 1   # end of the 2-byte cell group
 TCI_1b = 2   # end of the 1-byte cell group
 TCI_bm = 3   # end of the row incl. the CEB → row size
 
-# PidTagLtpRowId (0x67480003): the dwRowID column at row offset 0.
-PID_LTP_ROW_ID = 0x67480003
+# PidTagLtpRowId (0x67F20003, [MS-PST] §2.3.4.4.1): the dwRowID column at
+# row offset 0.  (0x6748 was a self-oracle error — real stores use 0x67F2.)
+PID_LTP_ROW_ID = 0x67F20003
 
 
 @dataclass

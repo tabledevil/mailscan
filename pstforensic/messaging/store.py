@@ -78,7 +78,6 @@ class Store:
         self.root_folder = self._open_root_folder()
         self._scan = nodedb._scan
         self.inventory_stats = None
-        self._last_items = []
 
     # -- bootstrap --------------------------------------------------------
     def _bootstrap(self) -> None:
@@ -170,18 +169,21 @@ class Store:
                                       use_numpy=use_numpy)
         return self._scan
 
-    def items(self, *, include_fai: bool = False, progress=None,
-              should_abort=None) -> List:
-        """Every message the file holds — live, soft/hard-deleted, orphaned,
-        superseded — each with state, provenance, findings and deletion info
-        (PLAN §14.6).  Policy (what to show) is the caller's."""
+    def iter_items(self, *, include_fai: bool = False, progress=None,
+                   should_abort=None):
+        """Stream every message the file holds — live, soft/hard-deleted,
+        orphaned, superseded, carved, lost — each with state, provenance,
+        findings and deletion info (PLAN §14.6).  Memory stays flat; use this
+        for large stores.  Policy (what to show) is the caller's."""
         from .inventory import Inventory
         scan = self.scan(progress=progress, should_abort=should_abort)
         inv = Inventory(self, scan, include_fai=include_fai)
-        out = list(inv.items())
         self.inventory_stats = inv.stats
-        self._last_items = out
-        return out
+        yield from inv.items()
+
+    def items(self, **kwargs) -> List:
+        """:meth:`iter_items` as a list (convenient for small stores)."""
+        return list(self.iter_items(**kwargs))
 
     def recover(self, item):
         """Deep salvage of one item (PLAN §14.8); same as ``item.recover()``."""

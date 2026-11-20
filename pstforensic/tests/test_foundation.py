@@ -25,9 +25,13 @@ def test_unicode_header_offsets():
     assert V.UNICODE.block_trailer_size == 16
 
 
-def test_4k_is_marked_unverified():
-    assert V.UNICODE_4K.page_size == 4096
-    assert V.UNICODE_4K.verified is False
+def test_4k_geometry_locked_by_real_ost():
+    # Verified on a real Outlook 2013 OST (java-libpst example-2013.ost).
+    v = V.UNICODE_4K
+    assert (v.page_size, v.page_trailer_size, v.page_counters_offset) == (4096, 24, 0xFD8)
+    assert (v.block_align, v.block_trailer_size) == (512, 24)
+    assert (v.nbt_leaf_geometry, v.bbt_leaf_geometry) == ((126, 32), (169, 24))
+    assert v.verified is True
 
 
 @pytest.mark.parametrize("wver,name", [
