@@ -17,7 +17,8 @@ from ..integrity import Integrity, weakest
 from ..variant import Variant
 from .block import BlockReader
 from .btree import BBTEntry, BTreeWalker, NBTEntry
-from .header import Header, Root, detect
+from ..exceptions import NotAPstError, UnsupportedStoreError
+from .header import Header, Root, detect, headerless
 from .subnode import SubnodeReader
 
 
@@ -107,7 +108,12 @@ class NodeDatabase:
         # explicit None check — `sink or reader.sink` would silently discard a
         # caller's fresh sink.
         self.sink = sink if sink is not None else reader.sink
-        self.header: Header = detect(reader, sink=self.sink)
+        try:
+            self.header: Header = detect(reader, sink=self.sink)
+        except (NotAPstError, UnsupportedStoreError) as exc:
+            # Header unusable: open from the scan if the file holds B-tree
+            # pages at all (Kernel reads such stores too) — else re-raise.
+            self.header = headerless(reader, exc, sink=self.sink)
         self.variant: Variant = self.header.variant
         self.crypt_method: int = self.header.crypt_method
 
@@ -128,7 +134,7 @@ class NodeDatabase:
     @property
     def nbt_damaged(self) -> bool:
         """The live NBT walk is known to be incomplete."""
-        if not self._nbt or self.skipped_pages:
+        if not self._nbt or self.skipped_pages or not self.header.root.bref_nbt.ib:
             return True
         v = self.page_verdicts.get(self.header.root.bref_nbt.ib)
         return v is None or not (v.ptype_ok and v.geometry_ok)
@@ -172,6 +178,9 @@ class NodeDatabase:
     def _build_btrees(self) -> None:
         root: Root = self.header.root
         walker = BTreeWalker(self.reader, self.variant, sink=self.sink)
+        if not root.bref_nbt.ib:          # headerless: nothing to walk
+            self.page_verdicts, self.skipped_pages = {}, []
+            return
         for ent in walker.walk(root.bref_bbt, key_kind="BID"):
             self._bbt[ent.bid] = ent
         for ent in walker.walk(root.bref_nbt, key_kind="NID"):

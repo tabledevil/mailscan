@@ -159,15 +159,26 @@ def test_bad_magic_opens_and_is_flagged():
     assert sum(1 for _ in db.iter_nbt()) == len(MSGS)
 
 
-def test_unknown_wver_without_evidence_unsupported():
+def test_unusable_header_opens_from_scan():
+    # wVer unknown and ROOT smashed: no variant validates via the header, but
+    # the file still holds B-tree pages — open headerless from the scan.
     img = bytearray(synth.build_unicode_pst(messages=MSGS))
     import struct
     struct.pack_into("<H", img, 0x0A, 9)
-    # Smash the root BREF so no variant's NBT root page validates.
     img[UNICODE.root_offset + 4:UNICODE.root_offset + 72] = b"\xff" * 68
     img[0xA4:0xA4 + 40] = b"\xff" * 40
-    with pytest.raises(UnsupportedStoreError):
-        NodeDatabase.open(FileReader(bytes(img)))
+    db = NodeDatabase.open(FileReader(bytes(img)))
+    assert db.variant is UNICODE
+    assert "HEADER_UNUSABLE" in db.header.integrity.codes
+    db.scan()
+    for idx, exp in enumerate(_expected_payloads(MSGS)):
+        nid = bref.make_nid(bref.NID_TYPE_NORMAL_MESSAGE, idx + 1)
+        assert db.node(nid).data_stream() == exp
+
+
+def test_zeroed_file_is_not_a_pst():
+    with pytest.raises(NotAPstError):
+        NodeDatabase.open(FileReader(b"\x00" * 8192))
 
 
 def test_edp_encrypted_raises():
