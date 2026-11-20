@@ -3,17 +3,13 @@
 Applied to **data blocks only** — NDB metadata (B-trees, AMap, page/block
 trailers, the header) is never encrypted ([MS-PST] §5).
 
-PERMUTE (§5.1) uses the static 3×256 ``mpbbCrypt`` table embedded below.  The
-table is verified at import by a self-checksum and by the spec's own
-involution property (encode∘decode == identity on the byte alphabet), so a
-truncated/corrupted copy is caught immediately (PLAN §0.5).
+PERMUTE (§5.1) substitutes every byte through mpbbR (encrypt) or mpbbI
+(decrypt, = mpbbR⁻¹) — verified on real PERMUTE stores.
 
-CYCLIC (§5.2) is keyed by the block's BID; it is its own inverse.
-
-Direction: the spec's ``CryptPermute`` takes an ``fEncrypt`` flag selecting the
-forward (R→I) or reverse (I→...→R) substitution.  We expose ``decode`` (the
-fEncrypt=0 / decrypt path used to read a stored block) and ``encode`` (the
-inverse) so the recovery encode-brute-force can round-trip.
+CYCLIC (§5.2) is keyed by the low 32 bits of the block's BID and chains
+R → S → I with byte-wise salts; since S is self-inverse and I = R⁻¹ the
+function is its own inverse.  Tables: R and I confirmed by real stores and
+libpff, S by libpff (no real CYCLIC store yet — cross-implementation only).
 """
 from __future__ import annotations
 
@@ -21,7 +17,9 @@ from ..variant import CRYPT_CYCLIC, CRYPT_NONE, CRYPT_PERMUTE
 
 # --- mpbbCrypt: 3 × 256 substitution tables from [MS-PST] §5.1 ---------------
 # Concatenated as mpbbR (256) | mpbbS (256) | mpbbI (256).  Copied verbatim from
-# the spec listing; locked by _CRYPT_CHECKSUM + the involution self-test below.
+# the spec listing (mpbbS re-taken from libpff after the first transcription
+# was found corrupt from index 208 on); locked by the SHA-256 and the
+# inverse/involution assertions below.
 _MPBB_R = (
     65, 54, 19, 98, 168, 33, 110, 187,
     244, 22, 204, 4, 127, 100, 232, 93,
@@ -83,12 +81,12 @@ _MPBB_S = (
     50, 149, 211, 246, 74, 232, 166, 234,
     233, 243, 213, 47, 112, 32, 242, 31,
     5, 103, 173, 85, 16, 206, 205, 227,
-    8, 186, 192, 60, 193, 88, 89, 178,
-    225, 96, 215, 218, 89, 191, 145, 187,
-    207, 39, 51, 39, 38, 95, 198, 138,
-    90, 224, 222, 30, 28, 226, 90, 90,
-    90, 90, 90, 90, 90, 90, 90, 90,
-    90, 90, 90, 90, 90, 90, 90, 90,
+    39, 59, 218, 186, 215, 194, 38, 212,
+    145, 29, 210, 28, 34, 51, 248, 250,
+    241, 90, 239, 207, 144, 182, 139, 181,
+    189, 192, 191, 8, 151, 30, 108, 226,
+    97, 224, 198, 193, 89, 171, 187, 88,
+    222, 95, 223, 96, 121, 126, 178, 138,
 )
 _MPBB_I = (
     71, 241, 180, 230, 11, 106, 114, 72,
@@ -131,59 +129,20 @@ assert len(mpbbCrypt) == 768, "mpbbCrypt must be exactly 3*256 bytes"
 # Self-checksum (sum of all 768 bytes) — cheap corruption guard at import.
 _CRYPT_CHECKSUM = sum(mpbbCrypt)
 
-# UNVERIFIED: the exact mpbbCrypt byte values above are transcribed from
-# [MS-PST] §5.1 but have NOT been locked against a real proprietary PST sample
-# (PLAN Appendix A H21 / §0.5 — VERIFY@vector).  The spec defines the *forward*
-# (encode) substitution as mpbbR∘mpbbS∘mpbbI; the decode path is its exact
-# inverse.  Rather than assume the three published tables are mutually inverse
-# (a property that depends on a byte-perfect transcription we cannot yet
-# verify), we build the decode table as the literal functional inverse of the
-# encode map.  This guarantees round-trip (encode∘decode == identity) on *any*
-# table bytes, so the synth oracle and reader agree regardless of transcription
-# error; only the absolute ciphertext of a real Outlook block stays unverified.
-def _build_permute_maps() -> tuple[bytes, bytes]:
-    """Pick a bijective encode substitution from the embedded table bytes.
+# [MS-PST] §5.1: CryptPermute encrypts with mpbbR and decrypts with mpbbI
+# (= mpbbR⁻¹); §5.2: CryptCyclic chains R → S → I with S self-inverse, which
+# makes it its own inverse.  These properties are asserted below; R and I are
+# additionally confirmed by real PERMUTE stores, S against libpff's table.
+_R, _S, _I = bytes(_MPBB_R), bytes(_MPBB_S), bytes(_MPBB_I)
+assert all(_I[_R[b]] == b for b in range(256)), "mpbbI is not the inverse of mpbbR"
+assert all(_S[_S[b]] == b for b in range(256)), "mpbbS is not self-inverse"
 
-    The spec's forward map is ``mpbbI∘mpbbS∘mpbbR``.  When all three published
-    tables are byte-perfect permutations this composition is itself a
-    permutation.  Our *transcription* may not be byte-perfect (UNVERIFIED), so
-    we degrade gracefully to the first sub-table that IS a clean 0..255
-    permutation, ensuring PERMUTE is always a real, invertible substitution
-    (never an accidental no-op).  Order of preference keeps the real
-    composition when the transcription is good.
-    """
-    for cand in (
-        [_MPBB_I[_MPBB_S[_MPBB_R[b]]] for b in range(256)],  # spec composition
-        list(_MPBB_R),                                        # R alone
-        list(_MPBB_I),                                        # I alone
-    ):
-        if len(set(cand)) == 256:
-            enc = bytes(cand)
-            dec = bytearray(256)
-            for b, e in enumerate(enc):
-                dec[e] = b
-            return enc, bytes(dec)
-    # Should never happen given R/I are bijective; identity as last resort.
-    return bytes(range(256)), bytes(range(256))
-
-
-_ENCODE_MAP, _DECODE_MAP = _build_permute_maps()
-
-assert sorted(_ENCODE_MAP) == list(range(256)), "PERMUTE encode map not bijective"
-assert all(_ENCODE_MAP[_DECODE_MAP[b]] == b for b in range(256)), \
-    "PERMUTE decode is not the inverse of encode"
+_ENCODE_MAP, _DECODE_MAP = _R, _I
 
 
 def crypt_permute(data: bytes, *, encode: bool) -> bytes:
-    """PERMUTE substitution over ``data`` ([MS-PST] §5.1).
-
-    ``encode=False`` is the decode (read) path applied to a stored block;
-    ``encode=True`` is the inverse used to re-encrypt for round-trip tests.
-    The two are exact inverses by construction (see the module note on the
-    UNVERIFIED table transcription).
-    """
-    table = _ENCODE_MAP if encode else _DECODE_MAP
-    return bytes(table[b] for b in data)
+    """PERMUTE substitution over ``data`` ([MS-PST] §5.1): R to encode, I to decode."""
+    return bytes(data).translate(_R if encode else _I)
 
 
 def _cyclic_key_stream_seed(bid: int) -> int:
@@ -193,46 +152,43 @@ def _cyclic_key_stream_seed(bid: int) -> int:
 
 
 def crypt_cyclic(data: bytes, bid: int, *, encode: bool = False) -> bytes:
-    """CYCLIC encode/decode keyed by block ``bid`` ([MS-PST] §5.2).
+    """CYCLIC ([MS-PST] §5.2), keyed by the low 32 bits of the block BID.
 
-    ``dwKey`` is the low 32 bits of the BID; a running 16-bit ``w`` folds the
-    key and is incremented per byte.  Each byte goes through the documented
-    add → substitute → add → substitute → subtract → substitute → subtract
-    sequence; decode reverses it.
-
-    UNVERIFIED (PLAN Appendix A H21): the substitution tables are the same
-    transcription used by PERMUTE, so we use the construction-verified
-    ``_ENCODE_MAP``/``_DECODE_MAP`` bijection for the three substitution steps
-    to guarantee an exact round-trip (synth↔reader); the absolute ciphertext
-    against a real Outlook block remains to be pinned by a vector.
+    Per byte, with ``w`` starting at ``key ^ (key >> 16)`` and incrementing:
+    ``b += lo(w); b = R[b]; b += hi(w); b = S[b]; b -= hi(w); b = I[b];
+    b -= lo(w)``.  The function is its own inverse, so ``encode`` is ignored.
     """
+    n = len(data)
+    if not n:
+        return b""
     w0 = _cyclic_key_stream_seed(bid)
-    out = bytearray(len(data))
-    enc_map, dec_map = _ENCODE_MAP, _DECODE_MAP
+    if _np is not None and n >= 64:
+        arr = _np.frombuffer(bytes(data), dtype=_np.uint8).astype(_np.int64)
+        w = (w0 + _np.arange(n, dtype=_np.int64)) & 0xFFFF
+        lo, hi = w & 0xFF, (w >> 8) & 0xFF
+        b = _NP_R[(arr + lo) & 0xFF]
+        b = _NP_S[(b + hi) & 0xFF]
+        b = _NP_I[(b - hi) & 0xFF]
+        return ((b - lo) & 0xFF).astype(_np.uint8).tobytes()
+    out = bytearray(n)
+    R, S, I = _R, _S, _I
     for idx, byte in enumerate(data):
         w = (w0 + idx) & 0xFFFF
-        lo = w & 0xFF
-        hi = (w >> 8) & 0xFF
-        b = byte
-        if encode:
-            b = (b + lo) & 0xFF
-            b = enc_map[b]
-            b = (b + hi) & 0xFF
-            b = enc_map[b]
-            b = (b - hi) & 0xFF
-            b = enc_map[b]
-            b = (b - lo) & 0xFF
-        else:
-            # Exact inverse of the encode sequence (reverse order).
-            b = (b + lo) & 0xFF
-            b = dec_map[b]
-            b = (b + hi) & 0xFF
-            b = dec_map[b]
-            b = (b - hi) & 0xFF
-            b = dec_map[b]
-            b = (b - lo) & 0xFF
-        out[idx] = b
+        lo, hi = w & 0xFF, w >> 8
+        b = R[(byte + lo) & 0xFF]
+        b = S[(b + hi) & 0xFF]
+        b = I[(b - hi) & 0xFF]
+        out[idx] = (b - lo) & 0xFF
     return bytes(out)
+
+
+try:  # optional fast path for CYCLIC
+    import numpy as _np
+    _NP_R = _np.frombuffer(_R, dtype=_np.uint8).astype(_np.int64)
+    _NP_S = _np.frombuffer(_S, dtype=_np.uint8).astype(_np.int64)
+    _NP_I = _np.frombuffer(_I, dtype=_np.uint8).astype(_np.int64)
+except ImportError:  # pragma: no cover
+    _np = None
 
 
 def decode_block(data: bytes, crypt_method: int, bid: int) -> bytes:
