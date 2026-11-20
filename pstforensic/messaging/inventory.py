@@ -53,6 +53,9 @@ from ..ndb.bref import (
 )
 from ..ndb.scan import ScanIndex, ScannedSlot
 from .message import build_message
+import logging as _logging
+
+_log = _logging.getLogger("pstforensic.inventory")
 
 PID_MESSAGE_CLASS = 0x001A
 PID_DISPLAY_NAME = 0x3001
@@ -240,6 +243,8 @@ class Inventory:
         self.reachable: set[int] = set()
         self.deleted_folder_names: dict[int, str] = {}
         self.history: dict[int, list[HistoryEntry]] = {}
+        self.diag = getattr(store, "diag", None)
+        self.last_fail: Optional[str] = None
         self.used_bids: set[int] = set()   # freed BIDs some item's read touched
         self._scan_bids = set(scan.blocks)
 
@@ -248,18 +253,31 @@ class Inventory:
         return _MESSAGE_TYPES if self.include_fai else (NID_TYPE_NORMAL_MESSAGE,)
 
     def _build(self, ref) -> Optional[MapiMessage]:
+        """Build a message, or return None and leave the cause in ``last_fail``
+        (and, for exceptions, a content-free record in the diagnostics)."""
+        self.last_fail = None
         try:
             msg = build_message(ref, self.variant, sink=self.sink,
                                 renderer_installer=self.store.renderer_installer)
-        except Exception:
+        except Exception as exc:
+            self.last_fail = "exception"
+            if self.diag is not None:
+                self.diag.failure("build_message", exc, nid=getattr(ref, "nid", None),
+                                  bid=getattr(ref, "bid_data", None))
             return None
         finally:
             # Only freed (scanned, non-live) blocks are carving candidates.
             self.used_bids |= all_touched(ref) & self._scan_bids
         mclass = _render_text(msg, PID_MESSAGE_CLASS)
         if mclass is None:
+            codes = msg.integrity.codes if msg.integrity is not None else set()
+            self.last_fail = "block_missing" if "BLOCK_MISSING" in codes else "no_message_class"
             return None
         return msg
+
+    def _note(self, what: str) -> None:
+        if self.diag is not None:
+            self.diag.reason(f"{what}:{self.last_fail}")
 
     def _folder_path(self, nid: int) -> Optional[str]:
         if nid in self.folder_paths:
@@ -307,7 +325,9 @@ class Inventory:
                 if ipm is not None and sub.nid == ipm.nid:
                     continue
                 yield from sub.walk()
-        except Exception:
+        except Exception as exc:
+            if self.diag is not None:
+                self.diag.failure("walk_non_ipm_folders", exc)
             return
 
     def _walk_live(self) -> list[tuple]:
@@ -357,7 +377,9 @@ class Inventory:
                                                self.variant, sink=self.sink)
                 raw = pc.by_id(PID_DISPLAY_NAME)
                 name = raw.raw.decode("utf-16-le", "replace") if raw and raw.raw else None
-            except Exception:
+            except Exception as exc:
+                if self.diag is not None:
+                    self.diag.failure("deleted_folder_name", exc, nid=ent.nid)
                 name = None
             if name:
                 self.deleted_folder_names[ent.nid] = name
@@ -400,8 +422,10 @@ class Inventory:
                 if msg is None:
                     if live_ent is None:
                         self.stats.unresolved_deleted += 1
+                        self._note("unresolved_deleted")
                     else:
                         self.stats.unresolved_stale += 1
+                        self._note("unresolved_stale")
                     continue
                 fp = content_fingerprint(msg)
                 if live_fp is not None and fp == live_fp:
@@ -452,6 +476,7 @@ class Inventory:
             msg = self._build(ref)
             if msg is None:
                 self.stats.unresolved_deleted += 1
+                self._note("unresolved_orphan")
                 continue
             folder = self._folder_path(ent.nid_parent)
             integ = Integrity()
@@ -500,20 +525,34 @@ class Inventory:
         """Stream every item; only content hashes are retained (for carving
         dedup), so memory does not grow with the store."""
         known: set[bytes] = set()
+        counts: dict[str, int] = {}
+        _log.info("inventory: start")
+        for it in self._chain(known):
+            it._store = self.store
+            counts[it.state] = counts.get(it.state, 0) + 1
+            if _log.isEnabledFor(10):
+                _log.debug("item nid=%#x bid=%s state=%s prov=%s folder_nid=%s codes=%s",
+                           it.nid, f"{it.bid:#x}" if it.bid else "-", it.state,
+                           it.provenance,
+                           f"{it.entry.nid_parent:#x}" if it.entry is not None else "-",
+                           sorted(it.integrity.codes))
+            if sum(counts.values()) % 1000 == 0:
+                _log.info("inventory: %d items so far %s", sum(counts.values()), counts)
+            yield it
+        _log.info("inventory: done %s stats=%s", counts, self.stats)
 
-        def remember(msg) -> None:
-            known.add(content_fingerprint(msg))
-            for emb in msg.embedded_messages:   # e.g. recurring-meeting exceptions
-                remember(emb)
-
+    def _chain(self, known: set[bytes]) -> Iterator[Item]:
         for it in self._items():
-            it._store = self.store
             if it.message is not None:
-                remember(it.message)
+                self._remember(known, it.message)
             yield it
-        for it in self._carved(known):
-            it._store = self.store
-            yield it
+        yield from self._carved(known)
+
+    @staticmethod
+    def _remember(known: set[bytes], msg) -> None:
+        known.add(content_fingerprint(msg))
+        for emb in msg.embedded_messages:   # e.g. recurring-meeting exceptions
+            Inventory._remember(known, emb)
 
     def _items(self) -> Iterator[Item]:
         pairs = self._walk_live()
@@ -522,9 +561,12 @@ class Inventory:
         for folder, nid in pairs:
             ref = self.db.node(nid)
             if ref is None:
+                if self.diag is not None:
+                    self.diag.reason("live_listed_but_no_node")
                 continue
             msg = self._build(ref)
             if msg is None:
+                self._note("live_unreadable")
                 continue
             integ = Integrity()
             integ.extend(folder.integrity.findings)

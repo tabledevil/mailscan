@@ -20,6 +20,10 @@ from .btree import BBTEntry, BTreeWalker, NBTEntry
 from ..exceptions import NotAPstError, UnsupportedStoreError
 from .header import Header, Root, detect, headerless
 from .subnode import SubnodeReader
+import logging as _logging
+import time as _time
+
+_log = _logging.getLogger("pstforensic.ndb")
 
 
 class NodeRef:
@@ -148,6 +152,9 @@ class NodeDatabase:
         """
         if self._scan is None or not self._scan.complete:
             from .scan import scan_file
+            _log.info("scan: start (%d bytes, store variant %s, nbt_damaged=%s)",
+                      self.reader.size, self.variant.name, self.nbt_damaged)
+            t0 = _time.perf_counter()
             self._scan = scan_file(
                 self.reader, self.variant, live_nbt=self._nbt, live_bbt=self._bbt,
                 live_page_ibs=set(self.page_verdicts), use_numpy=use_numpy,
@@ -163,6 +170,12 @@ class NodeDatabase:
                 if ent.nid not in rank or key > rank[ent.nid]:
                     rank[ent.nid] = key
                     self._scan_nodes[ent.nid] = ent
+            st = self._scan.stats
+            _log.info("scan: done in %.1fs complete=%s pages=%d slots=%d blocks=%d "
+                      "bbt_entries=%d stats=%s", _time.perf_counter() - t0,
+                      self._scan.complete, len(self._scan.pages), len(self._scan.slots),
+                      sum(len(v) for v in self._scan.blocks.values()),
+                      len(self._scan.bbt_entries), st)
         return self._scan
 
     def scan_entry(self, nid: int) -> Optional[NBTEntry]:
@@ -189,6 +202,13 @@ class NodeDatabase:
         self.skipped_pages = walker.skipped_pages
         if not self._nbt and not self.skipped_pages:
             self.skipped_pages = [root.bref_nbt.ib]
+        bad = {ib: sorted(f.code for f in v.findings())
+               for ib, v in self.page_verdicts.items() if v.findings()}
+        _log.info("btree: nbt=%d bbt=%d pages=%d damaged_pages=%d skipped=%s",
+                  len(self._nbt), len(self._bbt), len(self.page_verdicts), len(bad),
+                  [hex(i) for i in self.skipped_pages])
+        for ib, codes in list(bad.items())[:200]:
+            _log.debug("btree: page %#x %s", ib, codes)
 
     # -- public surface ---------------------------------------------------
     def node(self, nid: int) -> Optional[NodeRef]:

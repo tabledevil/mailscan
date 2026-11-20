@@ -45,6 +45,9 @@ from ..variant import (
     wver_is_wip_capable,
 )
 from .bref import BREF, parse_bref
+import logging as _logging
+
+_log = _logging.getLogger("pstforensic.header")
 from .crc import compute_crc
 
 # Header field offsets shared by all variants ([MS-PST] §2.2.2.6 / Appendix A.2).
@@ -211,6 +214,8 @@ def detect(reader: FileReader, *, sink: WarningSink | None = None) -> Header:
     if not magic_ok and not evidence:
         raise NotAPstError(f"bad magic {magic!r}, expected {MAGIC!r}")
 
+    _log.info("header: wVer=%d magic_ok=%s variant=%s evidence=%s",
+              wver, magic_ok, variant.name, evidence)
     if not variant.verified:
         sink.warn(WarnCode.UNVERIFIED_CONST,
                   f"wVer={wver} 4K-OST geometry is a working hypothesis "
@@ -240,6 +245,9 @@ def detect(reader: FileReader, *, sink: WarningSink | None = None) -> Header:
     if crc_full_ok is False:
         integ.add(I.HEADER_CRC_FAIL, "dwCRCFull", ib=OFF_CRC_FULL_UNICODE)
 
+    _log.info("header: crypt=%#x eof=%#x size=%#x amap_valid=%d crc_partial=%s crc_full=%s "
+              "findings=%s", crypt_method, root.ib_file_eof, reader.size, root.f_amap_valid,
+              crc_partial_ok, crc_full_ok, sorted(integ.codes))
     return Header(
         variant=variant,
         wver=wver,
@@ -270,6 +278,8 @@ def headerless(reader: FileReader, cause: Exception, *,
     for p in probe.pages:
         if p.ptype == 0x81:
             counts[p.variant] = counts.get(p.variant, 0) + 1
+    _log.warning("header unusable (%s); NBT pages per variant from scan: %s",
+                 type(cause).__name__, counts)
     if not counts:
         raise cause
     by_name = {v.name: v for v in ALL_VARIANTS}

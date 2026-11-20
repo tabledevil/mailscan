@@ -27,6 +27,9 @@ from ..integrity import GUESSED, INFERRED, VERIFIED, BlockVerdict
 from ..variant import Variant
 from .bref import bid_is_internal, normalize_bid
 from .btree import BBTEntry
+import logging as _logging
+
+_log = _logging.getLogger("pstforensic.block")
 from .crc import compute_crc, compute_sig
 
 BTYPE_XBLOCK = 0x01   # XBLOCK / XXBLOCK ([MS-PST] §2.2.2.8.3.2)
@@ -243,6 +246,9 @@ class BlockReader:
             if looks_like_heap(plain):
                 self.verified_counts[m] += 1
                 if self.crypt_order[0] != m:
+                    _log.info("crypt: bid %#x verifies as method %d (header %#x); "
+                              "order now %s", bid, m, self.crypt_method,
+                              [m] + [x for x in self.crypt_order if x != m])
                     self.crypt_order.remove(m)
                     self.crypt_order.insert(0, m)
                 self._stream[:] = [m, VERIFIED]
@@ -251,6 +257,8 @@ class BlockReader:
                 break   # unverifiable (non-heap) stream; store-wide evidence holds
         m = self.crypt_order[0]
         self._stream[:] = [m, INFERRED if self._settled() else GUESSED]
+        if self._stream[1] == GUESSED:
+            _log.debug("crypt: bid %#x not verifiable; guessing method %d", bid, m)
         return decode_block(raw, m, bid)
 
     def _read_data(self, bid: int, depth: int, seen: set[int]) -> bytes:

@@ -474,3 +474,45 @@ def test_cyclic_matches_spec_literal():
         out.append(b)
         w = (w + 1) & 0xFFFF
     assert C.crypt_cyclic(data, key) == bytes(out)
+
+
+# --- diagnostics & debug log are content-free --------------------------------------
+def test_diagnostics_record_failures_without_leaking_messages(monkeypatch, tmp_path):
+    import json
+    import logging
+    from pstforensic.log import enable_debug_log
+    from pstforensic.messaging import inventory as inv_mod
+    secret = "Top-Secret-Subject-Line"
+
+    def boom(*a, **k):
+        raise UnicodeDecodeError("utf-8", secret.encode(), 0, 1, secret)
+
+    log_path = tmp_path / "debug.log"
+    handler = enable_debug_log(str(log_path), logging.DEBUG)
+    try:
+        monkeypatch.setattr(inv_mod, "build_message", boom)
+        st = open_store(synth.build_unicode_pst_tree(hard_deleted=True))
+        st.items()
+        diag = st.diagnostics()
+    finally:
+        logging.getLogger("pstforensic").removeHandler(handler)
+        handler.close()
+    blob = json.dumps(diag, default=str)
+    assert secret not in blob
+    assert secret not in log_path.read_text()
+    fails = diag["failures"]
+    assert fails and fails[0]["exception"] == "UnicodeDecodeError"
+    assert fails[0]["phase"] == "build_message"
+    assert "test_resilience.py" in fails[0]["location"] or "inventory.py" in fails[0]["location"]
+    assert diag["reasons"].get("unresolved_deleted:exception") == 1
+    assert diag["environment"]["pstforensic"]
+
+
+def test_summary_tool_never_raises(tmp_path):
+    from pstforensic.tools.summary import summarize
+    p = tmp_path / "junk.pst"
+    p.write_bytes(b"\x00" * 8192)
+    out = summarize(str(p))
+    assert out["failed_phase"] == "open"
+    assert out["exception"] == "NotAPstError"
+    assert "fingerprint" in out

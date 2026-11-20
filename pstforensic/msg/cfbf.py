@@ -182,7 +182,7 @@ class CfbfContainer:
             with self._ole.openstream(seg) as st:
                 return st.read()
         except Exception as exc:
-            self.sink.warn(WarnCode.OUT_OF_BOUNDS, f"stream read failed: {exc}", where=path)
+            self.sink.warn(WarnCode.OUT_OF_BOUNDS, f"stream read failed: {type(exc).__name__}", where=path)
             return None
 
     def raw_bytes(self) -> Optional[bytes]:

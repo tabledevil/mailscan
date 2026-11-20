@@ -53,6 +53,19 @@ def setup_logging(verbosity=0, debug=False, log_file=None):
         except Exception as e:
             sys.stderr.write(f"Warning: Failed to setup log file '{log_file}': {e}\n")
 
+    # pstforensic (PST/OST library) is the debugging base for PstAnalyzer:
+    # it logs under its own hierarchy; MATT decides its verbosity — same
+    # handlers and levels as MATT's own logger.
+    pst_logger = logging.getLogger("pstforensic")
+    pst_logger.setLevel(logging.DEBUG if (debug or verbosity >= 2) else
+                        logging.INFO if verbosity == 1 else logging.WARNING)
+    pst_logger.propagate = False
+    for handler in pst_logger.handlers[:]:
+        if not isinstance(handler, logging.NullHandler):
+            pst_logger.removeHandler(handler)
+    for handler in matt_logger.handlers:
+        pst_logger.addHandler(handler)
+
     # Suppress noisy third-party loggers
     for noisy in ("chardet", "charset_normalizer", "urllib3", "PIL", "magika"):
         logging.getLogger(noisy).setLevel(logging.WARNING)

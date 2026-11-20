@@ -6,6 +6,11 @@ finding codes — so the output can be shared to diagnose a store.
 
     python3 -m pstforensic.tools.summary /path/to/store.pst
     python3 -m pstforensic.tools.summary --json /path/to/store.pst
+    python3 -m pstforensic.tools.summary --json --debug-log run.log /path/to/store.pst
+
+The ``diagnostics`` section (and the debug log) hold only structural data:
+exception types and code locations, NIDs/BIDs/offsets, warning codes,
+timings, versions — safe to share for debugging.
 """
 from __future__ import annotations
 
@@ -18,10 +23,33 @@ from dataclasses import asdict
 
 
 def summarize(path: str, *, progress: bool = False) -> dict:
+    """Count-only summary.  Never raises: a failing phase is reported with the
+    exception type and code location (no message text) plus a header
+    fingerprint, so a field report is always produced."""
     from pstforensic import open_store
+    from pstforensic.diagnostics import code_location, environment, peak_rss_mb
 
     t0 = time.time()
-    store = open_store(path)
+    try:
+        store = open_store(path)
+    except Exception as exc:
+        out = {"failed_phase": "open", "exception": type(exc).__name__,
+               "location": code_location(exc), "environment": environment(),
+               "peak_rss_mb": peak_rss_mb()}
+        try:
+            from pstforensic.tools.fingerprint import fingerprint
+            out["fingerprint"] = fingerprint(path, do_scan=False)
+        except Exception as fexc:
+            out["fingerprint_error"] = type(fexc).__name__
+        return out
+    try:
+        return _summarize_store(store, path, progress, t0)
+    except Exception as exc:
+        return {"failed_phase": "inventory", "exception": type(exc).__name__,
+                "location": code_location(exc), "diagnostics": store.diagnostics()}
+
+
+def _summarize_store(store, path: str, progress: bool, t0: float) -> dict:
     hdr = store.nodedb.header
     out: dict = {
         "variant": store.variant.name,
@@ -57,6 +85,7 @@ def summarize(path: str, *, progress: bool = False) -> dict:
     out["scan_complete"] = store.scan().complete
     out["folders"] = sum(1 for _ in store.folders())
     out["seconds"] = round(time.time() - t0, 1)
+    out["diagnostics"] = store.diagnostics()
     return out
 
 
@@ -65,7 +94,17 @@ def main(argv=None) -> int:
     ap.add_argument("path")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--progress", action="store_true", help="scan progress on stderr")
+    ap.add_argument("--debug-log", metavar="FILE",
+                    help="write the library's content-free DEBUG log to FILE")
+    ap.add_argument("-v", "--verbose", action="count", default=0,
+                    help="library log on stderr (-v INFO, -vv DEBUG)")
     a = ap.parse_args(argv)
+    import logging
+    from pstforensic.log import enable_debug_log
+    if a.debug_log:
+        enable_debug_log(a.debug_log, logging.DEBUG)
+    if a.verbose:
+        enable_debug_log(None, logging.DEBUG if a.verbose > 1 else logging.INFO)
     s = summarize(a.path, progress=a.progress)
     if a.json:
         print(json.dumps(s, indent=2, default=str))

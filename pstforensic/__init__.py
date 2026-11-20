@@ -10,6 +10,7 @@ from __future__ import annotations
 
 __version__ = "0.0.1.dev0"
 
+from . import log as _log  # noqa: F401  (installs the NullHandler)
 from .exceptions import (
     EncryptedStoreError,
     NotAMsgError,

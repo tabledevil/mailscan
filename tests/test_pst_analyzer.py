@@ -78,3 +78,22 @@ def test_max_file_size_parser():
     assert matt._parse_size("8G") == 8 << 30
     assert matt._parse_size("512m") == 512 << 20
     assert matt._parse_size("1048576") == 1 << 20
+
+
+def test_matt_logging_controls_library_verbosity():
+    import logging
+    from Utils.logger import setup_logging
+    setup_logging(verbosity=0)
+    assert logging.getLogger("pstforensic").level == logging.WARNING
+    setup_logging(debug=True)
+    lib = logging.getLogger("pstforensic")
+    assert lib.level == logging.DEBUG
+    assert set(logging.getLogger("matt").handlers) <= set(lib.handlers)
+    setup_logging(verbosity=0)
+
+
+def test_diagnostics_report_attached():
+    s = _analyze(synth.build_unicode_pst_tree())
+    d = s.analyzer.reports["pst_diagnostics"]
+    assert d.data["environment"]["pstforensic"]
+    assert d.data["failures"] == []

@@ -151,6 +151,18 @@ class PstAnalyzer(Analyzer):
                                          data={"states": dict(states), "folders": folders,
                                                "variant": store.variant.name})
 
+        diag = store.diagnostics()
+        failures = diag.get("failures") or []
+        self.reports["pst_diagnostics"] = Report(
+            "Parser diagnostics: "
+            + (", ".join(f"{f['phase']}:{f['exception']}×{f['count']} @ {f['location']}"
+                         for f in failures[:10]) or "no parser failures")
+            + f" | reasons={diag.get('reasons')} | timings={diag.get('timings_s')}",
+            short=f"{sum(f['count'] for f in failures)} parser failure(s)",
+            label="pst_diagnostics",
+            severity=Severity.LOW if failures else Severity.INFO,
+            verbosity=0 if failures else 2, data=diag)
+
         codes = Counter(f.code for f in store.integrity.findings)
         if codes:
             sev = Severity.HIGH if set(codes) & _SEVERE_STORE_CODES else Severity.MEDIUM
