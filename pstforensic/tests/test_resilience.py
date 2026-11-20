@@ -426,3 +426,51 @@ def test_corruption_matrix(defect):
     assert item_codes <= found, found
     if not item_codes:
         assert all(i.state == "live" for i in items)
+
+
+# --- crypt tables (locked after the mpbbS transcription bug) --------------------
+def test_mpbbcrypt_tables_locked():
+    import hashlib
+    from pstforensic.ndb import crypt as C
+    assert hashlib.sha256(C.mpbbCrypt).hexdigest() == \
+        "4281e754d24c215779e404b732da252e734a74eba1f8648c494c4d1260e55c7c"
+    R, S, I = bytes(C._MPBB_R), bytes(C._MPBB_S), bytes(C._MPBB_I)
+    assert all(I[R[b]] == b for b in range(256))      # I = R^-1
+    assert all(S[S[b]] == b for b in range(256))      # S self-inverse
+
+
+def test_cyclic_is_an_involution_and_paths_agree():
+    import os
+    from pstforensic.ndb import crypt as C
+    data = os.urandom(5000)
+    for bid in (0x4, 0x1234, 0xFFFF0010, 0x123456789A):
+        enc = C.crypt_cyclic(data, bid)
+        assert enc != data
+        assert C.crypt_cyclic(enc, bid) == data
+        np_ = C._np
+        try:
+            C._np = None                                    # pure-Python path
+            assert C.crypt_cyclic(data, bid) == enc
+        finally:
+            C._np = np_
+
+
+def test_cyclic_matches_spec_literal():
+    # Straight transcription of [MS-PST] §5.2 CryptCyclic, byte by byte.
+    from pstforensic.ndb import crypt as C
+    R, S, I = bytes(C._MPBB_R), bytes(C._MPBB_S), bytes(C._MPBB_I)
+    key = 0xBEEF1234
+    w = (key ^ (key >> 16)) & 0xFFFF
+    data = bytes(range(256)) * 3
+    out = bytearray()
+    for byte in data:
+        b = (byte + (w & 0xFF)) & 0xFF
+        b = R[b]
+        b = (b + (w >> 8)) & 0xFF
+        b = S[b]
+        b = (b - (w >> 8)) & 0xFF
+        b = I[b]
+        b = (b - (w & 0xFF)) & 0xFF
+        out.append(b)
+        w = (w + 1) & 0xFFFF
+    assert C.crypt_cyclic(data, key) == bytes(out)
