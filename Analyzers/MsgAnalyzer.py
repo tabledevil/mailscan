@@ -27,6 +27,14 @@ class MsgAnalyzer(Analyzer):
     optional_pip_dependencies = [('extract_msg', 'extract-msg')]
     extra = "msg"
 
+    @classmethod
+    def can_analyze(cls, struct) -> bool:
+        # PST/OST stores share the Outlook MIME type; PstAnalyzer owns them.
+        data = struct.rawdata
+        if data and data[:4] == b"!BDN":
+            return False
+        return super().can_analyze(struct)
+
     def analysis(self):
         super().analysis()
         if not extract_msg:

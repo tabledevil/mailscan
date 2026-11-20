@@ -14,6 +14,7 @@ analyzers_list = [
     "HTMLAnalyzer",
     "PDFAnalyzer",
     "MsgAnalyzer",
+    "PstAnalyzer",
     "MboxAnalyzer",
     "OfficeDocumentAnalyzer",
     "OLEOfficeAnalyzer",
