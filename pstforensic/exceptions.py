@@ -7,7 +7,10 @@ reading impossible (not a PST, WIP-encrypted) raise.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
+
+_log = logging.getLogger("pstforensic.parse")
 
 
 class PstForensicError(Exception):
@@ -79,6 +82,8 @@ class WarningSink:
     def warn(self, code: str, detail: str = "", where: str = "") -> ParseWarning:
         w = ParseWarning(code=code, detail=detail, where=where)
         self.warnings.append(w)
+        if _log.isEnabledFor(10):
+            _log.debug("warn %s @ %s: %s", code, where or "-", detail)
         return w
 
     def codes(self) -> set[str]:

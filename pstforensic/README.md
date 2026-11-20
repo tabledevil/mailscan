@@ -70,6 +70,37 @@ python3 -m pstforensic.tools.summary --progress /path/to/mailbox.pst
 python3 -m pstforensic.tools.summary --json /path/to/mailbox.pst
 ```
 
+Field report for debugging (`diagnostics` section: versions + git commit,
+timings, failures grouped by exception type and code location with sample
+NIDs, warning codes with locations, finding offsets, scan/inventory stats,
+peak memory). Never raises — a failing phase is reported, with a header
+fingerprint if the store does not even open:
+
+```bash
+python3 -m pstforensic.tools.summary --json --debug-log run.log /path/to/mailbox.pst > report.json
+```
+
+## Debug logging
+
+The library logs under the `pstforensic` logger and is silent unless the host
+configures it. INFO = phases with counts/timings; DEBUG = every decision
+(variant evidence, crypt ladder, damaged/skipped pages, every parser warning,
+every item's state and findings, every swallowed failure with its code
+frames). All log records and diagnostics are **content-free**: ids, offsets,
+sizes, codes, exception *types* — never values, names or exception messages.
+
+```python
+import logging, pstforensic
+from pstforensic.log import enable_debug_log
+enable_debug_log("pst-debug.log")            # or configure logging.getLogger("pstforensic")
+store = pstforensic.open_store(path)
+items = list(store.iter_items())
+report = store.diagnostics()                 # JSON-serialisable field report
+```
+
+In MATT the verbosity follows MATT: `-v` → INFO, `-vv`/`-d` → DEBUG; the
+`pst_diagnostics` report (JSON output) carries `store.diagnostics()`.
+
 Header and root-page structure only (stdlib-only, copyable as a single file):
 
 ```bash

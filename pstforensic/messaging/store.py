@@ -78,6 +78,8 @@ class Store:
         self.root_folder = self._open_root_folder()
         self._scan = nodedb._scan
         self.inventory_stats = None
+        from ..diagnostics import Diagnostics
+        self.diag = Diagnostics()
 
     # -- bootstrap --------------------------------------------------------
     def _bootstrap(self) -> None:
@@ -165,8 +167,11 @@ class Store:
         a damaged BBT subtree) resolve from on-disk block trailers and are
         flagged ``BLOCK_FROM_SCAN``.
         """
-        self._scan = self.nodedb.scan(progress=progress, should_abort=should_abort,
-                                      use_numpy=use_numpy)
+        if self.nodedb._scan is None or not self.nodedb._scan.complete:
+            with self.diag.timed("scan"):
+                self.nodedb.scan(progress=progress, should_abort=should_abort,
+                                 use_numpy=use_numpy)
+        self._scan = self.nodedb._scan
         return self._scan
 
     def iter_items(self, *, include_fai: bool = False, progress=None,
@@ -180,6 +185,39 @@ class Store:
         inv = Inventory(self, scan, include_fai=include_fai)
         self.inventory_stats = inv.stats
         yield from inv.items()
+
+    def diagnostics(self) -> dict:
+        """Content-free field report: environment, timings, failures by code
+        location, warning codes, finding locations, scan/inventory stats."""
+        from dataclasses import asdict
+        from ..diagnostics import environment, peak_rss_mb, warnings_summary
+        hdr = self.nodedb.header
+        locs: dict[str, list] = {}
+        for f in self.integrity.findings:
+            lst = locs.setdefault(f.code, [])
+            if len(lst) < 5:
+                lst.append({k: (f"{v:#x}" if isinstance(v, int) else v)
+                            for k, v in (("ib", f.ib), ("bid", f.bid), ("nid", f.nid))
+                            if v is not None})
+        return {
+            "environment": environment(),
+            "file_size": self.nodedb.reader.size,
+            "variant": self.variant.name, "wVer": hdr.wver,
+            "crypt_method": hdr.crypt_method,
+            "variant_evidence": hdr.variant_evidence,
+            "nbt_damaged": self.nodedb.nbt_damaged,
+            "live_nbt_entries": len(self.nodedb._nbt),
+            "live_bbt_entries": len(self.nodedb._bbt),
+            "crypt_order": list(self.nodedb._block_reader.crypt_order),
+            "crypt_verified_counts": dict(self.nodedb._block_reader.verified_counts),
+            "store_findings": locs,
+            "scan": asdict(self._scan.stats) if self._scan is not None else None,
+            "scan_complete": self._scan.complete if self._scan is not None else None,
+            "inventory": asdict(self.inventory_stats) if self.inventory_stats else None,
+            "warnings": warnings_summary(self.sink),
+            **self.diag.as_dict(),
+            "peak_rss_mb": peak_rss_mb(),
+        }
 
     def items(self, **kwargs) -> List:
         """:meth:`iter_items` as a list (convenient for small stores)."""
