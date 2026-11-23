@@ -22,7 +22,7 @@ from collections import Counter
 from dataclasses import asdict
 
 
-def summarize(path: str, *, progress: bool = False) -> dict:
+def summarize(path: str, *, progress: bool = False, cache_dir=None) -> dict:
     """Count-only summary.  Never raises: a failing phase is reported with the
     exception type and code location (no message text) plus a header
     fingerprint, so a field report is always produced."""
@@ -31,7 +31,7 @@ def summarize(path: str, *, progress: bool = False) -> dict:
 
     t0 = time.time()
     try:
-        store = open_store(path)
+        store = open_store(path, cache_dir=cache_dir)
     except Exception as exc:
         out = {"failed_phase": "open", "exception": type(exc).__name__,
                "location": code_location(exc), "environment": environment(),
@@ -94,6 +94,11 @@ def main(argv=None) -> int:
     ap.add_argument("path")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--progress", action="store_true", help="scan progress on stderr")
+    ap.add_argument("--cache-dir", default=None,
+                    help="structural index cache (content-free; default ~/.cache/pstforensic)")
+    ap.add_argument("--no-cache", action="store_true", help="do not read or write the cache")
+    ap.add_argument("--profile", metavar="FILE",
+                    help="write a content-free CPU profile (function names/times) here")
     ap.add_argument("--debug-log", metavar="FILE",
                     help="write the library's content-free DEBUG log to FILE")
     ap.add_argument("-v", "--verbose", action="count", default=0,
@@ -105,7 +110,13 @@ def main(argv=None) -> int:
         enable_debug_log(a.debug_log, logging.DEBUG)
     if a.verbose:
         enable_debug_log(None, logging.DEBUG if a.verbose > 1 else logging.INFO)
-    s = summarize(a.path, progress=a.progress)
+    from pstforensic.cache import default_dir
+    cdir = None if a.no_cache else (a.cache_dir or default_dir())
+    if a.profile:
+        from pstforensic.diagnostics import run_profiled
+        s = run_profiled(summarize, a.profile, a.path, progress=a.progress, cache_dir=cdir)
+    else:
+        s = summarize(a.path, progress=a.progress, cache_dir=cdir)
     if a.json:
         print(json.dumps(s, indent=2, default=str))
         return 0

@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import hashlib
 import struct
+import time as _time
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Iterator, Optional
@@ -115,12 +116,36 @@ class Item:
     copies: int = 1                    # identical on-disk copies collapsed
     bid: Optional[int] = None          # carved items: the PC block (no NID survives)
     entry: Optional[object] = field(default=None, repr=False)   # NBT entry used
+    folder_nid: Optional[int] = None   # the folder that lists it (live items)
     _store: Optional[object] = field(default=None, repr=False, compare=False)
 
     def recover(self):
         """Deep salvage (PLAN §14.8) — see :func:`pstforensic.messaging.salvage.salvage`."""
         from .salvage import salvage
         return salvage(self._store, self)
+
+    def record(self) -> dict:
+        """Structural index record (no content): enough to rebuild the item
+        with :meth:`Store.item` — what the persistent item index stores."""
+        e = self.entry
+        return {"state": self.state, "provenance": self.provenance, "nid": self.nid,
+                "bid": self.bid, "folder_nid": self.folder_nid,
+                "entry": (e.nid, e.bid_data, e.bid_sub, e.nid_parent) if e is not None else None}
+
+    @property
+    def parent_nid(self) -> Optional[int]:
+        """The folder NID the item's NBT entry names (None for carved items)."""
+        return getattr(self.entry, "nid_parent", None) or None
+
+    @property
+    def folder_label(self) -> str:
+        """Where to show the item: its folder path, else a synthetic folder
+        per parent NID (Kernel's orphan folders), else a bucket per state."""
+        if self.folder_path:
+            return self.folder_path
+        if self.parent_nid:
+            return f"/~orphan folders/folder {self.parent_nid:#x}"
+        return f"/~{self.state}"
 
     @property
     def subject(self) -> Optional[str]:
@@ -136,6 +161,15 @@ class InventoryStats:
     unresolved_stale: int = 0      # stale versions of live items unparseable
     identical_stale: int = 0       # stale copies identical to the live item
     carved_duplicates: int = 0     # carved PCs whose content another item has
+    # Folder reconstruction (issue #3): check these before trusting orphans.
+    folders_walked: int = 0
+    contents_tables_missing: int = 0   # folder without a readable contents TC node
+    folder_rows: int = 0               # valid rows (row id present) across tables
+    folder_rows_duplicate: int = 0     # same child listed twice
+    folder_rows_unresolved: int = 0    # row id with no node (NBT or scan)
+    folder_rows_unreadable: int = 0    # node found, message not buildable
+    orphans: int = 0                   # live NBT messages no folder lists
+    lost_unreferenced: int = 0         # message PCs in live blocks no node reaches
 
 
 def all_touched(ref) -> set[int]:
@@ -230,13 +264,30 @@ def _deletion_info(msg: Optional[MapiMessage], kind: str,
 class Inventory:
     """Builds :class:`Item` records for a :class:`~.store.Store`."""
 
-    def __init__(self, store, scan: ScanIndex, *, include_fai: bool = False):
+    def __init__(self, store, scan: ScanIndex, *, include_fai: bool = False,
+                 progress=None, should_abort=None, carving: str = "inline",
+                 on_carved=None):
         self.store = store
         self.db = store.nodedb
         self.variant = store.variant
         self.sink = store.sink
         self.scan = scan
         self.include_fai = include_fai
+        self._progress = progress
+        self._should_abort = should_abort
+        if carving not in ("inline", "background", "skip"):
+            raise ValueError(f"carving must be inline/background/skip, not {carving!r}")
+        self.carving = carving
+        self.on_carved = on_carved
+        self.records: list[dict] = []
+        self.job: Optional["CarvingJob"] = None
+        self.complete = False            # the structural stream was consumed
+        self._known: set[bytes] = set()
+        cache = getattr(self.db, "cache", None)
+        self._carve_params = (self.variant.name, bool(self.db.nbt_damaged), include_fai)
+        self._carve_only = cache.load("carving", self._carve_params) if cache else None
+        self._carve_found: list[tuple[str, int]] = []
+        self._carve_only_set = set(map(tuple, self._carve_only or ()))
         self.stats = InventoryStats()
         self.folder_paths: dict[int, str] = {}
         self.soft_folders: set[int] = set()
@@ -247,10 +298,36 @@ class Inventory:
         self.last_fail: Optional[str] = None
         self.used_bids: set[int] = set()   # freed BIDs some item's read touched
         self._scan_bids = set(scan.blocks)
+        # With NBT damage, live BBT blocks no surviving node references are
+        # candidates too (their NBT entry sat on a lost page), so track all.
+        self._track_all = bool(self.db.nbt_damaged)
 
     # -- helpers ----------------------------------------------------------
     def _message_types(self) -> tuple[int, ...]:
         return _MESSAGE_TYPES if self.include_fai else (NID_TYPE_NORMAL_MESSAGE,)
+
+    def _tick(self, phase: str, done: int, total: Optional[int], found: int,
+              *, force: bool = False) -> None:
+        """Counts-only progress (issue #1): every completed check, incl. skips."""
+        if self._progress is not None and (force or done % 256 == 0 or done == total):
+            self._progress(phase, done, total, found)
+
+    def _pc_block(self, raw: bytes, bid: int) -> Optional[bytes]:
+        """Decoded block if it is the first block of a PC heap, else None.
+        Decodes a 4-byte prefix first — the crypt methods are stream-wise,
+        so the prefix decides almost every block without a full decode."""
+        from ..ndb.block import looks_like_heap
+        from ..ndb.crypt import decode_block
+        if len(raw) < 16:
+            return None
+        for m in self.db._block_reader.crypt_order:
+            head = decode_block(raw[:4], m, bid)
+            if head[2] != 0xEC or head[3] != 0xBC:
+                continue
+            cand = decode_block(raw, m, bid)
+            if looks_like_heap(cand):
+                return cand
+        return None
 
     def _build(self, ref) -> Optional[MapiMessage]:
         """Build a message, or return None and leave the cause in ``last_fail``
@@ -267,7 +344,8 @@ class Inventory:
             return None
         finally:
             # Only freed (scanned, non-live) blocks are carving candidates.
-            self.used_bids |= all_touched(ref) & self._scan_bids
+            t = all_touched(ref)
+            self.used_bids |= t if self._track_all else (t & self._scan_bids)
         mclass = _render_text(msg, PID_MESSAGE_CLASS)
         if mclass is None:
             codes = msg.integrity.codes if msg.integrity is not None else set()
@@ -336,6 +414,9 @@ class Inventory:
         pairs = []
         soft_roots: set[int] = set()
         for folder in self._all_folders():
+            self.stats.folders_walked += 1
+            self._tick("folders", self.stats.folders_walked, None,
+                       self.stats.folder_rows, force=True)
             self.folder_paths[folder.nid] = folder.path
             parent_soft = any(folder.path.startswith(self.folder_paths[r] + "/")
                               for r in soft_roots)
@@ -350,13 +431,17 @@ class Inventory:
             for tt in ttypes:
                 ref = self.db.node(make_nid(tt, idx))
                 if ref is None:
+                    if tt == NID_TYPE_CONTENTS_TABLE:
+                        self.stats.contents_tables_missing += 1
                     continue
                 for row in TableContext.from_node(ref, self.variant, sink=self.sink):
                     v = row.get_tag(PID_LTP_ROW_ID) or row.by_id(0x67F2)
                     if v is None or len(v.raw) < 4:
                         continue
                     nid = struct.unpack_from("<I", v.raw, 0)[0]
+                    self.stats.folder_rows += 1
                     if nid in self.reachable:
+                        self.stats.folder_rows_duplicate += 1
                         continue
                     self.reachable.add(nid)
                     pairs.append((folder, nid))
@@ -398,7 +483,8 @@ class Inventory:
             groups.setdefault(slot.entry.nid, []).append(slot)
 
         nbt_damaged = self.db.nbt_damaged
-        for nid, slots in groups.items():
+        for gi, (nid, slots) in enumerate(groups.items(), 1):
+            self._tick("stale_items", gi, len(groups), 0)
             live_ent = live_nbt.get(nid)
             if live_ent is None and nid in self.reachable:
                 live_ent = self.db.scan_entry(nid)   # listed by a folder: current
@@ -469,7 +555,9 @@ class Inventory:
                            entry=slot.entry)
 
     def _orphans(self) -> Iterator[Item]:
-        for ent in self.db.iter_nbt():
+        total = len(self.db._nbt)
+        for oi, ent in enumerate(self.db.iter_nbt(), 1):
+            self._tick("orphans", oi, total, self.stats.orphans)
             if nid_type(ent.nid) not in self._message_types() or ent.nid in self.reachable:
                 continue
             ref = self.db.node(ent.nid)
@@ -482,6 +570,7 @@ class Inventory:
             integ = Integrity()
             if msg.integrity is not None:
                 integ.extend(msg.integrity.findings)
+            self.stats.orphans += 1
             yield Item(nid=ent.nid, state="orphan", provenance="btree", message=msg,
                        folder_path=folder, integrity=integ,
                        deletion=_deletion_info(msg, "orphan", folder, ent.nid_parent),
@@ -489,23 +578,19 @@ class Inventory:
 
     def _carved(self, known: set[bytes]) -> Iterator[Item]:
         """Freed message PC blocks that no surviving entry references."""
-        from ..ndb.block import looks_like_heap
-        from ..ndb.crypt import decode_block
-        br = self.db._block_reader
-        for bid, copies in self.scan.blocks.items():
+        total, found = len(self.scan.blocks), 0
+        _log.info("carving: start (%d candidate block ids)", total)
+        for done, (bid, copies) in enumerate(self.scan.blocks.items(), 1):
+            self._tick("carving", done, total, found)
             if bid & 0x2 or bid in self.used_bids or bid in self.db._bbt:
+                continue
+            if self._carve_only is not None and ("carved", bid) not in self._carve_only_set:
                 continue
             strong = [c for c in copies if c.strong and c.variant == self.variant.name]
             if not strong:
                 continue
             blk = strong[0]
-            raw = self.db.reader.read(blk.ib, blk.cb)
-            plain = None
-            for m in br.crypt_order:
-                cand = decode_block(raw, m, bid)
-                if looks_like_heap(cand) and cand[3] == 0xBC:
-                    plain = cand
-                    break
+            plain = self._pc_block(self.db.reader.read(blk.ib, blk.cb), bid)
             if plain is None:
                 continue
             msg = self._build(_CarvedRef(bid, plain, blk.ib))
@@ -516,15 +601,52 @@ class Inventory:
                 self.stats.carved_duplicates += 1
                 continue
             known.add(fp)
+            found += 1
+            self._carve_found.append(("carved", bid))
             yield Item(nid=0, state="carved", provenance="free_space", message=msg,
                        folder_path=None, integrity=msg.integrity or Integrity(),
                        deletion=_deletion_info(msg, "hard", None, None), bid=bid)
+        self._tick("carving", total, total, found, force=True)
+        _log.info("carving: done (%d recovered)", found)
+        if self._track_all:
+            yield from self._unreferenced_live(known)
+
+    def _unreferenced_live(self, known: set[bytes]) -> Iterator[Item]:
+        """Message PCs in live BBT blocks that no surviving NBT entry reaches
+        (the entry was on a lost NBT page) — Kernel's lost-item pass."""
+        total, found = len(self.db._bbt), 0
+        _log.info("lost_blocks: start (%d live block ids)", total)
+        for done, (bid, ent) in enumerate(self.db._bbt.items(), 1):
+            self._tick("lost_blocks", done, total, found)
+            if bid & 0x2 or bid in self.used_bids:
+                continue
+            if self._carve_only is not None and ("lost", bid) not in self._carve_only_set:
+                continue
+            plain = self._pc_block(self.db.reader.read(ent.bref.ib, ent.cb), bid)
+            if plain is None:
+                continue
+            msg = self._build(_CarvedRef(bid, plain, ent.bref.ib))
+            if msg is None:
+                continue
+            fp = content_fingerprint(msg)
+            if fp in known:
+                self.stats.carved_duplicates += 1
+                continue
+            known.add(fp)
+            found += 1
+            self._carve_found.append(("lost", bid))
+            self.stats.lost_unreferenced += 1
+            yield Item(nid=0, state="lost", provenance="bbt_unreferenced", message=msg,
+                       folder_path=None, integrity=msg.integrity or Integrity(),
+                       deletion=None, bid=bid)
+        self._tick("lost_blocks", total, total, found, force=True)
+        _log.info("lost_blocks: done (%d recovered)", found)
 
     # -- public ---------------------------------------------------------------
     def items(self) -> Iterator[Item]:
         """Stream every item; only content hashes are retained (for carving
         dedup), so memory does not grow with the store."""
-        known: set[bytes] = set()
+        known = self._known
         counts: dict[str, int] = {}
         _log.info("inventory: start")
         for it in self._chain(known):
@@ -538,15 +660,34 @@ class Inventory:
                            sorted(it.integrity.codes))
             if sum(counts.values()) % 1000 == 0:
                 _log.info("inventory: %d items so far %s", sum(counts.values()), counts)
+            self.records.append(it.record())
             yield it
         _log.info("inventory: done %s stats=%s", counts, self.stats)
+        self.complete = True
+        if self.carving == "inline":
+            self._finish()
+
+    def _finish(self) -> None:
+        """Everything enumerated: persist the carving result and item index."""
+        cache = getattr(self.db, "cache", None)
+        if cache is None or not self.scan.complete:
+            return
+        if self._carve_only is None:
+            cache.save("carving", self._carve_found, self._carve_params)
+        cache.save("items", self.records, self._carve_params)
 
     def _chain(self, known: set[bytes]) -> Iterator[Item]:
         for it in self._items():
             if it.message is not None:
                 self._remember(known, it.message)
             yield it
-        yield from self._carved(known)
+        if self.carving == "inline":
+            t = _time.perf_counter()
+            yield from self._carved(known)
+            self._add_time("carving", t)
+        elif self.carving == "background":
+            self.job = CarvingJob(self, known, self.on_carved)
+            self.job.start()
 
     @staticmethod
     def _remember(known: set[bytes], msg) -> None:
@@ -554,18 +695,28 @@ class Inventory:
         for emb in msg.embedded_messages:   # e.g. recurring-meeting exceptions
             Inventory._remember(known, emb)
 
+    def _timed(self, name: str):
+        from contextlib import nullcontext
+        return self.diag.timed(name) if self.diag is not None else nullcontext()
+
     def _items(self) -> Iterator[Item]:
-        pairs = self._walk_live()
-        self._collect_deleted_folders()
-        scan_items = list(self._scan_items())   # fills self.history first
-        for folder, nid in pairs:
+        with self._timed("folder_walk"):
+            pairs = self._walk_live()
+            self._collect_deleted_folders()
+        with self._timed("scan_items"):
+            scan_items = list(self._scan_items())   # fills self.history first
+        t_live = _time.perf_counter()
+        for li, (folder, nid) in enumerate(pairs, 1):
+            self._tick("live_items", li, len(pairs), li)
             ref = self.db.node(nid)
             if ref is None:
+                self.stats.folder_rows_unresolved += 1
                 if self.diag is not None:
                     self.diag.reason("live_listed_but_no_node")
                 continue
             msg = self._build(ref)
             if msg is None:
+                self.stats.folder_rows_unreadable += 1
                 self._note("live_unreadable")
                 continue
             integ = Integrity()
@@ -580,6 +731,124 @@ class Inventory:
                        folder_path=folder.path, integrity=integ,
                        deletion=_deletion_info(msg, "soft", None, None) if soft else None,
                        history=self.history.get(nid, []),
-                       entry=self.db._nbt.get(nid) or self.db.scan_entry(nid))
+                       entry=self.db._nbt.get(nid) or self.db.scan_entry(nid),
+                       folder_nid=folder.nid)
+        self._add_time("live_items", t_live)
+        t = _time.perf_counter()
         yield from self._orphans()
+        self._add_time("orphans", t)
         yield from scan_items
+
+    def _add_time(self, name: str, t0: float) -> None:
+        """Wall time of a streamed phase (includes the consumer's time)."""
+        if self.diag is not None:
+            self.diag.timings[name] = round(self.diag.timings.get(name, 0.0)
+                                            + _time.perf_counter() - t0, 3)
+
+
+class CarvingJob:
+    """Carving in a background thread (``iter_items(carving="background")``).
+
+    Every recovered item is handed to ``on_item`` as soon as it is found (to
+    trigger further examination) and collected in :attr:`items`.
+    :meth:`wait` blocks until the carving index is complete.
+    """
+
+    def __init__(self, inv: Inventory, known: set, on_item=None):
+        import threading
+        self.inv = inv
+        self.known = known
+        self.on_item = on_item
+        self.items: list[Item] = []
+        self.error: Optional[str] = None
+        self._done = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="pstforensic-carving",
+                                        daemon=True)
+
+    def start(self) -> None:
+        _log.info("carving: background job started")
+        self._thread.start()
+
+    def _run(self) -> None:
+        t = _time.perf_counter()
+        try:
+            for it in self.inv._carved(self.known):
+                it._store = self.inv.store
+                self.items.append(it)
+                self.inv.records.append(it.record())
+                if self.on_item is not None:
+                    try:
+                        self.on_item(it)
+                    except Exception as exc:   # a consumer hook never kills carving
+                        if self.inv.diag is not None:
+                            self.inv.diag.failure("on_carved_hook", exc, bid=it.bid)
+            self.inv._finish()
+        except Exception as exc:
+            self.error = type(exc).__name__
+            if self.inv.diag is not None:
+                self.inv.diag.failure("carving_job", exc)
+        finally:
+            self.inv._add_time("carving", t)
+            self._done.set()
+            _log.info("carving: background job done (%d items)", len(self.items))
+
+    @property
+    def done(self) -> bool:
+        return self._done.is_set()
+
+    def wait(self, timeout: Optional[float] = None) -> bool:
+        return self._done.wait(timeout)
+
+
+def rebuild_item(store, rec: dict) -> Optional[Item]:
+    """Rebuild one :class:`Item` from its index record, reading only it.
+
+    History and supersession links come from a full enumeration and are not
+    rebuilt; deletion info and findings are.
+    """
+    from ..ndb.btree import NBTEntry
+    db = store.nodedb
+    state, prov = rec["state"], rec["provenance"]
+    ent = NBTEntry(*rec["entry"]) if rec.get("entry") else None
+    if prov in ("free_space", "bbt_unreferenced"):
+        bid = rec["bid"]
+        if prov == "bbt_unreferenced":
+            e = db._bbt.get(bid)
+            loc = (e.bref.ib, e.cb) if e is not None else None
+        else:
+            loc = store.scan().locate(bid)
+        if loc is None:
+            return None
+        inv = Inventory(store, store.scan(), carving="skip")
+        plain = inv._pc_block(db.reader.read(loc[0], loc[1]), bid)
+        if plain is None:
+            return None
+        msg = inv._build(_CarvedRef(bid, plain, loc[0]))
+        kind = "hard" if state == "carved" else None
+        folder = None
+    else:
+        ref = db.node_from_entry(ent) if ent is not None else db.node(rec["nid"])
+        if ref is None:
+            return None
+        ref.from_scan = prov == "scan_nbt"
+        msg = build_message(ref, store.variant, sink=store.sink,
+                            renderer_installer=store.renderer_installer)
+        paths = store.folder_paths()
+        fnid = rec.get("folder_nid") or (ent.nid_parent if ent is not None else None)
+        folder = paths.get(fnid) if fnid else None
+        kind = {"soft_deleted": "soft", "orphan": "orphan", "deleted": "hard",
+                "lost": None, "superseded": None}.get(state)
+    if msg is None:
+        return None
+    integ = Integrity()
+    if msg.integrity is not None:
+        integ.extend(msg.integrity.findings)
+        integ.level = msg.integrity.level
+    deletion = _deletion_info(msg, kind, folder, ent.nid_parent if ent else None) \
+        if kind else None
+    it = Item(nid=rec["nid"], state=state, provenance=prov, message=msg,
+              folder_path=folder,
+              integrity=integ, deletion=deletion, bid=rec.get("bid"), entry=ent,
+              folder_nid=rec.get("folder_nid"))
+    it._store = store
+    return it

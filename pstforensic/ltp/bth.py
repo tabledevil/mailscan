@@ -113,16 +113,17 @@ class BTreeOnHeap:
             return
         count = len(raw) // stride
         records: list[tuple[bytes, bytes]] = []
-        prev: bytes | None = None
+        prev: int | None = None
         ordered = True
         for i in range(count):
             o = i * stride
             key = raw[o:o + ck]
             val = raw[o + ck:o + ck + ce]
             records.append((key, val))
-            if prev is not None and key <= prev:
+            k = int.from_bytes(key, "little")   # keys are little-endian integers
+            if prev is not None and k <= prev:
                 ordered = False
-            prev = key
+            prev = k
         if not ordered:
             self.sink.warn(WarnCode.SIG_MISMATCH,
                            "BTH leaf keys out of order; linear scan",

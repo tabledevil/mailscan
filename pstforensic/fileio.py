@@ -27,7 +27,10 @@ class FileReader:
         self.name = name
         self._mmap = None
         self._owns = False
-        if isinstance(source, (bytes, bytearray, memoryview)):
+        if isinstance(source, mmap.mmap):          # caller's mapping: no copy
+            self._data = memoryview(source)
+            self._size = len(self._data)
+        elif isinstance(source, (bytes, bytearray, memoryview)):
             self._data = memoryview(bytes(source))
             self._size = len(self._data)
         elif isinstance(source, (str, os.PathLike)):

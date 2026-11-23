@@ -97,3 +97,25 @@ def test_diagnostics_report_attached():
     d = s.analyzer.reports["pst_diagnostics"]
     assert d.data["environment"]["pstforensic"]
     assert d.data["failures"] == []
+
+
+def test_large_file_is_mapped_and_skips_whole_file_passes(tmp_path, monkeypatch):
+    import mmap
+    from Config.config import flags
+    p = tmp_path / "big.pst"
+    p.write_bytes(synth.build_unicode_pst_tree(extra_messages=40))
+    monkeypatch.setattr(flags, "large_file_threshold", 4096)
+    s = Structure.create(filename=str(p))
+    assert isinstance(s.rawdata, mmap.mmap)
+    r = s.analyzer.reports
+    assert r["summary"].data["states"] == {"live": 42}
+    assert "large_file" in r and "entropy" not in r
+
+
+def test_too_large_error_names_the_flag(tmp_path, monkeypatch):
+    from Config.config import flags
+    p = tmp_path / "big.pst"
+    p.write_bytes(synth.build_unicode_pst_tree())
+    monkeypatch.setattr(flags, "max_file_size", 1024)
+    with pytest.raises(ValueError, match="--max-file-size"):
+        Structure.create(filename=str(p))

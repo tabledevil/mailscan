@@ -220,6 +220,12 @@ def main():
         type=_parse_size,
         default=flags.max_file_size,
     )
+    parser.add_argument(
+        "--cache-path",
+        help="Persistent cache directory (e.g. pstforensic's structural PST "
+             "index, so reopening a large store is fast) [default: off]",
+        default=flags.cache_path,
+    )
 
     args = parser.parse_args()
 
@@ -227,6 +233,7 @@ def main():
     flags.debug = args.debug
     flags.network_policy = args.network_policy
     flags.max_file_size = args.max_file_size
+    flags.cache_path = args.cache_path
 
     # Configure logging
     setup_logging(verbosity=args.verbosity, debug=args.debug)

@@ -57,7 +57,8 @@ class Store:
         warnings: The accumulated :class:`WarningSink`.
     """
 
-    def __init__(self, nodedb: NodeDatabase, *, sink: WarningSink) -> None:
+    def __init__(self, nodedb: NodeDatabase, *, sink: WarningSink,
+                 progress=None, should_abort=None) -> None:
         self.nodedb = nodedb
         self.variant = nodedb.variant
         self.sink = sink
@@ -69,17 +70,21 @@ class Store:
         self.has_password: bool = False
         self._root_folder_nid: Optional[int] = None
 
-        if nodedb.nbt_damaged:
-            # The B-tree cannot reach every node: harvest the file first so
-            # the bootstrap and folder walk resolve nodes from the scan.
-            nodedb.scan()
-        self._bootstrap()
-        self.named_props = self._load_named_props()
-        self.root_folder = self._open_root_folder()
-        self._scan = nodedb._scan
-        self.inventory_stats = None
         from ..diagnostics import Diagnostics
         self.diag = Diagnostics()
+        self.progress = progress          # progress(phase, done, total, found)
+        self.inventory_stats = None
+        self.inventory = None
+        self._scan = None
+        if nodedb.nbt_damaged or nodedb.bbt_damaged:
+            # A B-tree cannot reach every node/block: harvest the file first
+            # so the bootstrap and folder walk resolve them from the scan.
+            self.scan(should_abort=should_abort)
+        with self.diag.timed("open"):
+            self._bootstrap()
+            self.named_props = self._load_named_props()
+            self.root_folder = self._open_root_folder()
+        self._scan = nodedb._scan
 
     # -- bootstrap --------------------------------------------------------
     def _bootstrap(self) -> None:
@@ -167,6 +172,16 @@ class Store:
         a damaged BBT subtree) resolve from on-disk block trailers and are
         flagged ``BLOCK_FROM_SCAN``.
         """
+        if progress is None and self.progress is not None:
+            size = self.nodedb.reader.size
+            cb = self.progress
+
+            def progress(done: int, total: int) -> None:
+                # The scan runs two passes over the file: pages, then blocks.
+                if done <= size:
+                    cb("scan_pages", done, size, None)
+                else:
+                    cb("scan_blocks", done - size, size, None)
         if self.nodedb._scan is None or not self.nodedb._scan.complete:
             with self.diag.timed("scan"):
                 self.nodedb.scan(progress=progress, should_abort=should_abort,
@@ -175,22 +190,112 @@ class Store:
         return self._scan
 
     def iter_items(self, *, include_fai: bool = False, progress=None,
-                   should_abort=None):
+                   should_abort=None, carving: str = "inline", on_carved=None):
         """Stream every message the file holds — live, soft/hard-deleted,
         orphaned, superseded, carved, lost — each with state, provenance,
         findings and deletion info (PLAN §14.6).  Memory stays flat; use this
-        for large stores.  Policy (what to show) is the caller's."""
+        for large stores.  Policy (what to show) is the caller's.
+
+        ``carving`` — the items only free-space carving finds (``carved``, and
+        ``lost`` PCs no node reaches):
+
+        * ``"inline"`` (default): yielded last, the stream is complete.
+        * ``"background"``: the stream ends with the structural items; carving
+          runs in a background thread, hands each find to ``on_carved(item)``
+          and :meth:`carved_items` blocks until it is complete.
+        * ``"skip"``: not run; :meth:`carved_items` runs it on demand.
+        """
         from .inventory import Inventory
         scan = self.scan(progress=progress, should_abort=should_abort)
-        inv = Inventory(self, scan, include_fai=include_fai)
+        inv = Inventory(self, scan, include_fai=include_fai,
+                        progress=self.progress, should_abort=should_abort,
+                        carving=carving, on_carved=on_carved)
         self.inventory_stats = inv.stats
+        self.inventory = inv
         yield from inv.items()
+
+    def carved_items(self, *, wait: bool = True, timeout: Optional[float] = None) -> list:
+        """The carved/lost-in-free-space items.  Blocks until the carving
+        index is complete (``wait``); starts carving if it never ran."""
+        inv = self.inventory
+        if inv is None:
+            for _ in self.iter_items(carving="skip"):
+                pass
+            inv = self.inventory
+        if inv.job is None:
+            if inv.carving == "inline":
+                if not inv.complete:          # stream not consumed yet
+                    for _ in inv.items():
+                        pass
+                return [self.item(r) for r in inv.records
+                        if r["provenance"] in ("free_space", "bbt_unreferenced")]
+            inv.carving = "background"
+            from .inventory import CarvingJob
+            inv.job = CarvingJob(inv, inv._known, inv.on_carved)
+            inv.job.start()
+        if wait:
+            inv.job.wait(timeout)
+        return list(inv.job.items)
+
+    @property
+    def carving(self):
+        """The background :class:`~.inventory.CarvingJob` (``done``, ``wait()``,
+        ``items``), or None."""
+        return self.inventory.job if self.inventory is not None else None
+
+    # -- random access ----------------------------------------------------
+    def folder_paths(self) -> dict:
+        """``{folder_nid: path}`` for every reachable folder (cached)."""
+        if getattr(self, "_folder_paths", None) is None:
+            inv = self.inventory
+            if inv is not None and inv.folder_paths:
+                self._folder_paths = dict(inv.folder_paths)
+            else:
+                from .inventory import Inventory
+                tmp = Inventory(self, self.scan(), carving="skip")
+                self._folder_paths = {f.nid: f.path for f in tmp._all_folders()}
+                self._folder_paths.update(tmp.folder_paths)
+        return self._folder_paths
+
+    def item_index(self) -> list[dict]:
+        """One structural record per item (state, provenance, NID/BID, folder
+        NID, NBT entry) — from the cache when this store was enumerated
+        before, else by enumerating now (carving included)."""
+        inv = self.inventory
+        if inv is not None and (inv.job is None or inv.job.done) and inv.complete:
+            return list(inv.records)
+        cache = self.nodedb.cache
+        if cache is not None:
+            recs = cache.load("items", (self.variant.name, bool(self.nodedb.nbt_damaged),
+                                        False))
+            if recs is not None:
+                return recs
+        for _ in self.iter_items():
+            pass
+        return list(self.inventory.records)
+
+    def item(self, record: Optional[dict] = None, *, nid: Optional[int] = None,
+             bid: Optional[int] = None):
+        """Build one item from its index record (or by NID / carved BID) —
+        reads only that message."""
+        from .inventory import rebuild_item
+        if record is None:
+            for rec in self.item_index():
+                if (nid is not None and rec["nid"] == nid and
+                        rec["state"] in ("live", "live_damaged", "soft_deleted", "orphan")) or \
+                        (bid is not None and rec["bid"] == bid):
+                    record = rec
+                    break
+            else:
+                return None
+        return rebuild_item(self, record)
 
     def diagnostics(self) -> dict:
         """Content-free field report: environment, timings, failures by code
         location, warning codes, finding locations, scan/inventory stats."""
         from dataclasses import asdict
-        from ..diagnostics import environment, peak_rss_mb, warnings_summary
+        from ..diagnostics import (environment, peak_rss_mb, rss_breakdown_mb,
+                                   warnings_summary)
         hdr = self.nodedb.header
         locs: dict[str, list] = {}
         for f in self.integrity.findings:
@@ -206,6 +311,8 @@ class Store:
             "crypt_method": hdr.crypt_method,
             "variant_evidence": hdr.variant_evidence,
             "nbt_damaged": self.nodedb.nbt_damaged,
+            "bbt_damaged": self.nodedb.bbt_damaged,
+            "btree_damage": self.nodedb.btree_damage(),
             "live_nbt_entries": len(self.nodedb._nbt),
             "live_bbt_entries": len(self.nodedb._bbt),
             "crypt_order": list(self.nodedb._block_reader.crypt_order),
@@ -217,6 +324,7 @@ class Store:
             "warnings": warnings_summary(self.sink),
             **self.diag.as_dict(),
             "peak_rss_mb": peak_rss_mb(),
+            "rss_now_mb": rss_breakdown_mb(),
         }
 
     def items(self, **kwargs) -> List:
@@ -235,8 +343,9 @@ class Store:
         hdr = self.nodedb.header.integrity
         if hdr is not None:
             integ.extend(hdr.findings)
-        for ib in getattr(self.nodedb, "skipped_pages", ()):
-            integ.add(I.PAGE_UNREADABLE, "B-tree page skipped (not a page)", ib=ib)
+        for tree, ibs in getattr(self.nodedb, "skipped", {}).items():
+            for ib in ibs:
+                integ.add(I.PAGE_UNREADABLE, f"{tree} page skipped (not a page)", ib=ib)
         for ib, v in getattr(self.nodedb, "page_verdicts", {}).items():
             integ.extend(v.findings())
         if self._scan is not None:
@@ -258,12 +367,25 @@ class Store:
                 f"password={self.has_password})")
 
 
-def open_store(source, *, sink: Optional[WarningSink] = None) -> Store:
+def open_store(source, *, sink: Optional[WarningSink] = None, progress=None,
+               should_abort=None, cache_dir: Optional[str] = None,
+               cache_key: Optional[str] = None) -> Store:
     """Open a PST/OST mail store and return its :class:`Store` (PLAN §6.1).
 
     Args:
         source: A path, ``bytes`` image, or seekable binary stream of a PST/OST.
         sink: Optional :class:`WarningSink`; one is created if omitted.
+        progress: Optional ``progress(phase, done, total, found)`` called during
+            the scan (``scan_pages``/``scan_blocks``, bytes) and the inventory
+            (``folders``, ``live_items``, ``scan_items``, ``orphans``,
+            ``carving``, ``lost_blocks``; ``total`` may be ``None``).  Counts
+            only — never content.
+        should_abort: Optional ``() -> bool`` polled by the scan.
+        cache_dir: Directory for the persistent structural index (B-tree walk,
+            scan, item index) — reopening the same store skips that work.
+            Default: ``$PSTFORENSIC_CACHE_DIR``, else no cache.  Content-free.
+        cache_key: The caller's content hash of the file (e.g. SHA-256) to key
+            the cache with; default is a sampled content fingerprint.
 
     Returns:
         A :class:`Store` exposing ``root_folder``, ``folders()``, ``named_props``,
@@ -274,5 +396,6 @@ def open_store(source, *, sink: Optional[WarningSink] = None) -> Store:
     """
     sink = sink if sink is not None else WarningSink()
     reader = FileReader(source, sink=sink)
-    nodedb = NodeDatabase.open(reader, sink=sink)
-    return Store(nodedb, sink=sink)
+    nodedb = NodeDatabase.open(reader, sink=sink, cache_dir=cache_dir,
+                               cache_key=cache_key)
+    return Store(nodedb, sink=sink, progress=progress, should_abort=should_abort)

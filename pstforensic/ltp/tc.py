@@ -133,20 +133,27 @@ class TableContext:
         info = self.info
         if not info.row_size:
             return
-        matrix = self._read_row_matrix(info.hnid_rows)
-        if not matrix:
+        segs = self._read_row_matrix(info.hnid_rows)
+        if not any(segs):
             return
         row_index = self._read_row_index(info.hid_row_index)
         ceb_bytes = info.rgib[TCI_bm] - info.rgib[TCI_1b]
         row_size = info.row_size
-        total_rows = len(matrix) // row_size
+        # Rows never span a data block; a full block ends in padding
+        # ([MS-PST] §2.3.4.4).  Rows per block = what the full blocks hold.
+        full = [len(x) for x in segs[:-1] if x]
+        per_block = (max(full) // row_size) if full else 0
+        self._locate = (segs, per_block, row_size)
+        total_rows = (per_block * (len(segs) - 1) + len(segs[-1]) // row_size
+                      if per_block else len(segs[-1]) // row_size)
 
         if row_index:
             # Map dwRowID → dwRowIndex (Appendix A H23) and emit in that order.
             order = sorted(row_index.items(), key=lambda kv: kv[1])
             for _row_id, idx in order:
-                if 0 <= idx < total_rows:
-                    yield self._build_row(matrix, idx, info, ceb_bytes)
+                row = self._row_bytes(idx) if 0 <= idx < total_rows else None
+                if row:
+                    yield self._build_row(row, info, ceb_bytes)
                 else:
                     self.sink.warn(WarnCode.OUT_OF_BOUNDS,
                                    f"dwRowIndex {idx} >= {total_rows} rows",
@@ -157,14 +164,30 @@ class TableContext:
                            "TC RowIndex absent; linear scan",
                            where=f"node={self.noderef.nid:#x}")
             for idx in range(total_rows):
-                yield self._build_row(matrix, idx, info, ceb_bytes)
+                row = self._row_bytes(idx)
+                if row:
+                    yield self._build_row(row, info, ceb_bytes)
 
-    def _build_row(self, matrix: bytes, idx: int, info: TCINFO,
+    def _row_bytes(self, idx: int) -> bytes:
+        """Row ``idx`` located through the row matrix's block boundaries."""
+        segs, per_block, row_size = self._locate
+        if per_block:
+            b, r = divmod(idx, per_block)
+        else:
+            b, r = len(segs) - 1, idx
+        if b >= len(segs):
+            return b""
+        row = segs[b][r * row_size:(r + 1) * row_size]
+        if len(row) < row_size:
+            self.sink.warn(WarnCode.OUT_OF_BOUNDS,
+                           f"row {idx} missing (block {b} short/unreadable)",
+                           where=f"node={self.noderef.nid:#x}")
+            return b""
+        return row
+
+    def _build_row(self, row: bytes, info: TCINFO,
                    ceb_bytes: int) -> MapiObject:
         """Decode one row into a :class:`MapiObject`, honouring the CEB."""
-        row_size = info.row_size
-        base = idx * row_size
-        row = matrix[base:base + row_size]
         obj = MapiObject(nid=self.noderef.nid)
         ceb_off = info.rgib[TCI_1b]
         ceb = row[ceb_off:ceb_off + ceb_bytes]
@@ -250,20 +273,22 @@ class TableContext:
         return out
 
     # -- row matrix / row index -------------------------------------------
-    def _read_row_matrix(self, hnid_rows: int) -> bytes:
-        """Read the Row Matrix bytes — an HID or a subnode NID (Appendix A H23)."""
+    def _read_row_matrix(self, hnid_rows: int) -> list[bytes]:
+        """Row Matrix as data blocks — an HID or a subnode NID (Appendix A H23)."""
         if hnid_rows == 0:
-            return b""
+            return [b""]
         h = resolve_hid(hnid_rows)
         if h.is_hid:
-            return self.heap.get_allocation(hnid_rows)
+            return [self.heap.get_allocation(hnid_rows)]
         ref = self.noderef.subnodes().get(hnid_rows)
         if ref is None:
             self.sink.warn(WarnCode.OUT_OF_BOUNDS,
                            f"Row Matrix subnode nid {hnid_rows:#x} absent",
                            where=f"node={self.noderef.nid:#x}")
-            return b""
-        return ref.data_stream()
+            return [b""]
+        segs = getattr(ref, "data_segments", None)
+        out = segs() if callable(segs) else [ref.data_stream()]
+        return out or [b""]
 
     def _read_row_index(self, hid_row_index: int) -> dict[int, int]:
         """Parse the RowIndex BTH → ``{dwRowID: dwRowIndex}`` ([MS-PST] §2.3.4.3).

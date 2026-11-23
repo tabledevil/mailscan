@@ -118,6 +118,21 @@ def peak_rss_mb() -> Optional[float]:
         return None
 
 
+def rss_breakdown_mb() -> Optional[dict]:
+    """Current resident memory split into anonymous (heap) and file-backed
+    (mmap of the store — page cache, reclaimable).  Linux only."""
+    try:
+        out = {}
+        with open("/proc/self/status") as fh:
+            for line in fh:
+                k, _, v = line.partition(":")
+                if k in ("VmRSS", "RssAnon", "RssFile"):
+                    out[k] = round(int(v.split()[0]) / 1024, 1)
+        return out or None
+    except Exception:
+        return None
+
+
 def warnings_summary(sink, limit: int = 30) -> dict:
     """Warning codes with counts, and the first locations (``where`` only —
     the free-text detail is withheld)."""
@@ -129,3 +144,32 @@ def warnings_summary(sink, limit: int = 30) -> dict:
             lst.append(w.where)
     top = dict(codes.most_common(limit))
     return {"counts": top, "first_locations": {c: where.get(c, []) for c in top}}
+
+
+def run_profiled(fn, path: str, *args, **kwargs):
+    """Run ``fn`` under cProfile and write a content-free text profile to
+    ``path``: function names, line numbers, call counts and times only, with
+    file paths cut down to package-relative form (no user / install paths).
+    """
+    import cProfile
+    import io
+    import pstats
+    import re
+    prof = cProfile.Profile()
+    try:
+        return prof.runcall(fn, *args, **kwargs)
+    finally:
+        buf = io.StringIO()
+        st = pstats.Stats(prof, stream=buf)
+        for key, title in (("cumulative", "by cumulative time"), ("tottime", "by own time")):
+            buf.write(f"\n===== {title} =====\n")
+            st.sort_stats(key).print_stats(60)
+        text = buf.getvalue()
+        # /any/path/site-packages/pkg/x.py -> pkg/x.py ; /any/path/pstforensic/x.py -> pstforensic/x.py
+        text = re.sub(r"(?:[A-Za-z]:)?[^\s(]*?[\\/](?=(?:pstforensic|site-packages|dist-packages|"
+                      r"lib[\\/]python3[^\\/]*)[\\/])", "", text)
+        text = re.sub(r"(?:site|dist)-packages[\\/]", "", text)
+        text = re.sub(r"^\s*\d+ function calls.*?in ([0-9.]+) seconds",
+                      r"total \1 seconds", text, flags=re.M)
+        with open(path, "w") as fh:
+            fh.write(text)

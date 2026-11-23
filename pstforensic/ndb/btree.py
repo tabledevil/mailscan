@@ -132,7 +132,8 @@ def expected_geometry(variant: Variant, ptype: int, c_level: int) -> tuple[int, 
 
 
 def verify_page(page: bytes, ib: int, expected_ptype: int, variant: Variant,
-                bref_bid: Optional[int] = None) -> PageVerdict:
+                bref_bid: Optional[int] = None, *, depth: int = 0,
+                parent_ib: Optional[int] = None) -> PageVerdict:
     """Strict verdict over one BTPAGE; never raises, never warns.
 
     ``ptype_ok`` and ``geometry_ok`` are what Kernel PST Viewer gates on; CRC,
@@ -149,7 +150,9 @@ def verify_page(page: bytes, ib: int, expected_ptype: int, variant: Variant,
     bid_ok = bref_bid is None or tr.bid == bref_bid
     return PageVerdict(ib=ib, ptype=tr.ptype, ptype_ok=ptype_ok,
                        geometry_ok=geometry_ok, crc_ok=crc_ok, sig_ok=sig_ok,
-                       bid_ok=bid_ok)
+                       bid_ok=bid_ok,
+                       tree="NBT" if expected_ptype == PTYPE_NBT else "BBT",
+                       zeroed=not any(page), depth=depth, parent_ib=parent_ib)
 
 
 def _parse_bbt_entry(buf: bytes, off: int, variant: Variant) -> BBTEntry:
@@ -228,17 +231,22 @@ class BTreeWalker:
         self.max_depth = max_depth
         # Every page this walker read, with its strict verdict (PLAN §14.3).
         self.page_verdicts: dict[int, PageVerdict] = {}
-        self.skipped_pages: list[int] = []
+        self.skipped: dict[str, list[int]] = {"NBT": [], "BBT": []}
+
+    @property
+    def skipped_pages(self) -> list[int]:
+        return self.skipped["NBT"] + self.skipped["BBT"]
 
     def walk(self, root_bref: BREF, *, key_kind: str) -> Iterator:
         """Yield all leaf entries reachable from ``root_bref`` (depth-first)."""
         expected_ptype = PTYPE_NBT if key_kind == "NID" else PTYPE_BBT
         visited: set[int] = set()
         yield from self._walk_page(root_bref, key_kind, expected_ptype,
-                                   visited, depth=0)
+                                   visited, depth=0, parent_ib=None)
 
     def _walk_page(self, bref: BREF, key_kind: str, expected_ptype: int,
-                   visited: set[int], depth: int) -> Iterator:
+                   visited: set[int], depth: int,
+                   parent_ib: Optional[int] = None) -> Iterator:
         if depth > self.max_depth:
             self.sink.warn(WarnCode.CYCLE_DETECTED,
                            f"depth>{self.max_depth}", f"page@{bref.ib:#x}")
@@ -258,14 +266,14 @@ class BTreeWalker:
             return
 
         verdict = verify_page(page, bref.ib, expected_ptype, self.variant,
-                              bref_bid=bref.raw_bid)
+                              bref_bid=bref.raw_bid, depth=depth, parent_ib=parent_ib)
         self.page_verdicts[bref.ib] = verdict
         _warn_verdict(verdict, self.sink)
         if not verdict.ptype_ok and not verdict.geometry_ok:
             # Neither the page type nor its geometry fit: this BREF does not
             # point at a B-tree page.  Skip the subtree; the full-file scan
             # still harvests its leaves (PLAN §14.5).
-            self.skipped_pages.append(bref.ib)
+            self.skipped[verdict.tree].append(bref.ib)
             return
 
         c_ent, c_ent_max, cb_ent, c_level = _page_counters(page, self.variant)
@@ -293,7 +301,7 @@ class BTreeWalker:
                                    f"page@{bref.ib:#x}")
                     continue
                 yield from self._walk_page(child, key_kind, expected_ptype,
-                                           visited, depth + 1)
+                                           visited, depth + 1, parent_ib=bref.ib)
             else:
                 if key_kind == "NID":
                     ent = _parse_nbt_entry(page, off, self.variant)

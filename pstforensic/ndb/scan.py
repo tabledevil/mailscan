@@ -2,8 +2,9 @@
 
 One linear pass over the whole file, independent of the B-tree:
 
-  * **Pages** (NBT 0x81 / BBT 0x80) on every 64-byte boundary for the 512-byte
-    variants and every 4096-byte boundary for 4K, under *every* variant.  A
+  * **Pages** (NBT 0x81 / BBT 0x80) on every 512-byte boundary (64 in a deep
+    scan) for the 512-byte variants and every 4096-byte boundary for 4K, under
+    the variants asked for (the store's own when its header proves it).  A
     page is accepted on Kernel's gate — ``ptype == ptypeRepeat`` plus the exact
     ``cEntMax``/``cbEnt`` geometry — and its CRC/signature are recorded.  Leaf
     slots are read **up to capacity**; slots at or beyond ``cEnt`` are tagged
@@ -304,26 +305,144 @@ class _Extents:
         return None
 
 
+# ---------------------------------------------------------------------------
+# Range workers — the scan runs over independent byte ranges, serially or in
+# a process pool (fork: workers inherit the mapping and the live index).
+# ---------------------------------------------------------------------------
+@dataclass
+class _Ctx:
+    mv: object
+    size: int
+    variants: tuple
+    store_variant: Variant
+    live_nbt: dict
+    live_bbt: dict
+    live_page_ibs: set
+    wanted: set
+    use_np: bool
+    page_stride: int
+    wanted_arr: object = None
+
+
+_CTX: Optional[_Ctx] = None     # set before forking a pool
+
+
+def _pages_range(ctx: _Ctx, base: int, n: int):
+    part = ScanIndex(file_size=ctx.size, store_variant=ctx.store_variant.name)
+    wanted: set[int] = set()
+    for v in ctx.variants:
+        stride = 4096 if v.page_size == 4096 else ctx.page_stride
+        for ib in _page_candidates(ctx.mv, base, n, ctx.size, v, stride, ctx.use_np):
+            _take_page(part, ctx.mv, ib, v, ctx.store_variant, ctx.live_nbt,
+                       ctx.live_bbt, ctx.live_page_ibs, wanted)
+    return part.pages, part.slots, part.bbt_entries, part.stats, wanted
+
+
+def _blocks_range(ctx: _Ctx, base: int, n: int):
+    st = ScanStats()
+    live_extents: list[tuple[int, int]] = []
+    pending: list[ScannedBlock] = []
+    mv, size = ctx.mv, ctx.size
+    for v in (ANSI, UNICODE, UNICODE_4K):
+        if v not in ctx.variants:
+            continue
+        if v is UNICODE_4K:
+            cands = _block_candidates_4k(mv, base, n, size, ctx.wanted, ctx.wanted_arr,
+                                         ctx.use_np)
+        else:
+            cands = _block_candidates(mv, base, n, size, v, ctx.wanted, ctx.wanted_arr,
+                                      ctx.use_np)
+        for ib, cb, _wsig, crc, rbid, sig_ok in cands:
+            if ib + cb > size:
+                continue
+            st.block_candidates += 1
+            bid = normalize_bid(rbid)
+            live = ctx.live_bbt.get(bid)
+            if v is ctx.store_variant and live is not None and live.bref.ib == ib and sig_ok:
+                # Exactly where the live BBT says: only an extent.
+                st.blocks_live += 1
+                live_extents.append((ib, ib + _disk(cb, v)))
+                continue
+            crc_ok = _crc(mv[ib:ib + cb]) == crc
+            if not (sig_ok or crc_ok):
+                st.blocks_dropped_weak += 1
+                continue
+            pending.append(ScannedBlock(ib=ib, bid=bid, raw_bid=rbid, cb=cb,
+                                        variant=v.name, crc_ok=crc_ok, sig_ok=sig_ok))
+    return pending, live_extents, st
+
+
+def _w_pages(rng):
+    return _pages_range(_CTX, *rng)
+
+
+def _w_blocks(rng):
+    return _blocks_range(_CTX, *rng)
+
+
+def _add_stats(into: ScanStats, part: ScanStats) -> None:
+    for k, v in part.__dict__.items():
+        if k != "bytes_scanned":
+            setattr(into, k, getattr(into, k) + v)
+
+
+def default_workers(size: int) -> int:
+    """Worker processes for a file of ``size`` bytes: all cores for multi-GB
+    stores on platforms with ``fork``; 1 otherwise (and below 512 MiB)."""
+    import multiprocessing as mp
+    import os
+    if size < (512 << 20) or "fork" not in mp.get_all_start_methods():
+        return 1
+    return max(1, min(os.cpu_count() or 1, 32))
+
+
+def _run(fn_local, fn_worker, ranges, workers, on_done, aborted):
+    """Yield results in range order; ``on_done(end)`` after each range."""
+    if workers <= 1 or len(ranges) <= 1:
+        for base, n in ranges:
+            if aborted():
+                return
+            yield fn_local(base, n)
+            on_done(base + n)
+        return
+    import multiprocessing as mp
+    with mp.get_context("fork").Pool(workers) as pool:
+        for (base, n), res in zip(ranges, pool.imap(fn_worker, ranges)):
+            if aborted():
+                pool.terminate()
+                return
+            yield res
+            on_done(base + n)
+
+
 def scan_file(reader: FileReader, store_variant: Variant, *,
               live_nbt: Optional[dict] = None, live_bbt: Optional[dict] = None,
               live_page_ibs: Optional[set[int]] = None,
               variants: tuple[Variant, ...] = (ANSI, UNICODE, UNICODE_4K),
               use_numpy: Optional[bool] = None,
               progress: Optional[Callable[[int, int], None]] = None,
-              should_abort: Optional[Callable[[], bool]] = None) -> ScanIndex:
+              should_abort: Optional[Callable[[], bool]] = None,
+              page_stride: int = 512, workers: Optional[int] = None,
+              chunk: int = CHUNK) -> ScanIndex:
     """Scan the whole file and return a :class:`ScanIndex` (PLAN §14.5).
 
     ``live_nbt`` / ``live_bbt`` (``{nid: NBTEntry}`` / ``{bid: BBTEntry}``) let
-    the scan keep only what differs from the live index.
+    the scan keep only what differs from the live index.  ``page_stride`` is
+    512 (pages are 512-aligned, as Kernel assumes) or 64 for a deep scan of
+    shifted copies.  ``workers`` > 1 scans byte ranges in parallel processes
+    (results identical to the serial scan, in the same order).
     """
+    global _CTX
     use_np = (_np is not None) if use_numpy is None else (use_numpy and _np is not None)
     live_nbt = live_nbt or {}
     live_bbt = live_bbt or {}
     live_page_ibs = live_page_ibs or set()
     size = reader.size
-    mv = reader._data
     idx = ScanIndex(file_size=size, store_variant=store_variant.name)
     st = idx.stats
+    if workers is None:
+        workers = default_workers(size)
+    ranges = [(b, min(chunk, size - b)) for b in range(0, size, chunk)]
 
     def aborted() -> bool:
         if should_abort is not None and should_abort():
@@ -331,60 +450,53 @@ def scan_file(reader: FileReader, store_variant: Variant, *,
             return True
         return False
 
-    # ---- Phase 1: pages ------------------------------------------------
     # BIDs some node needs but the live BBT cannot place (a damaged BBT
     # subtree): their blocks are located from trailers even on a weak sig.
     wanted: set[int] = {b for ent in live_nbt.values()
                         for b in (ent.bid_data, ent.bid_sub)
                         if b and b not in live_bbt}
-    page_vs = [v for v in variants]
-    for base in range(0, size, CHUNK):
-        if aborted():
-            return idx
-        n = min(CHUNK, size - base)
-        for v in page_vs:
-            stride = 4096 if v.page_size == 4096 else 64
-            for ib in _page_candidates(mv, base, n, size, v, stride, use_np):
-                _take_page(idx, mv, ib, v, store_variant, live_nbt, live_bbt,
-                           live_page_ibs, wanted)
-        st.bytes_scanned = base + n
-        if progress is not None:
-            progress(base + n, 2 * size)
+    ctx = _Ctx(mv=reader._data, size=size, variants=tuple(variants),
+               store_variant=store_variant, live_nbt=live_nbt, live_bbt=live_bbt,
+               live_page_ibs=live_page_ibs, wanted=wanted, use_np=use_np,
+               page_stride=page_stride)
+    _CTX = ctx
+    try:
+        # ---- Phase 1: pages --------------------------------------------
+        def pages_done(end: int) -> None:
+            st.bytes_scanned = end
+            if progress is not None:
+                progress(end, 2 * size)
 
-    # ---- Phase 2: blocks -----------------------------------------------
-    wanted_arr = _np.array(sorted(wanted), dtype=_np.uint64) if (use_np and wanted) else None
-    live_extents: list[tuple[int, int]] = []
-    pending: list[ScannedBlock] = []
-    for base in range(0, size, CHUNK):
-        if aborted():
+        for pages, slots, bbt_entries, pst, w in _run(
+                lambda b, n: _pages_range(ctx, b, n), _w_pages, ranges, workers,
+                pages_done, aborted):
+            idx.pages += pages
+            idx.slots += slots
+            idx.bbt_entries += bbt_entries
+            _add_stats(st, pst)
+            wanted |= w
+        if not idx.complete:
             return idx
-        n = min(CHUNK, size - base)
-        for v in (ANSI, UNICODE, UNICODE_4K):
-            if v not in variants:
-                continue
-            if v is UNICODE_4K:
-                cands = _block_candidates_4k(mv, base, n, size, wanted, wanted_arr, use_np)
-            else:
-                cands = _block_candidates(mv, base, n, size, v, wanted, wanted_arr, use_np)
-            for ib, cb, _wsig, crc, rbid, sig_ok in cands:
-                if ib + cb > size:
-                    continue
-                st.block_candidates += 1
-                bid = normalize_bid(rbid)
-                live = live_bbt.get(bid)
-                if v is store_variant and live is not None and live.bref.ib == ib and sig_ok:
-                    # Exactly where the live BBT says: only an extent.
-                    st.blocks_live += 1
-                    live_extents.append((ib, ib + _disk(cb, v)))
-                    continue
-                crc_ok = _crc(mv[ib:ib + cb]) == crc
-                if not (sig_ok or crc_ok):
-                    st.blocks_dropped_weak += 1
-                    continue
-                pending.append(ScannedBlock(ib=ib, bid=bid, raw_bid=rbid, cb=cb,
-                                            variant=v.name, crc_ok=crc_ok, sig_ok=sig_ok))
-        if progress is not None:
-            progress(size + base + n, 2 * size)
+
+        # ---- Phase 2: blocks -------------------------------------------
+        ctx.wanted_arr = (_np.array(sorted(wanted), dtype=_np.uint64)
+                          if (use_np and wanted) else None)
+        live_extents: list[tuple[int, int]] = []
+        pending: list[ScannedBlock] = []
+
+        def blocks_done(end: int) -> None:
+            if progress is not None:
+                progress(size + end, 2 * size)
+
+        for pend, ext, bst in _run(lambda b, n: _blocks_range(ctx, b, n), _w_blocks,
+                                   ranges, workers, blocks_done, aborted):
+            pending += pend
+            live_extents += ext
+            _add_stats(st, bst)
+        if not idx.complete:
+            return idx
+    finally:
+        _CTX = None
 
     # ---- Suppression: hits inside verified block extents ----------------
     live_x = _Extents(live_extents)

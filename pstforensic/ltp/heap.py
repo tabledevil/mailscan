@@ -140,7 +140,12 @@ class HeapOnNode:
         self._noderef = noderef
         self.variant = variant
         self.sink = sink if sink is not None else WarningSink()
-        self._data = noderef.data_stream()
+        segs = getattr(noderef, "data_segments", None)
+        # On-disk block boundaries when the NDB kept them (real nodes);
+        # wrappers over one decoded block fall back to re-splitting.
+        self._segments: Optional[list[bytes]] = segs() if callable(segs) else None
+        self._data = (b"".join(self._segments) if self._segments is not None
+                      else noderef.data_stream())
         # Per-block: (block_bytes, HNPAGEMAP). Index == heap block index.
         self._blocks: list[tuple[bytes, Optional[HNPAGEMAP]]] = []
         self.hdr: Optional[HNHDR] = None
@@ -274,6 +279,9 @@ class HeapOnNode:
         into the same payload-sized chunks.  For a single-block node the whole
         stream is one heap block.
         """
+        if self._segments is not None and len(self._segments) > 1:
+            yield from self._segments
+            return
         data = self._data
         if not data:
             return

@@ -122,7 +122,7 @@ def _plant_store_in_live_block(img: bytes) -> bytes:
     buf = bytearray(img)
     db = NodeDatabase.open(FileReader(bytes(buf)))
     filler = max(db._bbt.values(), key=lambda e: e.cb)
-    base = filler.bref.ib
+    base = -(-filler.bref.ib // 512) * 512     # pages sit on 512-byte boundaries
     v = UNICODE
 
     trap_bid, trap_nid, inbox = 0x9990, 0x9984, 0x142
@@ -140,9 +140,10 @@ def _plant_store_in_live_block(img: bytes) -> bytes:
     buf[base:base + 512] = page
 
     # Re-seal the filler block so it stays a verified live block.
+    fb = filler.bref.ib
     disk = block_disk_size(filler.cb, v)
-    tr_off = base + disk - v.block_trailer_size
-    struct.pack_into("<I", buf, tr_off + 4, compute_crc(bytes(buf[base:base + filler.cb])))
+    tr_off = fb + disk - v.block_trailer_size
+    struct.pack_into("<I", buf, tr_off + 4, compute_crc(bytes(buf[fb:fb + filler.cb])))
     return bytes(buf)
 
 

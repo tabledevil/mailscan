@@ -41,6 +41,7 @@ class NodeRef:
         self.nid_parent = nid_parent
         self._db = db
         self._data: Optional[bytes] = None
+        self._segments: Optional[list[bytes]] = None
         self._subnodes: Optional[dict[int, "NodeRef"]] = None
         self.touched: set[int] = set()   # every BID this node's reads hit
         self.page_ib: Optional[int] = None  # NBT page the entry came from
@@ -49,12 +50,18 @@ class NodeRef:
     def data_stream(self) -> bytes:
         """Decoded, reassembled data bytes of this node ([MS-PST] §2.2.2.8)."""
         if self._data is None:
-            if not self.bid_data:
-                self._data = b""
-            else:
-                self._data = self._db._block_reader.read_data_stream(
-                    self.bid_data, touched=self.touched)
+            self._data = b"".join(self.data_segments())
         return self._data
+
+    def data_segments(self) -> list[bytes]:
+        """The decoded data stream split at its on-disk leaf-block boundaries."""
+        if self._segments is None:
+            if not self.bid_data:
+                self._segments = []
+            else:
+                self._segments = self._db._block_reader.read_data_segments(
+                    self.bid_data, touched=self.touched)
+        return self._segments
 
     def subnodes(self) -> dict[int, "NodeRef"]:
         """Resolve the subnode tree to ``{local_nid: NodeRef}`` ([MS-PST] §2.2.2.8.3.3)."""
@@ -106,7 +113,8 @@ class NodeRef:
 class NodeDatabase:
     """Parsed NDB layer over a :class:`FileReader`."""
 
-    def __init__(self, reader: FileReader, *, sink: WarningSink | None = None):
+    def __init__(self, reader: FileReader, *, sink: WarningSink | None = None,
+                 cache_dir: Optional[str] = None, cache_key: Optional[str] = None):
         self.reader = reader
         # NB: an *empty* WarningSink is falsy (its __len__ is 0), so use an
         # explicit None check — `sink or reader.sink` would silently discard a
@@ -121,10 +129,22 @@ class NodeDatabase:
         self.variant: Variant = self.header.variant
         self.crypt_method: int = self.header.crypt_method
 
-        # Build NBT/BBT indexes eagerly (cached for the life of the db).
+        # Build NBT/BBT indexes eagerly (cached for the life of the db, and
+        # across runs when a cache directory is configured).
+        from ..cache import IndexCache
+        self.cache = IndexCache.for_reader(reader, cache_dir, cache_key)
         self._bbt: dict[int, BBTEntry] = {}
         self._nbt: dict[int, NBTEntry] = {}
-        self._build_btrees()
+        cached = self.cache.load("btree") if self.cache else None
+        if cached is not None:
+            (self._nbt, self._bbt, self.page_verdicts, self.skipped, warns) = cached
+            self.sink.warnings.extend(warns)
+        else:
+            mark = len(self.sink.warnings)
+            self._build_btrees()
+            if self.cache:
+                self.cache.save("btree", (self._nbt, self._bbt, self.page_verdicts,
+                                          self.skipped, self.sink.warnings[mark:]))
 
         self._block_reader = BlockReader(
             reader, self.variant, bbt=self._bbt, sink=self.sink,
@@ -137,28 +157,89 @@ class NodeDatabase:
     # -- full-file scan (PLAN §14.5) ---------------------------------------
     @property
     def nbt_damaged(self) -> bool:
-        """The live NBT walk is known to be incomplete."""
-        if not self._nbt or self.skipped_pages or not self.header.root.bref_nbt.ib:
+        """The live NBT walk is known to be incomplete (NBT evidence only —
+        a damaged BBT is recovered block-wise by the scan, issue #4)."""
+        if not self._nbt or self.skipped["NBT"] or not self.header.root.bref_nbt.ib:
             return True
         v = self.page_verdicts.get(self.header.root.bref_nbt.ib)
         return v is None or not (v.ptype_ok and v.geometry_ok)
 
-    def scan(self, *, progress=None, should_abort=None, use_numpy=None):
+    @property
+    def bbt_damaged(self) -> bool:
+        """The live BBT walk is known to be incomplete."""
+        if not self._bbt or self.skipped["BBT"] or not self.header.root.bref_bbt.ib:
+            return True
+        v = self.page_verdicts.get(self.header.root.bref_bbt.ib)
+        return v is None or not (v.ptype_ok and v.geometry_ok)
+
+    @property
+    def skipped_pages(self) -> list[int]:
+        return self.skipped["NBT"] + self.skipped["BBT"]
+
+    def btree_damage(self) -> dict:
+        """Per-tree damage summary — structural metadata only."""
+        out = {}
+        for tree in ("NBT", "BBT"):
+            vs = [v for v in self.page_verdicts.values() if v.tree == tree]
+            bad = [v for v in vs if v.findings()]
+            skipped = set(self.skipped[tree])
+            out[tree] = {
+                "damaged": self.nbt_damaged if tree == "NBT" else self.bbt_damaged,
+                "pages_read": len(vs), "pages_damaged": len(bad),
+                "pages_skipped": len(skipped),
+                "pages_zeroed": sum(1 for v in bad if v.zeroed),
+                "skipped_samples": [
+                    {"ib": f"{v.ib:#x}", "depth": v.depth,
+                     "parent_ib": f"{v.parent_ib:#x}" if v.parent_ib is not None else None,
+                     "zeroed": v.zeroed, "ptype": f"{v.ptype:#x}"}
+                    for v in sorted(bad, key=lambda v: v.ib) if v.ib in skipped][:20],
+            }
+        return out
+
+    def scan(self, *, progress=None, should_abort=None, use_numpy=None,
+             deep: bool = False, workers=None):
         """Run (once) the full-file scan and wire it into resolution.
+
+        Default profile is Kernel's: the store's own variant when the header
+        proves it, pages on 512-byte boundaries.  ``deep`` scans every
+        variant and every 64-byte boundary (shifted / foreign copies).
+        ``workers``: scan processes (default: all cores for multi-GB files).
 
         Afterwards BIDs missing from the BBT resolve from block trailers, and
         :meth:`node` resolves NIDs missing from the NBT from the newest
         scanned entry (``from_scan``).
         """
         if self._scan is None or not self._scan.complete:
-            from .scan import scan_file
+            from .scan import scan_file, _np
+            if _np is None and use_numpy is not False and self.reader.size > (256 << 20):
+                _log.warning("scan: numpy not installed — pure-Python scan of %d MiB "
+                             "is much slower (pip install numpy, or the 'pst' extra)",
+                             self.reader.size >> 20)
             _log.info("scan: start (%d bytes, store variant %s, nbt_damaged=%s)",
                       self.reader.size, self.variant.name, self.nbt_damaged)
             t0 = _time.perf_counter()
-            self._scan = scan_file(
-                self.reader, self.variant, live_nbt=self._nbt, live_bbt=self._bbt,
-                live_page_ibs=set(self.page_verdicts), use_numpy=use_numpy,
-                progress=progress, should_abort=should_abort)
+            from ..integrity import VERIFIED
+            from ..variant import ANSI, UNICODE, UNICODE_4K
+            proven = (self.header.variant_evidence or {}).get(self.variant.name) == VERIFIED
+            variants = (self.variant,) if (proven and not deep) else (ANSI, UNICODE, UNICODE_4K)
+            from .scan import default_workers
+            n_workers = default_workers(self.reader.size) if workers is None else workers
+            _log.info("scan: variants=%s page_stride=%d workers=%d",
+                      [v.name for v in variants], 64 if deep else 512, n_workers)
+            params = ([v.name for v in variants], 64 if deep else 512)
+            cached = self.cache.load("scan", params) if self.cache else None
+            if cached is not None:
+                self._scan = cached
+                if progress is not None:
+                    progress(2 * self.reader.size, 2 * self.reader.size)
+            else:
+                self._scan = scan_file(
+                    self.reader, self.variant, live_nbt=self._nbt, live_bbt=self._bbt,
+                    live_page_ibs=set(self.page_verdicts), use_numpy=use_numpy,
+                    progress=progress, should_abort=should_abort, variants=variants,
+                    page_stride=64 if deep else 512, workers=n_workers)
+                if self.cache and self._scan.complete:
+                    self.cache.save("scan", self._scan, params)
             self._block_reader.attach_scan(self._scan.locate)
             self._scan_nodes = {}
             rank: dict[int, tuple] = {}
@@ -184,31 +265,37 @@ class NodeDatabase:
 
     # -- construction helpers --------------------------------------------
     @classmethod
-    def open(cls, reader: FileReader, *, sink: WarningSink | None = None) -> "NodeDatabase":
+    def open(cls, reader: FileReader, *, sink: WarningSink | None = None,
+             cache_dir: Optional[str] = None,
+             cache_key: Optional[str] = None) -> "NodeDatabase":
         """Open and fully parse the store header/B-trees ([MS-PST] §2.2.2.6)."""
-        return cls(reader, sink=sink)
+        return cls(reader, sink=sink, cache_dir=cache_dir, cache_key=cache_key)
 
     def _build_btrees(self) -> None:
         root: Root = self.header.root
         walker = BTreeWalker(self.reader, self.variant, sink=self.sink)
         if not root.bref_nbt.ib:          # headerless: nothing to walk
-            self.page_verdicts, self.skipped_pages = {}, []
+            self.page_verdicts, self.skipped = {}, {"NBT": [], "BBT": []}
             return
         for ent in walker.walk(root.bref_bbt, key_kind="BID"):
             self._bbt[ent.bid] = ent
         for ent in walker.walk(root.bref_nbt, key_kind="NID"):
             self._nbt[ent.nid] = ent
         self.page_verdicts = walker.page_verdicts
-        self.skipped_pages = walker.skipped_pages
-        if not self._nbt and not self.skipped_pages:
-            self.skipped_pages = [root.bref_nbt.ib]
+        self.skipped = walker.skipped
+        if not self._nbt and not self.skipped["NBT"]:
+            self.skipped["NBT"] = [root.bref_nbt.ib]
         bad = {ib: sorted(f.code for f in v.findings())
                for ib, v in self.page_verdicts.items() if v.findings()}
-        _log.info("btree: nbt=%d bbt=%d pages=%d damaged_pages=%d skipped=%s",
-                  len(self._nbt), len(self._bbt), len(self.page_verdicts), len(bad),
-                  [hex(i) for i in self.skipped_pages])
+        _log.info("btree: nbt=%d bbt=%d pages=%d damaged_pages=%d skipped_nbt=%d "
+                  "skipped_bbt=%d", len(self._nbt), len(self._bbt),
+                  len(self.page_verdicts), len(bad), len(self.skipped["NBT"]),
+                  len(self.skipped["BBT"]))
         for ib, codes in list(bad.items())[:200]:
-            _log.debug("btree: page %#x %s", ib, codes)
+            v = self.page_verdicts[ib]
+            _log.debug("btree: %s page %#x depth=%d parent=%s zeroed=%s %s", v.tree, ib,
+                       v.depth, f"{v.parent_ib:#x}" if v.parent_ib is not None else "-",
+                       v.zeroed, codes)
 
     # -- public surface ---------------------------------------------------
     def node(self, nid: int) -> Optional[NodeRef]:

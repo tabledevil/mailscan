@@ -1,5 +1,21 @@
 # pstforensic
 
+> **Blind test — run it like this** (Linux, Python ≥ 3.10):
+> ```bash
+> git clone -b pstforensic-parser https://github.com/tabledevil/mailscan.git && cd mailscan
+> pip install numpy                     # fast scan; without it, much slower
+> # 1. Kernel-style folder tree next to Kernel PST Viewer (content, your screen only):
+> python3 -m pstforensic.tools.tree /path/store.pst --items | less -S
+> # 2. Shareable, content-free: redacted tree + diagnostics + CPU profile:
+> python3 -m pstforensic.tools.tree /path/store.pst --redact --json \
+>     --checkpoint cp.json --profile prof.txt --debug-log debug.log > tree.json
+> python3 -m pstforensic.tools.summary /path/store.pst --json > summary.json
+> ```
+> Second runs reuse the structural cache in `~/.cache/pstforensic` (`--no-cache`
+> to disable). Shareable: `tree.json` (redacted), `summary.json`, `cp.json`,
+> `prof.txt`, `debug.log`. Never the non-redacted output. MATT:
+> `python3 matt.py --max-file-size 16G --cache-path ~/.cache/matt /path/store.pst`.
+
 A forensic-grade, host-static-safe **PST / OST / MSG** parser with a shared MAPI
 object model. Reads corrupted stores, reconstructs deleted/orphaned items, and
 renders every MAPI property human-readably. Standalone (not yet wired into MATT —
@@ -78,6 +94,41 @@ fingerprint if the store does not even open:
 
 ```bash
 python3 -m pstforensic.tools.summary --json --debug-log run.log /path/to/mailbox.pst > report.json
+```
+
+Folder tree for a side-by-side comparison with Kernel PST Viewer: per folder
+the count it declares (`PidTagContentCount`) next to what was found, by state;
+items no folder lists go under `~orphan folders/folder 0x…` (by parent NID),
+`~lost`, `~carved`. Progress per phase on stderr (checked / remaining / found /
+ETA). `--items` lists date, sender, subject per folder — **content, for your own
+screen**. `--redact` replaces names by NIDs and drops item text (shareable);
+`--checkpoint` writes content-free progress JSON:
+
+```bash
+python3 -m pstforensic.tools.tree /path/to/mailbox.pst
+python3 -m pstforensic.tools.tree /path/to/mailbox.pst --items | less -S
+python3 -m pstforensic.tools.tree /path/to/mailbox.pst --redact --json --checkpoint cp.json > tree.json
+```
+
+Install numpy for multi-GB stores (`pip install numpy` or the `pst` extra) —
+the pure-Python scan is far slower.
+
+## Cache, random access, background carving
+
+`open_store(path, cache_dir=...)` (or `PSTFORENSIC_CACHE_DIR`) keeps the
+expensive structural work across runs: B-tree walk, full-file scan, carving
+result, item index. Content-free, keyed by content (never by file name; pass
+`cache_key=` with your own SHA-256 in a pipeline), size-capped with LRU
+eviction, safe for parallel processes. Details:
+[`docs/PST_CACHE_AND_LAZY_ACCESS.md`](../docs/PST_CACHE_AND_LAZY_ACCESS.md).
+
+```python
+store = open_store(path, cache_dir="~/.cache/pstforensic")
+for item in store.iter_items(carving="background", on_carved=examine):  # hook per find
+    ...                                   # live / deleted / orphan … arrive first
+carved = store.carved_items()             # blocks until carving is complete
+idx = store.item_index()                  # structural records (instant from cache)
+msg = store.item(idx[42]).message         # reads just that one message
 ```
 
 ## Debug logging

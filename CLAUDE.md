@@ -22,7 +22,9 @@ python matt.py -x <file>                 # extract attachments to ./extract/
 python matt.py -d <file>                 # debug mode
 python matt.py --check                   # verify all analyzer dependencies
 python matt.py --max-file-size 8G <file> # raise the 1 GB input limit (e.g. large PST/OST)
+python matt.py --cache-path ~/.cache/matt <file>  # persistent caches (pstforensic structural index)
 python -m pstforensic.tools.summary <file.pst>   # count-only PST/OST inventory (no content)
+python -m pstforensic.tools.tree <file.pst> [--items] [--redact]   # Kernel-style folder tree
 ```
 
 ## Architecture
@@ -97,6 +99,7 @@ Legacy CLI scripts in repo root (use `eml.py` directly):
 ## Key Details
 
 - Python 3.10+ required (per `pyproject.toml`).
+- Files above `flags.large_file_threshold` (256 MB) are memory-mapped (`rawdata` is an `mmap`), and whole-file passes (entropy, fuzzy hashes, YARA, exiftool) are skipped; MIME detection reads the first 1 MB.
 - Logging goes to stderr (not to file) unless debug mode. Configured via `Utils/logger.py`.
 - `Structure` objects are cached by `(sha256, basename, mime_type)` — duplicate attachments with the same name+type collapse, but the same bytes under different filenames don't mask filename-based detections.
 - Multi-dispatch: every Analyzer that `can_analyze` runs against the Structure; highest-`specificity` is primary, others are contributors.

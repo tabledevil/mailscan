@@ -48,6 +48,7 @@ PAGE_BID_MISMATCH = "PAGE_BID_MISMATCH"
 PAGE_TYPE_BAD = "PAGE_TYPE_BAD"
 PAGE_GEOMETRY_BAD = "PAGE_GEOMETRY_BAD"
 PAGE_UNREADABLE = "PAGE_UNREADABLE"
+PAGE_ZEROED = "PAGE_ZEROED"          # the whole page is NUL bytes (data loss, not a format quirk)
 BLOCK_CRC_FAIL = "BLOCK_CRC_FAIL"
 BLOCK_SIG_FAIL = "BLOCK_SIG_FAIL"
 BLOCK_BID_MISMATCH = "BLOCK_BID_MISMATCH"
@@ -131,8 +132,15 @@ class PageVerdict:
     crc_ok: bool
     sig_ok: bool
     bid_ok: bool         # trailer bid == BREF bid (None-equivalent: True if unknown)
+    tree: str = ""       # "NBT" / "BBT" — which B-tree referenced the page
+    zeroed: bool = False # every byte is NUL
+    depth: int = 0
+    parent_ib: Optional[int] = None
 
     def findings(self) -> list[Finding]:
+        if self.zeroed:
+            # One cause, one finding: the bytes are gone, nothing else to say.
+            return [Finding(PAGE_ZEROED, f"{self.tree} page", ib=self.ib)]
         out = []
         if not self.ptype_ok:
             out.append(Finding(PAGE_TYPE_BAD, f"ptype {self.ptype:#x}", ib=self.ib))

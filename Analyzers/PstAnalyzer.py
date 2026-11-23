@@ -30,6 +30,16 @@ _SEVERE_STORE_CODES = {"HEADER_UNUSABLE", "PAGE_UNREADABLE", "SCAN_INCOMPLETE",
                        "VARIANT_FROM_EVIDENCE", "CRYPT_METHOD_UNKNOWN"}
 
 
+def _cache_dir():
+    """pstforensic's structural index cache under MATT's ``--cache-path`` (if
+    set), else ``$PSTFORENSIC_CACHE_DIR``, else off."""
+    import os
+    from Config.config import flags
+    if flags.cache_path:
+        return os.path.join(os.path.expanduser(flags.cache_path), "pstforensic")
+    return None
+
+
 def _text(value) -> str:
     return "" if value is None else str(value)
 
@@ -110,7 +120,9 @@ class PstAnalyzer(Analyzer):
             log.warning(f"pstforensic unavailable: {exc}")
             return
         try:
-            store = open_store(self.struct.rawdata)
+            # A large root file arrives memory-mapped; FileReader uses the
+            # mapping directly (no copy).
+            store = open_store(self.struct.rawdata, cache_dir=_cache_dir())
         except Exception as exc:
             self.reports["pst_error"] = Report(
                 f"Not readable as PST/OST: {exc}", label="pst_error",

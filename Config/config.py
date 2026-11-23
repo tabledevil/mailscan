@@ -23,6 +23,10 @@ class Flags:
     # --- Analysis limits ---
     max_analysis_depth: int = 10
     max_file_size: int = 1024 * 1024 * 1024  # 1 GB
+    # Files above this are memory-mapped instead of read, and whole-file passes
+    # (entropy, fuzzy hashes, YARA, exiftool) are skipped; MIME detection
+    # looks at the head only.  Large PST/OSTs are the typical case.
+    large_file_threshold: int = 256 * 1024 * 1024
     max_compression_ratio: int = 100
 
     # --- MIME detection ---

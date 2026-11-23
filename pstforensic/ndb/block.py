@@ -220,10 +220,22 @@ class BlockReader:
         Decode is applied to leaf data blocks only.  Depth- and cycle-guarded.
         Every BID read is added to ``touched`` (per-node integrity).
         """
+        return b"".join(self.read_data_segments(bid, touched))
+
+    def read_data_segments(self, bid: int, touched: set[int] | None = None) -> list[bytes]:
+        """Like :meth:`read_data_stream` but one entry per leaf data block.
+
+        Heaps (one HNPAGEMAP per block) and TC row matrices (rows never span a
+        block, blocks end in padding) need the on-disk block boundaries.  An
+        unreadable leaf keeps its slot as ``b""`` so later blocks keep their
+        index.
+        """
         seen: set[int] = set()
+        segs: list[bytes] = []
         saved, self._stream = self._stream, [None, None]
         try:
-            return self._read_data(bid, depth=0, seen=seen)
+            self._read_data(bid, depth=0, seen=seen, segs=segs)
+            return segs
         finally:
             if self._stream[0] is not None and (
                     self._stream[0] != self.crypt_method or self._stream[1] == GUESSED):
@@ -261,36 +273,42 @@ class BlockReader:
             _log.debug("crypt: bid %#x not verifiable; guessing method %d", bid, m)
         return decode_block(raw, m, bid)
 
-    def _read_data(self, bid: int, depth: int, seen: set[int]) -> bytes:
+    def _read_data(self, bid: int, depth: int, seen: set[int],
+                   segs: list[bytes]) -> None:
         if depth > self.max_depth:
             self.sink.warn(WarnCode.CYCLE_DETECTED, f"depth>{self.max_depth}",
                            where=f"bid={bid:#x}")
-            return b""
+            segs.append(b"")
+            return
         if bid in seen:
             self.sink.warn(WarnCode.CYCLE_DETECTED, "bid revisited",
                            where=f"bid={bid:#x}")
-            return b""
+            segs.append(b"")
+            return
         seen.add(bid)
 
         raw = self.read_raw(bid)
         if raw is None:
-            return b""
+            segs.append(b"")
+            return
 
         if not bid_is_internal(bid):
             # Leaf data block: maybe 4K-compressed, then decode.
             raw = self._maybe_inflate(raw, bid, self._inflated_size(bid, raw))
             if self._stream[0] is None:
-                return self._decode_first(raw, bid)
+                segs.append(self._decode_first(raw, bid))
+                return
             from .crypt import decode_block
-            return decode_block(raw, self._stream[0], bid)
+            segs.append(decode_block(raw, self._stream[0], bid))
+            return
 
         # Internal block: XBLOCK (cLevel 1) or XXBLOCK (cLevel 2).
         if len(raw) < 8:
             self.sink.warn(WarnCode.OUT_OF_BOUNDS, "internal block <8B",
                            where=f"bid={bid:#x}")
-            return b""
+            segs.append(b"")
+            return
         btype = raw[0]
-        c_level = raw[1]
         c_ent = int.from_bytes(raw[2:4], "little")
         lcb_total = int.from_bytes(raw[4:8], "little")
         if btype != BTYPE_XBLOCK:
@@ -298,17 +316,17 @@ class BlockReader:
                            f"btype {btype:#x} != XBLOCK on data path",
                            where=f"bid={bid:#x}")
         w = self.variant.bid_size
-        out = bytearray()
-        base = 8
+        c_ent = min(c_ent, max(0, (len(raw) - 8) // w))
+        first = len(segs)
         for i in range(c_ent):
-            o = base + i * w
+            o = 8 + i * w
             child = normalize_bid(int.from_bytes(raw[o:o + w], "little"))
-            out += self._read_data(child, depth + 1, seen)
-        if lcb_total and len(out) != lcb_total:
+            self._read_data(child, depth + 1, seen, segs)
+        got = sum(len(x) for x in segs[first:])
+        if lcb_total and got != lcb_total:
             self.sink.warn(WarnCode.TRUNCATED,
-                           f"reassembled {len(out)} != lcbTotal {lcb_total}",
+                           f"reassembled {got} != lcbTotal {lcb_total}",
                            where=f"bid={bid:#x}")
-        return bytes(out)
 
     def _inflated_size(self, bid: int, raw: bytes) -> Optional[int]:
         """4K: cbInflated from the BBT entry, else from the block trailer."""

@@ -160,6 +160,13 @@ class _PstBuilder:
         self.blocks.append(_Block(bid=bid, payload=enc, internal=False, free=free))
         return bid
 
+    def add_stream(self, blocks: list[bytes]) -> int:
+        """A node data stream: one data block, or an XBLOCK over several."""
+        if len(blocks) == 1:
+            return self.add_data_block(blocks[0])
+        kids = [self.add_data_block(x) for x in blocks]
+        return self.add_xblock(kids, sum(len(x) for x in blocks))
+
     def add_internal_block(self, payload: bytes) -> int:
         """Add an internal block (XBLOCK/SLBLOCK — never encoded); return its bid."""
         bid = self._next_internal_bid
@@ -321,28 +328,37 @@ class _PstBuilder:
             pages.append((ib, page))
             return bid, ib, pages, ib + v.page_size
 
-        # Multi-leaf: chunk entries, then one intermediate page over the leaves.
-        leaf_brefs: list[tuple[int, int, int]] = []  # (btkey, bid, ib)
+        # Multi-leaf: chunk entries, then intermediate levels until one root.
+        level_brefs: list[tuple[int, int, int]] = []  # (btkey, bid, ib)
         ib = start_ib
         for i in range(0, len(items), per_page):
             chunk = items[i:i + per_page]
             ents = b"".join(entry_fn(it) for it in chunk)
             page, bid = self._wrap_btpage(ents, len(chunk), cb_ent, 0, ptype, ib)
             pages.append((ib, page))
-            leaf_brefs.append((key_fn(chunk[0]), bid, ib))
+            level_brefs.append((key_fn(chunk[0]), bid, ib))
             ib += v.page_size
 
         # Intermediate BTENTRY: btkey(w) + BREF.
         w = v.bid_size
         bt_cb_ent = w + v.bref_size
-        inter_ents = b""
-        for btkey, bid, leaf_ib in leaf_brefs:
-            inter_ents += btkey.to_bytes(w, "little") + _bref_bytes(bid, leaf_ib, v)
-        inter_ib = ib
-        inter_page, inter_bid = self._wrap_btpage(
-            inter_ents, len(leaf_brefs), bt_cb_ent, 1, ptype, inter_ib)
-        pages.append((inter_ib, inter_page))
-        return inter_bid, inter_ib, pages, inter_ib + v.page_size
+        per_inter = region // bt_cb_ent
+        c_level = 0
+        while len(level_brefs) > 1 or c_level == 0:
+            c_level += 1
+            nxt = []
+            for i in range(0, len(level_brefs), per_inter):
+                chunk = level_brefs[i:i + per_inter]
+                ents = b"".join(k.to_bytes(w, "little") + _bref_bytes(cb, cib, v)
+                                for k, cb, cib in chunk)
+                page, bid = self._wrap_btpage(ents, len(chunk), bt_cb_ent, c_level,
+                                              ptype, ib)
+                pages.append((ib, page))
+                nxt.append((chunk[0][0], bid, ib))
+                ib += v.page_size
+            level_brefs = nxt
+        _k, root_bid, root_ib = level_brefs[0]
+        return root_bid, root_ib, pages, ib
 
     def build(self) -> bytes:
         """Assemble the full store image with a correct HEADER + ROOT."""
@@ -351,6 +367,8 @@ class _PstBuilder:
         header_region = self._header_region()
         block_start = header_region
         after_blocks = self._layout_blocks(block_start)
+        # Pages sit on page boundaries, as Outlook writes them.
+        after_blocks = -(-after_blocks // v.page_size) * v.page_size
 
         stale_pages = []
         for ents in self.stale_nbt_pages:
@@ -986,6 +1004,148 @@ def build_tc_bytes(columns: list[tuple[int, int]],
     return heap_bytes, {matrix_nid: bytes(matrix)}
 
 
+# ---------------------------------------------------------------------------
+# Large tables the way Outlook writes them: multi-block heap, multi-level
+# RowIndex BTH, row matrix in padded data blocks (rows never span a block).
+# ---------------------------------------------------------------------------
+HEAP_BLOCK_CAP = 8192 - UNICODE.block_trailer_size   # max data-block payload
+_BTH_MAX_ALLOC = 3580                                # [MS-PST] §2.3.1.1
+MATRIX_PAD = b"\xA5"                                 # visible if rows shift
+
+
+def _heap_hdr_size(idx: int) -> int:
+    if idx == 0:
+        return 12
+    return 66 if idx == 8 or (idx > 8 and (idx - 8) % 128 == 0) else 2
+
+
+def _layout_heap(sizes: list[int], cap: int) -> list[tuple[int, int]]:
+    """Pack allocations into heap blocks → ``[(block_index, hid_index)]``."""
+    out, blk, used, n = [], 0, _heap_hdr_size(0), 0
+    for sz in sizes:
+        if n and used + sz + 4 + 2 * (n + 2) > cap:
+            blk, used, n = blk + 1, _heap_hdr_size(blk + 1), 0
+        n += 1
+        used += sz
+        out.append((blk, n))
+    return out
+
+
+def _emit_heap_blocks(client_sig: int, hid_root: int, allocs: list[bytes],
+                      layout: list[tuple[int, int]]) -> list[bytes]:
+    per: dict[int, list[bytes]] = {}
+    for a, (blk, _i) in zip(allocs, layout):
+        per.setdefault(blk, []).append(a)
+    blocks = []
+    for blk in range(max(per) + 1 if per else 1):
+        items = per.get(blk, [])
+        hsz = _heap_hdr_size(blk)
+        offsets, body = [hsz], bytearray()
+        for a in items:
+            body += a
+            offsets.append(offsets[-1] + len(a))
+        ib_hnpm = hsz + len(body)
+        if blk == 0:
+            hdr = struct.pack("<HBBII", ib_hnpm, 0xEC, client_sig, hid_root, 0)
+        elif hsz == 66:
+            hdr = struct.pack("<H", ib_hnpm) + b"\x00" * 64
+        else:
+            hdr = struct.pack("<H", ib_hnpm)
+        pmap = struct.pack("<HH", len(items), 0) + b"".join(
+            struct.pack("<H", o) for o in offsets)
+        blocks.append(bytes(hdr) + bytes(body) + pmap)
+    return blocks
+
+
+def build_tc_blocks(columns: list[tuple[int, int]],
+                    rows: list[tuple[int, dict[int, Optional[bytes]]]],
+                    *, cap: int = HEAP_BLOCK_CAP,
+                    ) -> tuple[list[bytes], dict[int, list[bytes]]]:
+    """A Table Context of any size, laid out like Outlook's.
+
+    Returns ``(heap_blocks, {matrix_nid: matrix_blocks})``.  Full matrix
+    blocks end in :data:`MATRIX_PAD` padding; the RowIndex BTH goes
+    multi-level once its records exceed one heap allocation.
+    """
+    cols = [(_PID_LTP_ROW_ID, 4)] + list(columns)
+    col_descs, ib = [], 0
+    for i, (tag, cb) in enumerate(cols):
+        col_descs.append((tag, ib, cb, i))
+        ib += cb
+    ceb_bytes = (len(cols) + 7) // 8
+    rgib = (ib, ib, ib, ib + ceb_bytes)
+    row_size = ib + ceb_bytes
+
+    per_leaf = _BTH_MAX_ALLOC // 8
+    n_leaves = max(1, -(-len(rows) // per_leaf))
+    var_vals: list[bytes] = []
+    var_slot: dict[tuple[int, int], int] = {}
+    for r, (_rid, cells) in enumerate(rows):
+        for tag, _ib, _cb, _bit in col_descs[1:]:
+            val = cells.get(tag)
+            if val is not None and not is_inline_in_pc(split_tag(tag)[1]):
+                var_slot[(r, tag)] = len(var_vals)
+                var_vals.append(val)
+    tcinfo_size = 22 + 8 * len(cols)
+    leaf_sizes = [8 * len(rows[i * per_leaf:(i + 1) * per_leaf]) for i in range(n_leaves)]
+    sizes = [tcinfo_size, 8] + leaf_sizes + ([8 * n_leaves] if n_leaves > 1 else []) \
+        + [len(v) for v in var_vals]
+    layout = _layout_heap(sizes, cap)
+    hids = [_make_hid(i, blk) for blk, i in layout]
+    hid_tcinfo, hid_bth = hids[0], hids[1]
+    leaf_hids = hids[2:2 + n_leaves]
+    var_base = 2 + n_leaves + (1 if n_leaves > 1 else 0)
+
+    rpb = cap // row_size
+    matrix_blocks, cur = [], bytearray()
+    ri: list[tuple[int, int]] = []
+    for r, (row_id, cells) in enumerate(rows):
+        row = bytearray(row_size)
+        struct.pack_into("<I", row, 0, row_id & 0xFFFFFFFF)
+        ceb = bytearray(ceb_bytes)
+        ceb[0] |= 0x80
+        for tag, ib_data, cb, i_bit in col_descs[1:]:
+            val = cells.get(tag)
+            if val is None:
+                continue
+            ceb[i_bit // 8] |= 0x80 >> (i_bit % 8)
+            if is_inline_in_pc(split_tag(tag)[1]):
+                cell = (val + b"\x00" * 8)[:cb]
+            else:
+                cell = struct.pack("<I", hids[var_base + var_slot[(r, tag)]])
+            row[ib_data:ib_data + cb] = cell
+        row[rgib[2]:rgib[2] + ceb_bytes] = ceb
+        cur += row
+        ri.append((row_id & 0xFFFFFFFF, r))
+        if len(cur) == rpb * row_size:
+            matrix_blocks.append(bytes(cur) + MATRIX_PAD * (cap - len(cur)))
+            cur = bytearray()
+    if cur or not matrix_blocks:
+        matrix_blocks.append(bytes(cur))
+    if len(matrix_blocks) > 1 and not cur:
+        matrix_blocks[-1] = matrix_blocks[-1][:rpb * row_size]   # last: no pad
+
+    ri.sort()
+    leaves = [b"".join(struct.pack("<II", k, v) for k, v in ri[i * per_leaf:(i + 1) * per_leaf])
+              for i in range(n_leaves)]
+    if n_leaves > 1:
+        inter = b"".join(struct.pack("<II", ri[i * per_leaf][0], leaf_hids[i])
+                         for i in range(n_leaves))
+        bth_hdr = struct.pack("<BBBBI", 0xB5, 4, 4, 1, hids[2 + n_leaves])
+        tail = [inter]
+    else:
+        bth_hdr = struct.pack("<BBBBI", 0xB5, 4, 4, 0, leaf_hids[0])
+        tail = []
+    matrix_nid = 0x8D
+    tcinfo = struct.pack("<BB", 0x7C, len(cols)) + struct.pack("<HHHH", *rgib)
+    tcinfo += struct.pack("<III", hid_bth, matrix_nid, 0)
+    for tag, ib_data, cb, i_bit in col_descs:
+        tcinfo += struct.pack("<IHBB", tag, ib_data, cb, i_bit)
+    allocs = [tcinfo, bth_hdr] + leaves + tail + var_vals
+    heap_blocks = _emit_heap_blocks(HN_CLIENT_TC, hid_tcinfo, allocs, layout)
+    return heap_blocks, {matrix_nid: matrix_blocks}
+
+
 def _nameid_streams(named: list[dict]) -> dict[int, bytes]:
     """Build the three name-to-id map streams as PC properties (Appendix A H17).
 
@@ -1174,13 +1334,15 @@ def build_unicode_pst_tree(*, store_name: str = "Personal Folders",
     # Inbox contents TC: two rows (dwRowID = message NID).
     extra = [(make_nid(NID_TYPE_NORMAL_MESSAGE, 0x100 + i), f"Bulk {i}")
              for i in range(extra_messages)]
-    c_heap, c_mat = build_tc_bytes(
+    c_heap, c_mat = build_tc_blocks(
         [(_PID_SUBJECT, 4)],
         [(msg1_nid, {_PID_SUBJECT: "Wire transfer".encode("utf-16-le")}),
          (msg2_nid, {_PID_SUBJECT: "Lunch?".encode("utf-16-le")})]
         + [(n, {_PID_SUBJECT: subj.encode("utf-16-le")}) for n, subj in extra])
-    add_raw_node(make_nid(NID_TYPE_CONTENTS_TABLE, inbox_index), c_heap,
-                 parent=inbox_pc_nid, subnodes=[_only_sub(b, c_mat)])
+    (cm_nid, cm_blocks), = c_mat.items()
+    b.add_node(make_nid(NID_TYPE_CONTENTS_TABLE, inbox_index), b.add_stream(c_heap),
+               b.add_slblock([(cm_nid, b.add_stream(cm_blocks), 0)]),
+               nid_parent=inbox_pc_nid)
     _add_empty_tc(b, make_nid(NID_TYPE_ASSOC_CONTENTS_TABLE, inbox_index))
 
     # ----- Message 1: PC + recipient TC + attachment TC + attachment PC -----

@@ -139,10 +139,23 @@ class Analyzer:
     def analysis(self):
         self.run_modules()
 
+    def _is_large(self) -> bool:
+        try:
+            return len(self.struct.rawdata) > flags.large_file_threshold
+        except Exception:
+            return False
+
     def finalize_analysis(self):
-        self._report_entropy()
-        self._report_fuzzy_hashes()
-        self._report_yara_matches()
+        if self._is_large():
+            self.reports["large_file"] = Report(
+                f"Whole-file checks skipped (entropy, fuzzy hashes, YARA): "
+                f"{len(self.struct.rawdata)} bytes > {flags.large_file_threshold}",
+                short="large file: whole-file checks skipped", label="large_file",
+                severity=Severity.INFO, verbosity=1)
+        else:
+            self._report_entropy()
+            self._report_fuzzy_hashes()
+            self._report_yara_matches()
         self._report_virustotal()
         self._report_mitre_attack()
         self._fill_report_labels()
@@ -191,7 +204,7 @@ class Analyzer:
     _EXIFTOOL_SKIP_GROUPS = {"ExifTool"}
 
     def _report_exiftool(self):
-        if not shutil.which("exiftool"):
+        if not shutil.which("exiftool") or self._is_large():
             return
         try:
             import json as _json
@@ -580,8 +593,16 @@ class Structure(dict):
                 raise ValueError("Data is too large.")
             return data
         if filename is not None and os.path.isfile(filename):
-            if os.path.getsize(filename) > flags.max_file_size:
-                raise ValueError(f"File {filename} is too large.")
+            size = os.path.getsize(filename)
+            if size > flags.max_file_size:
+                raise ValueError(f"File {filename} is too large ({size} bytes > "
+                                 f"--max-file-size {flags.max_file_size}).")
+            if size > flags.large_file_threshold:
+                # Map instead of reading: the OS pages in what analyzers touch.
+                import mmap as _mmap
+                log.debug(f"Mapping large file {os.path.abspath(filename)} ({size} bytes)")
+                with open(filename, "rb") as f:
+                    return _mmap.mmap(f.fileno(), 0, access=_mmap.ACCESS_READ)
             log.debug(f"Reading file {os.path.abspath(filename)}")
             with open(filename, "rb") as f:
                 return f.read()
@@ -1022,7 +1043,10 @@ class Structure(dict):
     @property
     def magic(self):
         if not hasattr(self, "__magic_mime"):
-            detection = detect_mime(self.rawdata, filename=self.__filename)
+            data = self.rawdata
+            if len(data) > flags.large_file_threshold:
+                data = data[:1 << 20]          # head is enough for magic
+            detection = detect_mime(data, filename=self.__filename)
             self.__magic_detection = detection
             self.__magic_mime = detection.mime
             self.__magic_description = detection.description
