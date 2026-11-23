@@ -18,9 +18,23 @@ Verwandt: [`MAIL_ARCHITECTURE_TODO.md`](MAIL_ARCHITECTURE_TODO.md) (Mail-Schicht
 4. **Capability-Meldungen pro Objekt:** „magika / python-magic not installed“
    hängt an jedem Objekt (`Utils/filetype.py`). Richtig wäre: einmal beim Start
    prüfen, einmal im Lauf-Kopf melden, pro Objekt nur verfügbare Analysen anhängen.
-5. **Weitere Kernel-Produkte als Toleranz-Referenz:** Kernel EDB Viewer
-   (Exchange-ESE-Datenbanken) und „Kernel OSA“ (noch zu klären, welches Produkt
-   genau gemeint ist).
+5. **Weitere Kernel-Produkte als Toleranz-Referenz:** Die Free-Tools-Seite von
+   Nucleus (2026-11-23) führt 48 Tools. Für MATT relevant:
+
+   | Produkt | Format | Bezug zu MATT |
+   |---|---|---|
+   | OST Viewer | OST | pstforensic kann OST schon |
+   | **NST Viewer** | NST (Outlook-Gruppen-Speicher) | gleiche NDB/LTP-Basis wie PST/OST, billigste Erweiterung von pstforensic |
+   | **OLM Viewer** | OLM (Outlook für Mac) | ZIP plus XML/Quellen, eigene kleine Library |
+   | **Exchange EDB Viewer** | EDB (ESE/JET Blue) | großes Vorhaben: ESE-Seiten, Recovery, MAPI-Mapping |
+   | NSF Viewer | NSF (Lotus Notes) | eigenes, großes Format |
+   | DBX Viewer | DBX (Outlook Express) | klein, Altbestände in Leaks |
+   | MBOX / EML / EMLX / MSG Viewer | Mail-Einzelformate | MATT hat MBOX/EML/MSG, EMLX fehlt (trivial) |
+   | XLS/XLSX Viewer, Document Viewer | Office, auch beschädigt | Toleranz-Referenz für Office-Analyzer |
+   | VHD/VMDK, BKF | Container | später, Container-Analyzer |
+
+   Ohne Beispieldateien des Nutzers testen wir gegen öffentliche Korpora und
+   synthetische Fixtures; echte Proben werden nur in Docker geparst.
 
 ## Leitsätze
 
@@ -108,8 +122,8 @@ Verwandt: [`MAIL_ARCHITECTURE_TODO.md`](MAIL_ARCHITECTURE_TODO.md) (Mail-Schicht
 2. **Scheduler und Pools** mit Limits pro Analyzer.
 3. **Reporting-Modell und Verdichtung**, Renderer umstellen.
 4. **Designsprache, dann TUI.** Die Shell optional, früh als Prototyp.
-5. **Kernel EDB und OSA** als eigene Format-Libraries, nach dem Muster von
-   pstforensic (eigene Planung).
+5. **Weitere Formate:** zuerst NST (in pstforensic), dann OLM, dann EDB als
+   eigene Library nach dem Muster von pstforensic (eigene Planung).
 
 Die Mail-Schichten aus `MAIL_ARCHITECTURE_TODO.md` passen in Schritt 1 und 3:
 Das logische `MailMessage` ist dort ein Objekt im Ereignisbaum.
