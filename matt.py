@@ -226,6 +226,11 @@ def main():
              "index, so reopening a large store is fast) [default: off]",
         default=flags.cache_path,
     )
+    parser.add_argument(
+        "--pst-max-messages", type=int, default=flags.pst_max_live_messages,
+        help="Live PST/OST messages analyzed as .eml children; recovered items "
+             "are always included (0 = all) [default: %(default)s]",
+    )
 
     args = parser.parse_args()
 
@@ -234,6 +239,7 @@ def main():
     flags.network_policy = args.network_policy
     flags.max_file_size = args.max_file_size
     flags.cache_path = args.cache_path
+    flags.pst_max_live_messages = args.pst_max_messages
 
     # Configure logging
     setup_logging(verbosity=args.verbosity, debug=args.debug)

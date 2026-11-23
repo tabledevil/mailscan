@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import mimetypes
+import mmap
 import weakref
 from enum import IntEnum
 from renderers import get_renderer
@@ -612,10 +613,14 @@ class Analyzer:
         struct.mime_type = detected
         return True
 
+    # Declared types that say "unknown" — no contradiction with any content.
+    _GENERIC_DECLARED = {"application/octet-stream", "application/binary",
+                         "application/unknown", "binary/octet-stream", ""}
+
     @staticmethod
     def _note_declared_type(primary):
         declared = getattr(primary.struct, "declared_mime_type", None)
-        if declared is None:
+        if declared is None or declared.lower() in Analyzer._GENERIC_DECLARED:
             return
         primary.reports["declared_type_mismatch"] = Report(
             f"Declared type {declared} does not match content "
@@ -665,11 +670,22 @@ class Analyzer:
         return self.childitems
 
 
+class DirectoryAnalyzer(Analyzer):
+    """Folder node inside a container (archive directory hierarchy)."""
+    compatible_mime_types = ["inode/directory"]
+    description = "Directory"
+
+    def analysis(self):
+        self.info = "directory"
+        self.reports["summary"] = Report("Directory", label="directory", verbosity=1)
+
+
 from Analyzers import *
 
 
 class Structure(dict):
     _cache = {}
+    _occurrences = {}   # content sha256 → times seen (duplicate display)
 
     # ------------------------------------------------------------------
     # A3: Cache management
@@ -679,6 +695,7 @@ class Structure(dict):
         """Clear the analysis cache.  Call between top-level file analyses
         to free memory."""
         cls._cache.clear()
+        cls._occurrences.clear()
 
     @classmethod
     def cache_size(cls):
@@ -687,6 +704,22 @@ class Structure(dict):
     # ------------------------------------------------------------------
     # File reading
     # ------------------------------------------------------------------
+    _MAILBOX_EXTS = (".pst", ".ost", ".nst", ".mbox", ".mbx")
+
+    @staticmethod
+    def _is_mailbox_container(filename) -> bool:
+        """Mailbox stores are mapped and streamed, never read whole, so the
+        ``--max-file-size`` guard does not apply to them (a 10+ GB PST is
+        normal evidence).  By extension or by the ``!BDN`` PST/OST magic."""
+        name = str(filename).lower()
+        if name.endswith(Structure._MAILBOX_EXTS):
+            return True
+        try:
+            with open(filename, "rb") as fh:
+                return fh.read(4) == b"!BDN"
+        except OSError:
+            return False
+
     @staticmethod
     def _read_data(filename=None, data=None):
         if data is not None:
@@ -695,7 +728,7 @@ class Structure(dict):
             return data
         if filename is not None and os.path.isfile(filename):
             size = os.path.getsize(filename)
-            if size > flags.max_file_size:
+            if size > flags.max_file_size and not Structure._is_mailbox_container(filename):
                 raise ValueError(f"File {filename} is too large ({size} bytes > "
                                  f"--max-file-size {flags.max_file_size}).")
             if size > flags.large_file_threshold:
@@ -714,11 +747,22 @@ class Structure(dict):
     # ------------------------------------------------------------------
     @classmethod
     def create(cls, filename=None, data=None, mime_type=None, level=0, index=0, parent=None, metadata=None):
-        # Read data once
+        # Read data once (large files are memory-mapped, see _read_data)
+        source_path = (os.path.abspath(filename)
+                       if data is None and filename is not None and os.path.isfile(filename)
+                       else None)
         raw_data = cls._read_data(filename, data)
+        path_backed = source_path is not None and isinstance(raw_data, mmap.mmap)
 
-        # Calculate hash for dedup
-        sha256_hash = hashlib.sha256(raw_data).hexdigest()
+        # Calculate hash for dedup.  A mapped multi-GB file is keyed by file
+        # identity instead of hashing every byte up front.
+        if path_backed:
+            st = os.stat(source_path)
+            sha256_hash = hashlib.sha256(
+                f"path:{source_path}:{st.st_size}:{st.st_mtime_ns}".encode()).hexdigest()
+        else:
+            sha256_hash = hashlib.sha256(raw_data).hexdigest()
+        cls._occurrences[sha256_hash] = cls._occurrences.get(sha256_hash, 0) + 1
 
         # Audit finding (codex_security_1, _2; HIGH): hash-only cache
         # returns the existing Structure regardless of filename/mime,
@@ -738,7 +782,9 @@ class Structure(dict):
             log.info(
                 f"Returning cached Structure object for hash {sha256_hash[:10]}..."
             )
-            return cls._cache[cache_key]
+            return cls._occurrence(cls._cache[cache_key], level=level, index=index,
+                                   parent=parent, metadata=metadata,
+                                   occurrence=cls._occurrences[sha256_hash])
 
         # A2: pass raw_data directly — __init__ will NOT re-read the file
         new_struct = cls(
@@ -749,9 +795,39 @@ class Structure(dict):
             index=index,
             parent=parent,
             metadata=metadata,
+            source_path=source_path,
+            path_backed=path_backed,
         )
+        new_struct._content_sha256 = sha256_hash
+        new_struct._cache_occurrence = cls._occurrences[sha256_hash]
         cls._cache[cache_key] = new_struct
         return new_struct
+
+    @classmethod
+    def _occurrence(cls, cached, *, level, index, parent, metadata, occurrence):
+        """Another location of already analyzed bytes (same content, name and
+        type).  The analysis and children are shared; position in the tree
+        (level, index, parent, archive metadata) belongs to this location, so
+        duplicates stay visible as their own nodes."""
+        if (cached.level, cached.index, cached.parent) == (level, index, parent):
+            return cached
+        obj = cls.__new__(cls)
+        dict.__init__(obj, cached)
+        obj.level, obj.index, obj.parent = level, index, parent
+        if metadata is not None:
+            obj.metadata = metadata
+        obj._cache_occurrence = occurrence
+        return obj
+
+    @classmethod
+    def create_directory(cls, filename, level=0, index=0, archive_path=None, parent=None):
+        """A folder node (``inode/directory``) inside a container."""
+        obj = cls(filename=filename, data=b"", mime_type="inode/directory",
+                  level=level, index=index, parent=parent)
+        obj._Structure__children = []
+        obj._content_sha256 = None
+        obj.archive_path = archive_path
+        return obj
 
     def __getattr__(self, key):
         if key in self:
@@ -773,7 +849,7 @@ class Structure(dict):
     # ------------------------------------------------------------------
     def __init__(
         self, filename=None, data=None, mime_type=None, level=0, index=0,
-        parent=None, metadata=None,
+        parent=None, metadata=None, source_path=None, path_backed=False,
     ) -> None:
         if level > flags.max_analysis_depth:
             log.warning(
@@ -792,12 +868,15 @@ class Structure(dict):
         else:
             self.__rawdata = self._read_data(filename, data)
 
-        if data is None and filename:
-            self.fullpath = os.path.abspath(filename)
+        if source_path is None and data is None and filename:
+            source_path = os.path.abspath(filename)
+        if source_path:
+            self.fullpath = source_path
             self.__filename = os.path.split(self.fullpath)[1]
         else:
             self.__filename = filename if filename is not None else None
 
+        self.path_backed = path_backed
         self.level = level
         self.index = index
         self.parent = parent
@@ -1023,9 +1102,28 @@ class Structure(dict):
 
     @property
     def realfile(self):
-        if self.__filename and os.path.isfile(self.__filename):
-            return self.size == os.stat(self.__filename).st_size
+        path = self.get("fullpath")
+        if path and os.path.isfile(path):
+            return self.size == os.stat(path).st_size
         return False
+
+    @property
+    def is_directory(self):
+        return self.mime_type == "inode/directory"
+
+    @property
+    def duplicate_count(self):
+        """How often this content was seen in the run (any name or type)."""
+        key = self.get("_content_sha256")
+        return Structure._occurrences.get(key, 1) if key else 1
+
+    @property
+    def duplicate_occurrence(self):
+        return self.get("_cache_occurrence", 1)
+
+    @property
+    def is_duplicate_content(self):
+        return not self.is_directory and self.duplicate_count > 1
 
     @property
     def filename(self):
@@ -1092,6 +1190,15 @@ class Structure(dict):
             while os.path.exists(f"{stem}_{n}{ext}"):
                 n += 1
             outfile = f"{stem}_{n}{ext}"
+
+        if self.is_directory:   # archive folder: recreate it, children go inside
+            os.makedirs(outfile, exist_ok=True)
+            if recursive:
+                for child in self.get_children():
+                    child.extract(basepath=outfile, filenames=filenames,
+                                  recursive=recursive, _manifest=_manifest,
+                                  _is_root=False)
+            return
 
         log.debug(f"Writing {outfile}")
         try:

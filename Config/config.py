@@ -26,8 +26,16 @@ class Flags:
     # Files above this are memory-mapped instead of read, and whole-file passes
     # (entropy, fuzzy hashes, YARA, exiftool) are skipped; MIME detection
     # looks at the head only.  Large PST/OSTs are the typical case.
+    pst_max_live_messages: int = 200   # live PST messages emitted as children (0 = all)
     large_file_threshold: int = 256 * 1024 * 1024
     max_compression_ratio: int = 100
+    plaintext_sample_bytes: int = 256 * 1024
+    plaintext_full_scan_bytes: int = 1024 * 1024
+    plaintext_language_max_chars: int = 100 * 1024
+    plaintext_encoded_min_bytes: int = 4 * 1024
+    plaintext_base64_min_ratio: float = 0.98
+    plaintext_external_tools_enabled: bool = True
+    plaintext_tool_timeout: float = 2.0
 
     # --- MIME detection ---
     mime_provider_order: Optional[List[str]] = None

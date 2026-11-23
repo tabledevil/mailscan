@@ -27,7 +27,8 @@ class TextRenderer(Renderer):
         yield f"info     : {node.info['analyzer_info']}\n"
         if node.info["filename"]:
             yield f"filename : {node.info['filename']}\n"
-        yield f"md5      : {node.info['md5']}\n"
+        if node.info["md5"]:
+            yield f"md5      : {node.info['md5']}\n"
 
         yield from self._render_reports(node.reports, prefix="")
 
@@ -51,7 +52,8 @@ class TextRenderer(Renderer):
         yield f"{pad}info     : {node.info['analyzer_info']}\n"
         if node.info["filename"]:
             yield f"{pad}filename : {node.info['filename']}\n"
-        yield f"{pad}md5      : {node.info['md5']}\n"
+        if node.info["md5"]:
+            yield f"{pad}md5      : {node.info['md5']}\n"
 
         yield from self._render_reports(node.reports, prefix=pad)
 

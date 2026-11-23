@@ -10,10 +10,16 @@ Fallback chain:
 """
 
 import logging
-import re
 import textwrap
 
+from Config.config import flags
 from structure import Analyzer, Report, Severity
+from Utils.plaintext_triage import (
+    classify_plaintext,
+    extract_password_candidates,
+    language_detection_allowed,
+    scan_text_for_expensive_extractors,
+)
 
 log = logging.getLogger("matt")
 
@@ -78,10 +84,6 @@ except ImportError:
     langdetect_detect = None
     lang_detect_exception = None
 
-# Password pattern — matches English and German keywords
-_RE_FIND_PW = re.compile(r"(pw|kennwort|pass(wor[dt])?)\s*[:\-=]?\s*(?P<words>.*)", re.IGNORECASE)
-
-
 class PlainTextAnalyzer(Analyzer):
     compatible_mime_types = ["text/plain"]
     description = "Plain Textfile Analyser"
@@ -144,14 +146,21 @@ class PlainTextAnalyzer(Analyzer):
     # ------------------------------------------------------------------
     def _detect_language(self) -> str | None:
         """Detect the language of self.text using the best available detector."""
-        if not self.text or len(self.text.strip()) < 10:
+        if not language_detection_allowed(self.profile, self.text):
+            self.reports["language_skipped"] = Report(
+                f"Skipped language detection for {self.profile.kind}",
+                label="language_skipped",
+                verbosity=2,
+            )
             return None
+
+        language_text = self.text[: flags.plaintext_language_max_chars]
 
         # 1) lingua (preferred)
         if _LINGUA_AVAILABLE:
             try:
                 detector = _get_lingua_detector()
-                lang = detector.detect_language_of(self.text)
+                lang = detector.detect_language_of(language_text)
                 if lang is not None:
                     iso = lang.iso_code_639_1.name.lower()
                     self.reports["lang_lingua"] = Report(
@@ -166,7 +175,7 @@ class PlainTextAnalyzer(Analyzer):
         # 2) cld3 fallback
         if cld3 is not None:
             try:
-                resp = cld3.get_language(self.text)
+                resp = cld3.get_language(language_text)
                 if resp and resp.is_reliable:
                     self.reports["lang_cld3"] = Report(
                         f"{resp.language}@{resp.probability:.2f}",
@@ -180,7 +189,7 @@ class PlainTextAnalyzer(Analyzer):
         # 3) langdetect fallback
         if langdetect_detect is not None:
             try:
-                language = langdetect_detect(self.text)
+                language = langdetect_detect(language_text)
                 self.reports["lang_langdetect"] = Report(
                     language, label="lang_langdetect", verbosity=2
                 )
@@ -195,34 +204,36 @@ class PlainTextAnalyzer(Analyzer):
     # Password scanning
     # ------------------------------------------------------------------
     def _scan_passwords(self):
-        """Look for password hints in the text body."""
-        if not self.text:
+        """Look for high-confidence password hints in likely human-readable text."""
+        scan_text = self.scan_text
+        if not scan_text:
             return
 
-        match = _RE_FIND_PW.search(self.text)
-        if match:
-            words = [w for w in match.group("words").split() if len(w) > 3]
-            if words:
-                self.reports["possible_passwords"] = Report(
-                    ",".join(words),
-                    label="possible_passwords",
-                    severity=Severity.HIGH,
-                    verbosity=0,
-                )
-                if _BROKER_AVAILABLE:
-                    for word in words:
-                        PasswordBroker.register_password(word, source_struct=self.struct)
+        candidates = extract_password_candidates(scan_text)
+        if not candidates:
+            return
+
+        self.reports["password_hints"] = Report(
+            f"{len(candidates)} high-confidence password hint(s)",
+            label="password_hints",
+            severity=Severity.MEDIUM,
+            verbosity=1,
+        )
+        if _BROKER_AVAILABLE:
+            for word in candidates:
+                PasswordBroker.register_password(word, source_struct=self.struct)
 
     # ------------------------------------------------------------------
     # IOC extraction
     # ------------------------------------------------------------------
     def _extract_iocs(self):
         """Run IOC extraction on decoded text."""
-        if not _IOC_AVAILABLE or not self.text:
+        scan_text = self.scan_text
+        if not _IOC_AVAILABLE or not scan_text:
             return
 
         try:
-            iocs = extract_iocs(self.text)
+            iocs = extract_iocs(scan_text)
             if iocs.has_findings:
                 parts = iocs.summary_parts()
                 summary_text = ", ".join(parts)
@@ -246,10 +257,7 @@ class PlainTextAnalyzer(Analyzer):
                 if iocs.sha256:
                     detail_lines.append(f"SHA256: {', '.join(iocs.sha256)}")
                 if iocs.passwords:
-                    detail_lines.append(f"Passwords: {', '.join(iocs.passwords)}")
-                    if _BROKER_AVAILABLE:
-                        for pw in iocs.passwords:
-                            PasswordBroker.register_password(pw, source_struct=self.struct)
+                    detail_lines.append(f"Password-like hints: {len(iocs.passwords)}")
 
                 self.reports["iocs"] = Report(
                     "\n".join(detail_lines),
@@ -271,22 +279,88 @@ class PlainTextAnalyzer(Analyzer):
         self.text = ""
         self.lang = None
         self._ioc_result = None
+        self.profile = None
+        self.scan_text = ""
 
         self.modules["encoding"] = self._do_decode
+        self.modules["triage"] = self._do_triage
         self.modules["language"] = self._do_language
         self.modules["passwords"] = self._scan_passwords
         self.modules["iocs"] = self._extract_iocs
         super().analysis()
 
-        self.info = f"language:{self.lang}"
+        profile_kind = self.profile.kind if self.profile is not None else "unknown"
+        self.info = f"{profile_kind}; language:{self.lang}"
         self.reports["summary"] = Report(
-            self.text,
-            short=textwrap.shorten(self.text, width=100) if self.text else "",
+            self._summary_text(),
+            short=textwrap.shorten(self._summary_text(), width=100) if self.text else "",
         )
 
     def _do_decode(self):
         self.text = self._decode(self.struct.rawdata)
 
+    def _do_triage(self):
+        self.profile = classify_plaintext(self.struct.rawdata, self.text)
+        self.scan_text = scan_text_for_expensive_extractors(self.profile, self.text)
+
+        details = [
+            f"type={self.profile.kind}",
+            f"sample={self.profile.sample_size}",
+            f"size={self.profile.total_size}",
+        ]
+        if self.profile.reasons:
+            details.append(f"reason={'; '.join(self.profile.reasons)}")
+        self.reports["text_profile"] = Report(
+            ", ".join(details),
+            label="text_profile",
+            verbosity=1,
+        )
+        if self.profile.external_hints:
+            hint_text = "\n".join(
+                f"{name}: {value}" for name, value in self.profile.external_hints.items()
+            )
+            self.reports["external_text_hints"] = Report(
+                hint_text,
+                label="external_text_hints",
+                verbosity=2,
+            )
+        if self.profile.decoded_base64 is not None:
+            filename = self._decoded_child_filename("base64.decoded")
+            self.childitems.append(
+                self.generate_struct(data=self.profile.decoded_base64, filename=filename)
+            )
+            self.reports["decoded_base64_child"] = Report(
+                (
+                    "Extracted base64 payload "
+                    f"({len(self.profile.decoded_base64)} decoded bytes)"
+                ),
+                label="decoded_base64_child",
+                severity=Severity.MEDIUM,
+            )
+
     def _do_language(self):
         self.lang = self._detect_language()
-        self.reports["language"] = Report(self.lang)
+        if self.lang is not None:
+            self.reports["language"] = Report(self.lang)
+
+    def _decoded_child_filename(self, suffix):
+        filename = self.struct.filename if self.struct.has_filename else "decoded"
+        return f"{filename}.{suffix}"
+
+    def _summary_text(self):
+        if self.profile is not None and self.profile.is_encoded:
+            decoded_size = (
+                len(self.profile.decoded_base64)
+                if self.profile.decoded_base64 is not None
+                else 0
+            )
+            return (
+                f"Encoded text payload: {self.profile.kind}; "
+                f"{self.struct.size} encoded bytes, {decoded_size} decoded bytes"
+            )
+        if len(self.text) > flags.plaintext_full_scan_bytes:
+            return (
+                f"Large text payload: {self.profile.kind if self.profile else 'unknown'}; "
+                f"{len(self.text)} characters"
+            )
+        return self.text

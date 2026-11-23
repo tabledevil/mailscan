@@ -25,6 +25,8 @@ python matt.py --max-file-size 8G <file> # raise the 1 GB input limit (e.g. larg
 python matt.py --cache-path ~/.cache/matt <file>  # persistent caches (pstforensic structural index)
 python -m pstforensic.tools.summary <file.pst>   # count-only PST/OST inventory (no content)
 python -m pstforensic.tools.tree <file.pst> [--items] [--redact]   # Kernel-style folder tree
+python mailhunt.py hunt -q <term> <mailbox-or-dir>   # search EML/mbox/PST(OST) incl. recovered items
+python matt.py --pst-max-messages 0 <file.pst>       # analyze every live PST message (default 200)
 ```
 
 ## Architecture
@@ -108,6 +110,13 @@ Legacy CLI scripts in repo root (use `eml.py` directly):
 - exiftool runs only for non-text types; its output is evaluated by `Utils/exif_eval.py` into a `metadata` report (also fed into the timeline) and findings (`meta_extension_mismatch`, `meta_remote_template`, `meta_gps`, timestamp anomalies, metadata URLs). The raw table stays at verbosity 2.
 - `olefile` is a core dependency (OLE Office, MSG, pstforensic).
 - The `NUL` device file that sometimes appears in `git status` on Windows is in `.gitignore`.
+
+## Samples
+
+No samples in Git — no malware, evidence or real mail (guarded by
+`tests/test_e2e_findings.py::test_no_samples_tracked_in_git`). Tests generate
+fixtures synthetically; a real corpus is used only when present in the
+git-ignored `samples/` or `$MATT_SAMPLES`, and is parsed only inside Docker.
 
 ## Sandbox safety (dynamic JS)
 

@@ -8,9 +8,10 @@ OST) as tolerantly as Kernel PST Viewer, and reports what the store holds:
   * ``recovered_items``   — deleted, superseded, carved, orphaned, lost items
   * ``damaged_items``     — live items read through damage, with findings
 
-Bodies and attachments are emitted as child structures so the rest of MATT
-(IOC extraction, attachment analyzers) runs over them: always for recovered
-items, for live items up to :data:`MAX_LIVE_MESSAGES`.
+Each item becomes a ``message/rfc822`` child (``pstforensic.export``) so the
+rest of MATT (EmailAnalyzer header/route/auth checks, IOC extraction,
+attachment analyzers) runs over it: always for recovered items, for live
+items up to ``flags.pst_max_live_messages`` (``--pst-max-messages``, 0 = all).
 """
 from __future__ import annotations
 
@@ -133,13 +134,15 @@ class PstAnalyzer(Analyzer):
         recovered, damaged = [], []
         live_children = 0
         child_idx = 0
+        from Config.config import flags
+        max_live = getattr(flags, "pst_max_live_messages", MAX_LIVE_MESSAGES)
         for item in store.iter_items():
             states[item.state] += 1
             if item.state in _RECOVERED_STATES:
                 recovered.append(item)
             elif item.state == "live_damaged":
                 damaged.append(item)
-            emit = item.state != "live" or live_children < MAX_LIVE_MESSAGES
+            emit = item.state != "live" or not max_live or live_children < max_live
             if emit and item.message is not None:
                 if item.state in ("live", "live_damaged"):
                     live_children += 1
@@ -156,9 +159,9 @@ class PstAnalyzer(Analyzer):
         ]
         if store.has_password:
             lines.append("Password: set (bypassed; read access needs none)")
-        if states.get("live", 0) + states.get("live_damaged", 0) > MAX_LIVE_MESSAGES:
-            lines.append(f"Children: bodies/attachments of the first {MAX_LIVE_MESSAGES} "
-                         "live messages and of every recovered item")
+        if max_live and states.get("live", 0) + states.get("live_damaged", 0) > max_live:
+            lines.append(f"Children: the first {max_live} live messages and every "
+                         "recovered item (--pst-max-messages 0 for all)")
         self.reports["summary"] = Report("\n".join(lines), label="summary",
                                          data={"states": dict(states), "folders": folders,
                                                "variant": store.variant.name})
@@ -201,29 +204,27 @@ class PstAnalyzer(Analyzer):
                 severity=Severity.LOW, data=[_item_data(i) for i in damaged])
 
     def _emit_children(self, item, idx: int) -> int:
-        """Bodies + attachments of one item, tagged with its state/provenance."""
-        m = item.message
+        """One ``message/rfc822`` child per item (``pstforensic.export``):
+        original transport headers, bodies, attachments and embedded
+        messages, plus ``X-MATT-PST-*`` folder/state/provenance/findings
+        headers — so EmailAnalyzer runs its header, route and auth checks
+        on PST mail exactly as on .eml files."""
+        from pstforensic.export import item_to_eml
+        try:
+            raw = item_to_eml(item)
+        except Exception as exc:
+            log.debug(f"PST item → EML failed: {exc}")
+            return idx
+        if not raw:
+            return idx
+        prefix = "" if item.state in ("live", "live_damaged") else f"{item.state}_"
         meta = {"pst_state": item.state, "pst_provenance": item.provenance,
                 "pst_folder": item.folder_path, "pst_subject": item.subject}
-        prefix = "" if item.state in ("live", "live_damaged") else f"{item.state}_"
-        body = m.render(0x1000)
-        if isinstance(body, str) and body.strip():
+        try:
             self.childitems.append(self.generate_struct(
-                data=body.encode("utf-8"), filename=f"{prefix}body_{idx}.txt",
-                mime_type="text/plain", index=idx, metadata=meta))
-            idx += 1
-        html = m.raw_of(0x1013)
-        if html:
-            self.childitems.append(self.generate_struct(
-                data=bytes(html), filename=f"{prefix}body_{idx}.html",
-                mime_type="text/html", index=idx, metadata=meta))
-            idx += 1
-        for att in m.attachments:
-            data = att.open_data() if getattr(att, "open_data", None) else None
-            if not data:
-                continue
-            name = att.render(0x3707) or att.render(0x3704) or f"attachment_{idx}"
-            self.childitems.append(self.generate_struct(
-                data=bytes(data), filename=f"{prefix}{name}", index=idx, metadata=meta))
-            idx += 1
-        return idx
+                data=raw, filename=f"{prefix}message_{idx}.eml",
+                mime_type="message/rfc822", index=idx, metadata=meta))
+        except Exception as exc:   # one bad child never stops the store
+            log.warning(f"PST item {idx} not analyzed: {type(exc).__name__}: {exc}")
+            return idx
+        return idx + 1

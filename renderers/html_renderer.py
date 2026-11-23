@@ -124,7 +124,7 @@ class HtmlRenderer(Renderer):
         md5 = html.escape(str(node.info["md5"] or ""))
         sha1 = html.escape(str(node.info.get("sha1") or ""))
         sha256 = html.escape(str(node.info.get("sha256") or ""))
-        hash_parts = [f'<span class="hash">MD5: {md5}</span>']
+        hash_parts = [f'<span class="hash">MD5: {md5}</span>'] if md5 else []
         if sha1:
             hash_parts.append(f'<span class="hash">SHA1: {sha1}</span>')
         if sha256:

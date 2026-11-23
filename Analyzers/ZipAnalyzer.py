@@ -1,6 +1,7 @@
-import logging
-import zipfile
 import io
+import logging
+import posixpath
+import zipfile
 from structure import Analyzer, Report, Severity
 from Config.config import flags
 from Utils.password_broker import PasswordBroker
@@ -152,22 +153,75 @@ class ZipAnalyzer(Analyzer):
         return False
 
     def _extract_contents(self, zip_file):
+        """Members become children under directory nodes that mirror the
+        archive's folder hierarchy (``Structure.create_directory``).  Each
+        file keeps its in-archive path as ``archive_path``; ``..``/absolute
+        member names are normalized (zip-slip) and reported."""
+        directories = getattr(self, "_directories", None)
+        if directories is None:
+            directories = self._directories = {}
         for idx, file_info in enumerate(zip_file.infolist()):
+            member_path = self._normalized_member_path(file_info.filename)
+            if not member_path:
+                self.reports.setdefault("zip_path_traversal", Report(
+                    f"Archive member with unsafe path skipped: {file_info.filename!r}",
+                    short="unsafe member path", label="zip_path_traversal",
+                    severity=Severity.MEDIUM, verbosity=0))
+                continue
+            if file_info.is_dir():
+                self._directory_for_path(directories, member_path, idx)
+                continue
             member_key = (file_info.filename, file_info.CRC, file_info.file_size)
             if member_key in self._extracted_members:
                 continue
             try:
                 file_data = zip_file.read(file_info.filename)
-                self.childitems.append(
-                    self.generate_struct(
-                        filename=file_info.filename,
-                        data=file_data,
-                        index=idx,
-                    )
-                )
-                self._extracted_members.add(member_key)
             except RuntimeError as e:
                 log.error(f"Could not extract {file_info.filename} from zip: {e}")
+                continue
+            parent_path, filename = posixpath.split(member_path)
+            siblings = self._children_for_path(directories, parent_path, idx)
+            parent = directories.get(parent_path, self.struct) if parent_path else self.struct
+            child = self.struct.__class__.create(
+                filename=filename, data=file_data, index=idx,
+                level=self._child_level(parent_path), parent=parent,
+                metadata={"archive_filename": member_path},
+            )
+            child.archive_path = member_path
+            siblings.append(child)
+            self._extracted_members.add(member_key)
+
+    def _children_for_path(self, directories, directory_path, index):
+        if not directory_path:
+            return self.childitems
+        return self._directory_for_path(directories, directory_path, index).get_children()
+
+    def _directory_for_path(self, directories, directory_path, index):
+        directory_path = directory_path.rstrip("/")
+        if directory_path in directories:
+            return directories[directory_path]
+        parent_path, dirname = posixpath.split(directory_path)
+        siblings = self._children_for_path(directories, parent_path, index)
+        directory = self.struct.__class__.create_directory(
+            filename=dirname, index=index, level=self._child_level(parent_path),
+            archive_path=directory_path,
+            parent=directories[parent_path] if parent_path else self.struct,
+        )
+        directories[directory_path] = directory
+        siblings.append(directory)
+        return directory
+
+    def _child_level(self, parent_path):
+        if not parent_path:
+            return self.struct.level + 1
+        return self.struct.level + 2 + parent_path.count("/")
+
+    @staticmethod
+    def _normalized_member_path(filename):
+        normalized = posixpath.normpath(filename.replace("\\", "/"))
+        if normalized in {"", "."} or normalized == ".." or normalized.startswith("../"):
+            return None
+        return normalized.lstrip("/")
 
     def _retry_with_password(self, password):
         file_like_object = io.BytesIO(self.struct.rawdata)

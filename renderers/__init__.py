@@ -112,9 +112,14 @@ class Renderer(abc.ABC):
 
         # Block entropy map
         entropy_map = []
+        # Large mapped containers (multi-GB PST) and folder nodes: no
+        # whole-file passes at render time (entropy map, hashes).
+        whole_file = not (getattr(struct, "path_backed", False)
+                          or getattr(struct, "is_directory", False))
         try:
             from Utils.advanced_analysis import block_entropy
-            entropy_map = block_entropy(struct.rawdata, num_blocks=64)
+            if whole_file:
+                entropy_map = block_entropy(struct.rawdata, num_blocks=64)
         except Exception:
             pass
 
@@ -123,9 +128,10 @@ class Renderer(abc.ABC):
             "mime_type": struct.mime_type,
             "size": struct.size,
             "filename": struct.filename if struct.has_filename else None,
-            "md5": struct.md5,
-            "sha1": struct.sha1,
-            "sha256": struct.sha256,
+            "md5": struct.md5 if whole_file else None,
+            "sha1": struct.sha1 if whole_file else None,
+            "sha256": struct.sha256 if whole_file else None,
+            "path_backed": bool(getattr(struct, "path_backed", False)),
             "analyzer_name": type(struct.analyzer).__name__,
             "analyzer_info": struct.analyzer.info,
             "all_detections": all_detections,
@@ -160,6 +166,15 @@ class Renderer(abc.ABC):
                     "data": r.data,
                 }
             )
+
+        if getattr(struct, "is_duplicate_content", False):
+            reports.append({
+                "text": ("Duplicate content occurrence "
+                         f"{struct.duplicate_occurrence} of {struct.duplicate_count}"),
+                "short": f"duplicate {struct.duplicate_occurrence}/{struct.duplicate_count}",
+                "label": "duplicate", "severity": "INFO", "severity_value": 4,
+                "content_type": "text/plain", "data": None,
+            })
 
         # Truncate large text content at low verbosity
         if verbosity < 2:

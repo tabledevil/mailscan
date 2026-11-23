@@ -34,3 +34,14 @@ sealed_report*.txt
 .beta-test-headers-*
 .beta-test-route-*
 samples/external/
+
+# No samples in Git — malware, evidence and real mail live outside the repo
+# (local samples/ or $MATT_SAMPLES).  Tests generate their fixtures.
+samples/
+testfiles/
+*.7z
+*.pst
+*.ost
+*.nst
+*.mbox
+*.msg

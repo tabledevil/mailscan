@@ -67,7 +67,8 @@ class MarkdownRenderer(Renderer):
             lines.append(f"{indent}  * **Filename**: {fn}")
 
         md5 = node.info["md5"]
-        lines.append(f"{indent}  * **MD5**: `{md5}`")
+        if md5:
+            lines.append(f"{indent}  * **MD5**: `{md5}`")
         sha1 = node.info.get("sha1")
         sha256 = node.info.get("sha256")
         if sha1:

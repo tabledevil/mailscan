@@ -23,6 +23,9 @@ def setup_logging(verbosity=0, debug=False, log_file=None):
     # stays at WARNING unless the user explicitly wants root-level debug.
     matt_logger = logging.getLogger("matt")
     matt_logger.setLevel(logging.DEBUG)
+    # Own handlers only: a stray ``logging.debug(...)`` on the root logger
+    # installs a root handler, and propagation would print every line twice.
+    matt_logger.propagate = False
 
     # Remove existing handlers (in case setup_logging is called twice)
     for handler in matt_logger.handlers[:]:

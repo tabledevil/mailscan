@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68.0", "setuptools-scm>=8.0"]
+requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -71,6 +71,7 @@ all = [
 
 [project.scripts]
 matt = "matt:main"
+mailhunt = "mailhunt:main"
 
 [tool.setuptools]
 py-modules = [
@@ -86,10 +87,16 @@ py-modules = [
     "mailexport",
     "mailfrom",
     "mailheader",
+    "mailhunt",
 ]
 
 [tool.setuptools.packages.find]
 include = ["Analyzers*", "Config*", "Utils*", "renderers*", "pstforensic*"]
+
+[tool.setuptools.package-data]
+# MS-OXPROPS property catalog — without it an installed pstforensic cannot
+# open any store (regression found by a pipx install test).
+pstforensic = ["catalog/*.json"]
 
 [tool.ruff]
 target-version = "py310"

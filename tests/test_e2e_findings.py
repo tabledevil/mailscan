@@ -219,17 +219,21 @@ def test_email_analyzer_does_not_recurse_on_quoted_forward():
     assert max_depth(s) <= 4, f"unexpected depth {max_depth(s)} — recursive can_handle?"
 
 
-def test_testfiles_zip_corpus_consistency():
-    """All ZIPs in testfiles/ should be encrypted (the corpus exists to
-    exercise the encrypted-archive path). If a ZIP slipped in unencrypted,
-    either remove it or move it elsewhere."""
+def test_no_samples_tracked_in_git():
+    """No samples in Git: malware, evidence and real mail live outside the
+    repository (``$MATT_SAMPLES`` / ignored ``samples/``); tests generate
+    their fixtures.  Fails if a sample-like file is tracked again."""
     import pathlib
-
+    import shutil
+    import subprocess
     repo = pathlib.Path(__file__).resolve().parents[1]
-    zips = sorted((repo / "testfiles").glob("*.zip"))
-    offenders = []
-    for z in zips:
-        with zipfile.ZipFile(z, "r") as zf:
-            if not all(i.flag_bits & 0x1 for i in zf.infolist()):
-                offenders.append(z.name)
-    assert offenders == [], f"unencrypted entries in: {offenders}"
+    if not shutil.which("git") or not (repo / ".git").exists():
+        pytest.skip("not a git checkout")
+    tracked = subprocess.run(["git", "ls-files"], cwd=repo, capture_output=True,
+                             text=True, check=False).stdout.splitlines()
+    sample_ext = (".zip", ".7z", ".rar", ".eml", ".msg", ".mbox", ".pst", ".ost",
+                  ".nst", ".exe", ".dll", ".doc", ".docx", ".xls", ".xlsx", ".ppt",
+                  ".pdf", ".js", ".hta", ".vbs", ".lnk", ".iso")
+    offenders = [f for f in tracked
+                 if f.startswith(("samples/", "testfiles/")) or f.lower().endswith(sample_ext)]
+    assert offenders == [], f"sample files tracked in git: {offenders}"

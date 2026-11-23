@@ -169,3 +169,11 @@ def test_text_renderer_keeps_report_line_breaks():
     cap = [l for l in out.splitlines() if "capabilities :" in l]
     assert cap and "OLEOfficeAnalyzer" in cap[0]
     assert "MIME detection" not in cap[0] or len(cap[0]) < 140
+
+
+def test_generic_declared_type_is_not_a_mismatch():
+    # PST/MIME attachments without a type are declared octet-stream: content
+    # decides the analyzer, but that is no contradiction worth a finding.
+    s, _name = _primary(b"{\\rtf1\\ansi Hello}", filename="x.rtf",
+                        mime_type="application/octet-stream")
+    assert "declared_type_mismatch" not in s.analyzer.reports

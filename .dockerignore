@@ -1,5 +1,6 @@
 .git
 samples/
+testfiles/
 build/
 dist/
 *.egg-info/

@@ -42,9 +42,41 @@ def test_healthy_store_summary_and_children():
     r = s.analyzer.reports
     assert r["summary"].data["states"] == {"live": 2}
     assert "recovered_items" not in r and "store_integrity" not in r
-    names = [c.filename for c in s.analyzer.childitems]
+    kids = s.analyzer.childitems
+    assert [c.filename for c in kids] == ["message_0.eml", "message_1.eml"]
+    first = kids[0]
+    assert first.mime_type == "message/rfc822"
+    assert type(first.analyzer).__name__ == "EmailAnalyzer"
+    # attachments come out of the EML (embedded messages are flattened by
+    # EmailAnalyzer today — docs/MAIL_ARCHITECTURE_TODO.md)
+    names = [c.filename for c in first.get_children()]
     assert "invoice.pdf" in names
-    assert any(n.startswith("body_") for n in names)
+
+
+def test_eml_carries_headers_and_pst_context():
+    from email import policy
+    from email.parser import BytesParser
+    img = synth.build_unicode_pst_tree(hard_deleted=True)
+    s = _analyze(img)
+    kids = {c.filename: BytesParser(policy=policy.default).parsebytes(c.rawdata)
+            for c in s.analyzer.childitems}
+    live = kids["message_0.eml"]
+    assert live["Subject"] == "Wire transfer"
+    assert live["From"].addresses[0].addr_spec == "eve@example.com"
+    assert [a.addr_spec for a in live["To"].addresses] == ["alice@example.com"]
+    assert live["X-MATT-PST-State"] == "live" and "X-MATT-PST-Recovered" not in live
+    deleted = next(m for n, m in kids.items() if n.startswith("deleted_"))
+    assert deleted["X-MATT-PST-Recovered"] == "true"
+    assert deleted["X-MATT-PST-Provenance"] == "stale_page"
+    assert deleted["X-MATT-PST-Folder"].endswith("/Inbox")
+
+
+def test_pst_max_messages_flag(monkeypatch):
+    from Config.config import flags
+    monkeypatch.setattr(flags, "pst_max_live_messages", 1)
+    s = _analyze(synth.build_unicode_pst_tree(hard_deleted=True))
+    names = [c.filename for c in s.analyzer.childitems]
+    assert names == ["message_0.eml", "deleted_message_1.eml"]   # recovered always
 
 
 def test_recovered_items_reported_and_emitted():
@@ -60,7 +92,8 @@ def test_recovered_items_reported_and_emitted():
     assert hard["deletion"]["deleted_on"] is None
     assert hard["deletion"]["not_before_source"] == "PidTagMessageDeliveryTime"
     names = [c.filename for c in s.analyzer.childitems]
-    assert any(n.startswith("deleted_body_") for n in names)
+    assert any(n.startswith("deleted_message_") for n in names)
+    assert any(n.startswith("superseded_message_") for n in names)
 
 
 def test_wiped_header_flagged_high_and_still_read():
@@ -114,8 +147,25 @@ def test_large_file_is_mapped_and_skips_whole_file_passes(tmp_path, monkeypatch)
 
 def test_too_large_error_names_the_flag(tmp_path, monkeypatch):
     from Config.config import flags
-    p = tmp_path / "big.pst"
-    p.write_bytes(synth.build_unicode_pst_tree())
+    p = tmp_path / "big.bin"
+    p.write_bytes(b"\x00" * 4096)
     monkeypatch.setattr(flags, "max_file_size", 1024)
     with pytest.raises(ValueError, match="--max-file-size"):
         Structure.create(filename=str(p))
+
+
+@pytest.mark.parametrize("name", ["big.pst", "renamed.dat"])
+def test_mailbox_store_ignores_max_file_size(tmp_path, monkeypatch, name):
+    """PST/OST are mapped and streamed, never read whole: the size guard
+    must not refuse evidence (by extension or by the !BDN magic)."""
+    import mmap
+    from Config.config import flags
+    p = tmp_path / name
+    p.write_bytes(synth.build_unicode_pst_tree())
+    monkeypatch.setattr(flags, "max_file_size", 1024)
+    monkeypatch.setattr(flags, "large_file_threshold", 512)
+    monkeypatch.setattr(flags, "pst_max_live_messages", 0)
+    s = Structure.create(filename=str(p))
+    assert isinstance(s.rawdata, mmap.mmap) and s.path_backed
+    assert s.analyzer.reports["summary"].data["states"] == {"live": 2}
+    assert s.realfile

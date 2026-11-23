@@ -103,17 +103,26 @@ dependencies, so a successful image is guaranteed analyzer-complete.
 
 ### Bare-metal install
 
-Install the core dependencies (required for basic analysis) with pip:
+For normal command-line use, install MATT with `pipx`. This keeps the Python
+dependencies in an isolated environment while making the `matt` command
+available on your `PATH`, avoiding system Python installs such as
+`pip install --break-system-packages`.
 
 ```bash
+pipx install .
+pipx install '.[all]'      # all optional feature dependencies
+pipx install -e .          # editable local development
+```
+
+If you prefer a project-local virtual environment instead of `pipx`:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
 pip install .
 ```
 
-If you are installing in an offline environment, you can use:
-
-```bash
-pip install . --no-build-isolation
-```
+In an offline environment: `pip install . --no-build-isolation`.
 
 The project uses the modern PEP-517 `setuptools.build_meta` backend
 declared in `pyproject.toml`. A legacy `setup.py` is also present for
@@ -153,22 +162,16 @@ bytes — only run it inside the MATT Docker container or an equally
 isolated sandbox. The bare-metal install of `js` covers static
 deobfuscation only.
 
-## Cloud Testing With Sample Files
+## Tests and sample files
 
-The repository keeps encrypted sample archives in `testfiles/` so cloud runners can execute reproducible tests without storing extracted payloads in Git.
-
-Run corpus tests:
-
-```bash
-python -m unittest discover -s tests -p "test_*.py"
-```
-
-Optional decryption test (for environments like Jules) requires a secret:
-
-- `SAMPLE_ZIP_PASSWORD`: password for encrypted ZIP samples (commonly `infected`)
-
-Example:
+**No samples are kept in Git** — no malware, no evidence, no real mail.
+Tests generate their fixtures synthetically. Tests that use a real sample
+corpus look for it in `samples/` (ignored by Git; populate it locally or
+in CI from a separate store) and skip when it is absent:
 
 ```bash
-SAMPLE_ZIP_PASSWORD=infected python -m unittest discover -s tests -p "test_*.py"
+pytest -q tests pstforensic/tests
+MATT_SAMPLES=/path/to/corpus pytest -q tests/test_sample_corpus.py
 ```
+
+Real samples are parsed only inside Docker (see above).
