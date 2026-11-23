@@ -162,10 +162,16 @@ def build_tree(path: str, *, items: bool = False, redact: bool = False,
     t0 = time.time()
     store = open_store(path, progress=progress, cache_dir=cache_dir)
     per_label: dict[str, Counter] = defaultdict(Counter)
+    per_prov: dict[str, Counter] = defaultdict(Counter)
+    per_find: dict[str, Counter] = defaultdict(Counter)
     rows: dict[str, list] = defaultdict(list)
     for it in store.iter_items():
         label = it.folder_label
         per_label[label][it.state] += 1
+        if it.state in _VISIBLE:   # what makes up the folder's listed count
+            per_prov[label][it.provenance] += 1
+            for code in it.integrity.codes:
+                per_find[label][code] += 1
         if items:
             rows[label].append(_item_row(it, redact))
 
@@ -174,15 +180,25 @@ def build_tree(path: str, *, items: bool = False, redact: bool = False,
     path_nid = {p: n for n, p in folder_paths.items()}
     folders = []
     seen = set()
+    hier = getattr(inv, "folder_hier_count", {}) if inv is not None else {}
+    frows = getattr(inv, "folder_rows", {}) if inv is not None else {}
     for nid, fpath in folder_paths.items():   # walk order, like a tree view
         declared, _name = _folder_meta(store, nid)
         folders.append({"path": fpath, "nid": nid, "declared": declared,
-                        "found": dict(per_label.get(fpath, {}))})
+                        "declared_hierarchy": hier.get(nid),
+                        "found": dict(per_label.get(fpath, {})),
+                        "listed_by_provenance": dict(per_prov.get(fpath, {})),
+                        "listed_findings": dict(per_find.get(fpath, {})),
+                        "rows": dict(frows.get(nid, {}))})
         seen.add(fpath)
     for label in sorted(per_label):           # synthetic / deleted-folder buckets
         if label not in seen:
             folders.append({"path": label, "nid": None, "declared": None,
-                            "found": dict(per_label[label])})
+                            "declared_hierarchy": None,
+                            "found": dict(per_label[label]),
+                            "listed_by_provenance": dict(per_prov.get(label, {})),
+                            "listed_findings": dict(per_find.get(label, {})),
+                            "rows": {}})
 
     def shown(p: str) -> str:
         return redact_path(p, path_nid) if redact else p
@@ -235,6 +251,25 @@ def _stats(store) -> dict:
 # --------------------------------------------------------------------------
 # text rendering
 # --------------------------------------------------------------------------
+def _detail(f: dict) -> str:
+    """Breakdown line for folders whose listed count needs explaining:
+    provenance other than the B-tree, item findings, and row reconciliation
+    (rows read from the contents table vs. what became an item)."""
+    prov = f.get("listed_by_provenance") or {}
+    rows = f.get("rows") or {}
+    finds = f.get("listed_findings") or {}
+    parts = []
+    if any(k != "btree" for k in prov):
+        parts.append("prov " + " ".join(f"{k}={v}" for k, v in sorted(prov.items())))
+    odd = {k: v for k, v in rows.items() if k not in ("rows", "fai_rows") and v}
+    if odd:
+        parts.append(f"rows={rows.get('rows', 0)} " + " ".join(
+            f"{k}={v}" for k, v in sorted(odd.items())))
+    if finds:
+        parts.append("findings " + " ".join(f"{k}={v}" for k, v in sorted(finds.items())))
+    return " | ".join(parts)
+
+
 def render_text(tree: dict, *, items: bool = False, out=sys.stdout) -> None:
     w = out.write
     w(f"{tree['store'] or '(store)'}  [{tree['variant']}, wVer {tree['wVer']}, "
@@ -242,18 +277,22 @@ def render_text(tree: dict, *, items: bool = False, out=sys.stdout) -> None:
     tot = tree["totals"]
     w("items: " + ", ".join(f"{k}={tot[k]}" for k in STATE_ORDER if k in tot)
       + f"  (total {sum(tot.values())})\n\n")
-    w(f"{'folder':60} {'declared':>8} {'listed':>6}  by state "
-      "('!' = declared != listed)\n")
+    w(f"{'folder':60} {'declared':>8} {'hier':>6} {'listed':>6}  by state "
+      "('!' = declared != listed; hier = count in the parent's hierarchy row)\n")
     w("-" * 100 + "\n")
     for f in tree["folders"]:
         parts = f["path"].strip("/").split("/") if f["path"].strip("/") else ["(root)"]
         name = "  " * (len(parts) - 1) + parts[-1]
         found = sum(n for k, n in f["found"].items() if k in _VISIBLE)
         dec = "" if f["declared"] is None else str(f["declared"])
+        hdec = "" if f.get("declared_hierarchy") is None else str(f["declared_hierarchy"])
         mark = " !" if f["declared"] is not None and f["declared"] != found else ""
         states = " ".join(f"{_ABBR[k]}={f['found'][k]}" for k in STATE_ORDER
                           if k in f["found"])
-        w(f"{name[:60]:60} {dec:>8} {found:>6}{mark:2} {states}\n")
+        w(f"{name[:60]:60} {dec:>8} {hdec:>6} {found:>6}{mark:2} {states}\n")
+        detail = _detail(f)
+        if detail:
+            w(f"{'':4}{detail}\n")
         if items:
             for r in f.get("items", []):
                 ident = r.get("nid") or r.get("bid") or "-"

@@ -56,6 +56,9 @@ class Folder:
         self._visited = frozenset(visited or ()) | {pc_nid}
         self._include_fai = include_fai
         self.name = _string_prop(pc, PID_DISPLAY_NAME) or f"0x{pc_nid:08X}"
+        # PidTagContentCount as the parent's hierarchy-table row states it
+        # (set by the parent's subfolders(); None for the root / unknown).
+        self.hier_content_count: Optional[int] = None
         self.path = f"{parent_path}/{self.name}" if parent_path else f"/{self.name}"
         if pc_nid == 0x122 and not parent_path and _string_prop(pc, PID_DISPLAY_NAME) is None:
             self.path = ""   # unnamed store root (OSTs): children read "/Root - Mailbox/…"
@@ -81,7 +84,7 @@ class Folder:
         out: list[Folder] = []
         idx = nid_index(self.nid)
         hier_nid = make_nid(NID_TYPE_HIERARCHY_TABLE, idx)
-        for child_nid in self._table_row_ids(hier_nid):
+        for child_nid, row in self._table_rows(hier_nid):
             if child_nid in self._visited:
                 self.sink.warn(WarnCode.CYCLE_DETECTED,
                                f"folder {child_nid:#x} revisited",
@@ -96,11 +99,15 @@ class Folder:
                 continue
             child_pc = PropertyContext.from_node(
                 child_ref, self._store.variant, sink=self.sink)
-            out.append(Folder(self._store, child_pc, child_nid,
-                              parent_path=self.path, sink=self.sink,
-                              visited=self._visited | {child_nid},
-                              include_fai=self._include_fai,
-                              noderef=child_ref))
+            child = Folder(self._store, child_pc, child_nid,
+                           parent_path=self.path, sink=self.sink,
+                           visited=self._visited | {child_nid},
+                           include_fai=self._include_fai,
+                           noderef=child_ref)
+            cc = row.by_id(PID_CONTENT_COUNT)
+            if cc is not None and len(cc.raw) >= 4:
+                child.hier_content_count = struct.unpack_from("<I", cc.raw, 0)[0]
+            out.append(child)
         return out
 
     def messages(self) -> list[MapiMessage]:
@@ -133,17 +140,21 @@ class Folder:
     # -- helpers ----------------------------------------------------------
     def _table_row_ids(self, table_nid: int) -> list[int]:
         """Read a hierarchy/contents TC and return each row's ``dwRowID`` (child NID)."""
+        return [nid for nid, _row in self._table_rows(table_nid)]
+
+    def _table_rows(self, table_nid: int) -> list[tuple[int, MapiObject]]:
+        """``(dwRowID, row)`` for each row of a hierarchy/contents TC."""
         ref = self._store.nodedb.node(table_nid)
         if ref is None:
             return []
-        ids: list[int] = []
+        out: list[tuple[int, MapiObject]] = []
         for row in TableContext.from_node(ref, self._store.variant,
                                           sink=self.sink):
             v = row.get_tag(PID_LTP_ROW_ID) or row.by_id(0x67F2)
             if v is None or len(v.raw) < 4:
                 continue
-            ids.append(struct.unpack_from("<I", v.raw, 0)[0])
-        return ids
+            out.append((struct.unpack_from("<I", v.raw, 0)[0], row))
+        return out
 
     def __repr__(self) -> str:  # pragma: no cover - debug aid
         return f"Folder(name={self.name!r}, nid={self.nid:#x})"

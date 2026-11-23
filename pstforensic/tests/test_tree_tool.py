@@ -49,3 +49,17 @@ def test_redact_path_rules():
     assert T.redact_path("/~orphan folders/folder 0x2a2", nids) == "/~orphan folders/folder 0x2a2"
     assert T.redact_path("/~carved", nids) == "/~carved"
     assert T.redact_path("/(deleted folder)/Secret", nids) == "/folder ?/folder ?"
+
+
+def test_folder_reconciliation_fields(tmp_path):
+    """Per-folder breakdown that explains a listed count differing from a
+    viewer's: provenance, findings, contents-table rows and both declared
+    counts (folder PC and parent hierarchy row)."""
+    t = T.build_tree(_img(tmp_path, hard_deleted=True), redact=True)
+    inbox = next(f for f in t["folders"] if f["found"].get("live") == 2)
+    assert inbox["listed_by_provenance"] == {"btree": 2}
+    assert inbox["rows"].get("rows") == 2
+    assert "declared_hierarchy" in inbox
+    out = io.StringIO()
+    T.render_text(t, out=out)
+    assert " hier " in out.getvalue()

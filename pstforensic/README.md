@@ -10,7 +10,13 @@
 > python3 -m pstforensic.tools.tree /path/store.pst --redact --json \
 >     --checkpoint cp.json --profile prof.txt --debug-log debug.log > tree.json
 > python3 -m pstforensic.tools.summary /path/store.pst --json > summary.json
+> # 3. Folders whose count differs from Kernel (content-free, shareable):
+> python3 -m pstforensic.tools.tree /path/store.pst --redact | grep -A1 '!'
 > ```
+> Folder lines: `declared` = folder's own count, `hier` = count in the parent's
+> hierarchy row, `listed` = items found. The indented line under a folder
+> explains the difference: provenance (`scan_nbt` = resolved from stale NBT
+> copies), row reconciliation (`nid_parent_elsewhere`, `unresolved`) and findings.
 > Second runs reuse the structural cache in `~/.cache/pstforensic` (`--no-cache`
 > to disable). Shareable: `tree.json` (redacted), `summary.json`, `cp.json`,
 > `prof.txt`, `debug.log`. Never the non-redacted output. MATT:

@@ -31,6 +31,7 @@ from __future__ import annotations
 import hashlib
 import struct
 import time as _time
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Iterator, Optional
@@ -290,6 +291,10 @@ class Inventory:
         self._carve_only_set = set(map(tuple, self._carve_only or ()))
         self.stats = InventoryStats()
         self.folder_paths: dict[int, str] = {}
+        # Per-folder row reconciliation (content-free counts) and the content
+        # count each folder's parent hierarchy row states.
+        self.folder_rows: dict[int, Counter] = {}
+        self.folder_hier_count: dict[int, Optional[int]] = {}
         self.soft_folders: set[int] = set()
         self.reachable: set[int] = set()
         self.deleted_folder_names: dict[int, str] = {}
@@ -418,6 +423,8 @@ class Inventory:
             self._tick("folders", self.stats.folders_walked, None,
                        self.stats.folder_rows, force=True)
             self.folder_paths[folder.nid] = folder.path
+            self.folder_hier_count[folder.nid] = getattr(folder, "hier_content_count", None)
+            frows = self.folder_rows.setdefault(folder.nid, Counter())
             parent_soft = any(folder.path.startswith(self.folder_paths[r] + "/")
                               for r in soft_roots)
             if (folder.nid == waste or folder.is_dumpster or parent_soft
@@ -440,8 +447,12 @@ class Inventory:
                         continue
                     nid = struct.unpack_from("<I", v.raw, 0)[0]
                     self.stats.folder_rows += 1
+                    frows["rows" if tt == NID_TYPE_CONTENTS_TABLE else "fai_rows"] += 1
+                    if nid_type(nid) not in _MESSAGE_TYPES:
+                        frows["row_nid_not_message"] += 1
                     if nid in self.reachable:
                         self.stats.folder_rows_duplicate += 1
+                        frows["duplicate"] += 1
                         continue
                     self.reachable.add(nid)
                     pairs.append((folder, nid))
@@ -709,14 +720,21 @@ class Inventory:
         for li, (folder, nid) in enumerate(pairs, 1):
             self._tick("live_items", li, len(pairs), li)
             ref = self.db.node(nid)
+            frows = self.folder_rows.setdefault(folder.nid, Counter())
             if ref is None:
                 self.stats.folder_rows_unresolved += 1
+                frows["unresolved"] += 1
                 if self.diag is not None:
                     self.diag.reason("live_listed_but_no_node")
                 continue
+            if ref.from_scan:
+                frows["node_from_scan"] += 1
+            if ref.nid_parent != folder.nid:
+                frows["nid_parent_elsewhere"] += 1
             msg = self._build(ref)
             if msg is None:
                 self.stats.folder_rows_unreadable += 1
+                frows["unreadable"] += 1
                 self._note("live_unreadable")
                 continue
             integ = Integrity()
