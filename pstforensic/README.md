@@ -2,7 +2,7 @@
 
 > **Blind test — run it like this** (Linux, Python ≥ 3.10):
 > ```bash
-> git clone -b pstforensic-parser https://github.com/tabledevil/mailscan.git && cd mailscan
+> git clone https://github.com/tabledevil/mailscan.git && cd mailscan
 > pip install numpy                     # fast scan; without it, much slower
 > # 1. Kernel-style folder tree next to Kernel PST Viewer (content, your screen only):
 > python3 -m pstforensic.tools.tree /path/store.pst --items | less -S
