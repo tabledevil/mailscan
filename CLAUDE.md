@@ -103,7 +103,10 @@ Legacy CLI scripts in repo root (use `eml.py` directly):
 - Logging goes to stderr (not to file) unless debug mode. Configured via `Utils/logger.py`.
 - `Structure` objects are cached by `(sha256, basename, mime_type)` — duplicate attachments with the same name+type collapse, but the same bytes under different filenames don't mask filename-based detections.
 - Multi-dispatch: every Analyzer that `can_analyze` runs against the Structure; highest-`specificity` is primary, others are contributors.
-- Root-level post-pass builds `iocs_aggregate` (defanged) and `capability_hints` (skipped optional checks).
+- Root-level post-pass builds `iocs_aggregate` (defanged), `capability_hints` (skipped optional checks) and `capabilities` (missing dependencies, once per run: analyzers that matched objects but could not run, with object counts; missing MIME providers; missing exiftool). Per-object only an `analysis_limited` report (verbosity 1). Dependency probes are cached in `Utils/capabilities.py`; use `warn_once()` instead of logging "X not installed" per object.
+- Dispatch is content-first: `OLEOfficeAnalyzer` claims only real OLE2 bytes, `RTFAnalyzer` claims `{\rt…` content, `EmailAnalyzer` claims MHT; if no analyzer takes the declared MIME type, the object is re-dispatched by the detected type and gets a `declared_type_mismatch` report. `OfficeXMLAnalyzer` handles standalone Word 2003 XML / Flat OPC and extracts binary parts (ActiveMime unpacked to OLE).
+- exiftool runs only for non-text types; its output is evaluated by `Utils/exif_eval.py` into a `metadata` report (also fed into the timeline) and findings (`meta_extension_mismatch`, `meta_remote_template`, `meta_gps`, timestamp anomalies, metadata URLs). The raw table stays at verbosity 2.
+- `olefile` is a core dependency (OLE Office, MSG, pstforensic).
 - The `NUL` device file that sometimes appears in `git status` on Windows is in `.gitignore`.
 
 ## Sandbox safety (dynamic JS)

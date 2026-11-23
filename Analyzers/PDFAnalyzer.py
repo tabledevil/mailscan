@@ -6,6 +6,7 @@ import importlib
 import importlib.util
 import shutil
 from structure import Analyzer, Report, Severity, AnalysisModuleException
+from Utils.capabilities import warn_once as _warn_once
 
 # Prefer pypdf (the maintained fork) over the deprecated PyPDF2. Both
 # expose the same API surface used here (PdfReader, errors.PdfReadError,
@@ -723,10 +724,10 @@ class PDFAnalyzer(Analyzer):
 
     def generate_preview(self):
         if importlib.util.find_spec("pdf2image") is None:
-            logging.warning("pdf2image is not installed, cannot generate PDF preview.")
+            _warn_once("pdf2image", "pdf2image is not installed, cannot generate PDF preview.")
             return
         if not shutil.which("pdftoppm"):
-            logging.warning("poppler (pdftoppm) is not installed, cannot generate PDF preview.")
+            _warn_once("pdftoppm", "poppler (pdftoppm) is not installed, cannot generate PDF preview.")
             return
 
         # Refuse to render large attacker PDFs — pdftoppm is happy to
@@ -866,7 +867,7 @@ class PDFAnalyzer(Analyzer):
 
     def analysis(self):
         if not PyPDF2:
-            logging.warning("PyPDF2 is not installed, cannot analyze PDF files.")
+            _warn_once("pypdf2", "PyPDF2 is not installed, cannot analyze PDF files.")
             # Even without PyPDF2 we can still run the byte-level policy scan
             self.modules['policy'] = self.policy_check
             super().analysis()

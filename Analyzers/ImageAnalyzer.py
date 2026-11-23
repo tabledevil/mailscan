@@ -2,6 +2,7 @@ import logging
 import io
 import base64
 from structure import Analyzer, Report, Severity
+from Utils.capabilities import warn_once as _warn_once
 
 log = logging.getLogger("matt")
 
@@ -48,7 +49,7 @@ class ImageAnalyzer(Analyzer):
 
     def _basic_info(self):
         if not Image:
-            log.warning("Pillow is not installed, cannot analyze images.")
+            _warn_once("pillow", "Pillow is not installed, cannot analyze images.")
             return
 
         try:

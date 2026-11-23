@@ -28,10 +28,13 @@ dependencies = [
     "python-dateutil>=2.8",
     "pytz",
     "rich>=13.0",
+    # OLE2/CFBF: .doc/.xls/.ppt, MSG and pstforensic.msg.  Pure Python and
+    # small; without it Office/MSG content silently lost its analyzer.
+    "olefile>=0.46",
 ]
 
 [project.optional-dependencies]
-office = ["olefile>=0.46", "oletools>=0.60"]
+office = ["oletools>=0.60"]
 # Prefer pypdf (the maintained fork) over the deprecated PyPDF2.
 # PDFAnalyzer prefers pypdf at import time and falls back to PyPDF2
 # only when pypdf isn't available, so existing PyPDF2-pinned environments

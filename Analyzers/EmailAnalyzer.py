@@ -60,11 +60,31 @@ class EmailAnalyzer(Analyzer):
         contain `From:`/`To:`/`Subject:` lines — claiming those would re-run
         the email parser on every nested forward and recurse to depth limit.
         Only probe when the MIME type is genuinely ambiguous (octet-stream)."""
+        if cls._is_mht(struct):
+            return True
         if struct.mime_type != "application/octet-stream":
             return False
         head = struct.rawdata[:8192] if struct.rawdata else b""
         matches = sum(1 for sig in cls._RFC822_SIGNATURES if sig in head)
         return matches >= 2
+
+    _HEADER_LINE = re.compile(rb"^[A-Za-z][A-Za-z0-9-]*:[ \t]")
+
+    @classmethod
+    def _is_mht(cls, struct) -> bool:
+        """MHTML ("Web page, single file") — what Word writes for .mht and
+        what maldocs ship renamed to ``.doc``.  libmagic often calls it
+        text/plain.  Claim it only when the file *starts* with a header block
+        that declares MIME and multipart/related — a forwarded mail quoted in
+        a text body does not start at byte 0 with a header line."""
+        if struct.mime_type not in ("text/plain", "application/octet-stream",
+                                    "application/msword", "text/html"):
+            return False
+        head = (struct.rawdata or b"")[:4096].lstrip(b"\xef\xbb\xbf\r\n")
+        if not cls._HEADER_LINE.match(head):
+            return False
+        low = head.lower()
+        return b"mime-version:" in low and b"multipart/related" in low
 
     def parse_mail(self):
         try:

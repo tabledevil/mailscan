@@ -21,6 +21,14 @@ class RTFAnalyzer(Analyzer):
     description = "RTF Analyser"
     specificity = 20
 
+    @classmethod
+    def can_handle(cls, struct) -> bool:
+        """RTF by content, whatever the declared type (``.doc`` saved as RTF,
+        attachments declared ``application/msword``).  Word only needs the
+        ``{\\rt`` prefix, which maldocs exploit — match it, not ``{\\rtf1``."""
+        head = (struct.rawdata or b"")[:16].lstrip(b"\xef\xbb\xbf \t\r\n")
+        return head.startswith(b"{\\rt")
+
     # RTF control words associated with exploit techniques
     SUSPICIOUS_CONTROL_WORDS = {
         r"\objdata": "OLE object data — may contain embedded executable or exploit payload",

@@ -1,6 +1,7 @@
 import logging
 import io
 from structure import Analyzer, Report, Severity
+from Utils.capabilities import warn_once as _warn_once
 from Config.config import flags
 from Utils.password_broker import PasswordBroker
 
@@ -36,7 +37,7 @@ class RARAnalyzer(Analyzer):
     def analysis(self):
         super().analysis()
         if not rarfile:
-            log.warning("rarfile is not installed, cannot analyze RAR files.")
+            _warn_once("rarfile", "rarfile is not installed, cannot analyze RAR files.")
             return
 
         self._extracted_members = set()
@@ -151,7 +152,7 @@ class RARAnalyzer(Analyzer):
             except (rarfile.BadRarPassword, rarfile.RarWrongPassword):
                 continue
             except rarfile.RarCannotExec:
-                log.error("unrar not found — install unrar to extract RAR files.")
+                _warn_once("unrar", "unrar not found — install unrar to extract RAR files.")
                 self.reports["error"] = Report(
                     "unrar not installed — cannot extract RAR contents",
                     severity=Severity.LOW,

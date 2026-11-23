@@ -73,7 +73,12 @@ class TextRenderer(Renderer):
                 yield f"{prefix}{label} : [Image: {report['text'] or 'preview in HTML report'}]\n"
             else:
                 text = str(report["text"]) if report["text"] is not None else ""
-                lines = textwrap.wrap(text, width=100, subsequent_indent="  ")
+                # Wrap per paragraph: multi-line reports keep their line breaks.
+                lines = [w for para in text.splitlines()
+                         for w in (textwrap.wrap(para, width=100, subsequent_indent="  ")
+                                   or [""])]
+                while lines and not lines[-1]:
+                    lines.pop()
                 if not lines:
                     yield f"{prefix}{label} : \n"
                 else:

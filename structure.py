@@ -203,8 +203,23 @@ class Analyzer:
     }
     _EXIFTOOL_SKIP_GROUPS = {"ExifTool"}
 
+    # exiftool adds nothing for plain text, mail and markup but costs a process
+    # start per object — thousands per mailbox.
+    _EXIFTOOL_SKIP_MIME_PREFIXES = ("text/", "message/", "application/json",
+                                    "application/xml", "application/x-pst",
+                                    "application/vnd.ms-outlook-pst")
+
+    def _exiftool_wanted(self) -> bool:
+        from Utils import capabilities
+        if not capabilities.tool_available("exiftool") or self._is_large():
+            return False
+        mime = (getattr(self.struct, "mime_type", "") or "").lower()
+        if mime.startswith(self._EXIFTOOL_SKIP_MIME_PREFIXES) and mime != "text/rtf":
+            return False
+        return True
+
     def _report_exiftool(self):
-        if not shutil.which("exiftool") or self._is_large():
+        if not self._exiftool_wanted():
             return
         try:
             import json as _json
@@ -261,8 +276,33 @@ class Analyzer:
                 label="exiftool", severity=Severity.INFO, verbosity=2, order=15,
                 data=grouped,
             )
+            self._evaluate_exiftool(grouped)
         except Exception:
             pass
+
+    def _evaluate_exiftool(self, grouped):
+        """Normalized metadata + typed findings from the exiftool fields
+        (``Utils/exif_eval.py``); the raw table stays at verbosity 2."""
+        from Utils import exif_eval
+        struct = self.struct
+        has_name = bool(getattr(struct, "has_filename", False))
+        fn = getattr(struct, "_Structure__filename", None)
+        meta = getattr(struct, "metadata", None) or {}
+        fn = meta.get("archive_filename") or fn
+        fields, findings = exif_eval.evaluate(grouped, filename=fn,
+                                              has_real_filename=has_name and bool(fn))
+        line = exif_eval.summary_line(fields)
+        if line:
+            self.reports["metadata"] = Report(
+                line, short=line, label="metadata", severity=Severity.INFO,
+                verbosity=1, order=14, data=fields,
+            )
+        for f in findings:
+            self.reports[f.code.lower()] = Report(
+                f.text, short=f.text[:80], label=f.code.lower(),
+                severity=Severity[f.severity],
+                verbosity=0 if f.severity != "INFO" else 1, order=26, data=f.data,
+            )
 
     def _check_dangerous_extension(self):
         import os as _os
@@ -506,20 +546,28 @@ class Analyzer:
         Multi-dispatch: all matching analyzers contribute. Highest specificity
         is primary, others are contributors whose reports merge if non-colliding.
         """
+        from Utils import capabilities
         candidates = []
+        limited = []   # matched, but a dependency is missing
         for cls in Analyzer.__subclasses__():
             try:
                 if cls.can_analyze(struct):
-                    available, reason = cls.is_available()
+                    available, reason = capabilities.analyzer_status(cls)
                     if available:
                         candidates.append(cls)
                     else:
+                        limited.append((cls, reason))
                         log.debug(f"{cls.__name__} matched but unavailable: {reason}")
             except Exception as e:
                 log.debug(f"{cls.__name__}.can_analyze() failed: {e}")
 
+        if not candidates and not limited and Analyzer._redispatch_by_content(struct):
+            return Analyzer.run_all_analyzers(struct)
+
         if not candidates:
             primary = Analyzer(struct)
+            Analyzer._note_limited(primary, limited)
+            Analyzer._note_declared_type(primary)
             primary.finalize_analysis()
             return primary
 
@@ -534,13 +582,66 @@ class Analyzer:
                 contributor = cls(struct, _run_analysis=False)
                 contributor.analysis()
                 for key, report in contributor.reports.items():
-                    if key not in primary.reports and report.label != "error":
+                    if (key not in primary.reports and key != "error"
+                            and report.label != "error"):
                         primary.reports[key] = report
             except Exception as e:
                 log.debug(f"Contributor {cls.__name__} failed: {e}")
 
+        Analyzer._note_limited(primary, limited)
+        Analyzer._note_declared_type(primary)
         primary.finalize_analysis()
         return primary
+
+    @staticmethod
+    def _redispatch_by_content(struct) -> bool:
+        """No analyzer claims the *declared* MIME type, but the content was
+        detected as something else: dispatch by the detected type (content
+        wins) and keep the declared one for the report.  Once per object."""
+        if getattr(struct, "declared_mime_type", None) is not None:
+            return False
+        if not getattr(struct, "type_mismatch", False):
+            return False
+        try:
+            detected = struct.magic
+        except Exception:
+            return False
+        if not detected or detected == struct.mime_type:
+            return False
+        struct.declared_mime_type = struct.mime_type
+        struct.mime_type = detected
+        return True
+
+    @staticmethod
+    def _note_declared_type(primary):
+        declared = getattr(primary.struct, "declared_mime_type", None)
+        if declared is None:
+            return
+        primary.reports["declared_type_mismatch"] = Report(
+            f"Declared type {declared} does not match content "
+            f"({primary.struct.mime_type}); analyzed as the detected type",
+            short=f"declared {declared} ≠ content {primary.struct.mime_type}",
+            label="declared_type_mismatch", severity=Severity.LOW, verbosity=0,
+            order=29, data={"declared": declared, "detected": primary.struct.mime_type},
+        )
+
+    @staticmethod
+    def _note_limited(primary, limited):
+        """Record analyzers that matched this object but could not run.
+        Hidden at default verbosity; the root reports a one-line summary per
+        missing analyzer with the number of affected objects."""
+        if not limited:
+            return
+        entries = [{"analyzer": c.__name__, "reason": str(r),
+                    "extra": getattr(c, "extra", None),
+                    "specificity": getattr(c, "specificity", 0)} for c, r in limited]
+        primary.reports["analysis_limited"] = Report(
+            "Not analyzed by: " + "; ".join(
+                f"{e['analyzer']} ({e['reason']})" for e in entries),
+            short=f"{len(entries)} analyzer(s) unavailable",
+            label="analysis_limited", severity=Severity.INFO, verbosity=1,
+            order=97, data=entries,
+        )
 
     def generate_struct(self, data, filename=None, index=0, mime_type=None, parent=None, metadata=None):
         return Structure.create(
@@ -727,6 +828,7 @@ class Structure(dict):
         if level == 0:
             self._build_ioc_aggregate()
             self._build_capability_hints()
+            self._build_capabilities_report()
 
     def _build_ioc_aggregate(self):
         """Walk the analyzed tree and union all per-analyzer IOC results into
@@ -841,6 +943,63 @@ class Structure(dict):
             severity=Severity.INFO,
             verbosity=1,  # hide at default verbosity — opt-in info
             order=98,
+        )
+
+    def _iter_tree(self):
+        """Every Structure of this subtree (self first), cycle-safe."""
+        seen, stack = set(), [self]
+        while stack:
+            node = stack.pop()
+            if id(node) in seen:
+                continue
+            seen.add(id(node))
+            yield node
+            try:
+                stack.extend(reversed(node.get_children() or []))
+            except Exception:
+                continue
+
+    def _build_capabilities_report(self):
+        """One run-level report of what this installation could not do —
+        instead of a "not installed" note on every object.  Visible at
+        default verbosity when it changed results (an analyzer that matched
+        objects could not run); otherwise only in verbose output."""
+        from collections import Counter
+        from Utils import capabilities
+        if self.analyzer is None:
+            return
+        affected: Counter = Counter()
+        info: dict = {}
+        for node in self._iter_tree():
+            rep = getattr(getattr(node, "analyzer", None), "reports", {}).get("analysis_limited")
+            for e in (rep.data or []) if rep is not None else []:
+                affected[e["analyzer"]] += 1
+                info[e["analyzer"]] = e
+        lines, data = [], {"analyzers": [], "mime_providers": [], "tools": []}
+        for name, n in affected.most_common():
+            e = info[name]
+            hint = f" — install: pip install .[{e['extra']}]" if e.get("extra") else ""
+            lines.append(f"{name}: {e['reason']} — {n} object(s) analyzed without it{hint}")
+            data["analyzers"].append({**e, "objects": n})
+        missing = capabilities.missing_providers()
+        if missing:
+            active = [p for p, st in capabilities.provider_status().items() if st.get("available")]
+            lines.append("MIME detection: " + ", ".join(m["reason"] for m in missing)
+                         + (f" (using {', '.join(active)})" if active
+                            else " (falling back to file extensions)"))
+            data["mime_providers"] = missing
+        for tool in ("exiftool",):
+            if not capabilities.tool_available(tool):
+                lines.append(f"{tool}: not installed — no metadata evaluation")
+                data["tools"].append(tool)
+        if not lines:
+            return
+        self.analyzer.reports["capabilities"] = Report(
+            "\n".join(lines),
+            short=(f"{sum(affected.values())} object(s) analyzed with reduced capability"
+                   if affected else f"{len(lines)} optional capability(ies) missing"),
+            label="capabilities", severity=Severity.INFO,
+            verbosity=0 if affected else 1, order=1, data=data,
         )
 
     def _tree_has_report(self, label: str) -> bool:

@@ -489,6 +489,10 @@ def collect_timeline_events(root) -> list[dict]:
             elif report.label == "archive" and isinstance(report.data, dict) and report.data.get("archive_modified"):
                 member = report.data.get("archive_filename") or source
                 add_event(report.data["archive_modified"], member, "Archive member timestamp", report.data.get("archive_type", "archive"))
+            elif report.label == "metadata" and isinstance(report.data, dict):
+                for kind, ts in (report.data.get("timestamps") or {}).items():
+                    add_event(ts, source, f"Document {kind} (metadata)",
+                              str(report.data.get("author") or report.data.get("software") or ""))
             elif report.label == "compile_time" and isinstance(report.data, dict) and report.data.get("timestamp") is not None:
                 add_event(report.data["timestamp"], source, "PE compile time", str(report.text))
         for child in struct.get_children():

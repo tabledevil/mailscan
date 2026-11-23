@@ -1,5 +1,6 @@
 import logging
 from structure import Analyzer, Report, Severity
+from Utils.capabilities import warn_once as _warn_once
 from Config.config import flags
 from Utils.temp_manager import TempFileManager
 import lzma
@@ -32,7 +33,7 @@ class SevenZipAnalyzer(Analyzer):
     def analysis(self):
         super().analysis()
         if not py7zr:
-            log.warning("py7zr is not installed, cannot analyze 7z files.")
+            _warn_once("py7zr", "py7zr is not installed, cannot analyze 7z files.")
             return
 
         # Add shared passwords from context

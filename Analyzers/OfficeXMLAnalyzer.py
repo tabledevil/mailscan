@@ -1,6 +1,36 @@
-from structure import Analyzer, Report
+from structure import Analyzer, Report, Severity
+import base64
+import binascii
 import xml.etree.ElementTree as ET
 import re
+
+# Standalone ("flat") Office XML documents: Word 2003 XML (WordprocessingML
+# 2003) and Flat OPC (Office 2007+ saved as a single XML).  Word opens both
+# even when renamed to .doc, and both can carry binary parts (images, OLE
+# objects, ``editdata.mso`` = ActiveMime with VBA macros).
+_FLAT_MARKERS = (b'progid="word.document"', b'progid="excel.sheet"',
+                 b'progid="powerpoint.show"',
+                 b"schemas.microsoft.com/office/word/2003/wordml",
+                 b"schemas.microsoft.com/office/2006/xmlpackage")
+_BINDATA_RE = re.compile(rb'<w:binData\b[^>]*?w:name="([^"]*)"[^>]*>(.*?)</w:binData>', re.S)
+_PKG_PART_RE = re.compile(
+    rb'<pkg:part\b[^>]*?pkg:name="([^"]*)"[^>]*>\s*<pkg:binaryData>(.*?)</pkg:binaryData>', re.S)
+
+def unpack_activemime(blob: bytes):
+    """ActiveMime (``editdata.mso``): a small header, then a zlib stream that
+    holds an OLE file with the VBA project.  Returns the OLE bytes or None."""
+    import zlib
+    if not blob.startswith(b"ActiveMime"):
+        return None
+    for off in (0x32, *[m.start() for m in re.finditer(rb"\x78[\x01\x5e\x9c\xda]", blob[:512])]):
+        try:
+            out = zlib.decompress(blob[off:])
+        except zlib.error:
+            continue
+        if out:
+            return out
+    return None
+
 
 class OfficeXMLAnalyzer(Analyzer):
     """
@@ -13,15 +43,60 @@ class OfficeXMLAnalyzer(Analyzer):
     description = "Office XML Content Analyzer"
     specificity = 25
 
+    @staticmethod
+    def is_flat_office_xml(data: bytes) -> bool:
+        head = (data or b"")[:4096].lower()
+        return any(m in head for m in _FLAT_MARKERS)
+
+    def _flat_document(self):
+        """Report a standalone Office XML document and extract its binary
+        parts as children, so macros/OLE objects inside get analyzed."""
+        data = self.struct.rawdata
+        kind = ("Flat OPC (Office 2007+ single-file XML)"
+                if b"office/2006/xmlpackage" in data[:4096].lower()
+                else "Word 2003 XML (WordprocessingML)")
+        parts = [(n, b) for n, b in _BINDATA_RE.findall(data)]
+        parts += [(n, b) for n, b in _PKG_PART_RE.findall(data)]
+        names = []
+        for idx, (name, b64) in enumerate(parts):
+            try:
+                blob = base64.b64decode(re.sub(rb"\s+", b"", b64), validate=False)
+            except (binascii.Error, ValueError):
+                continue
+            fname = name.decode("utf-8", "replace").rsplit("/", 1)[-1] or f"part_{idx}.bin"
+            names.append(name.decode("utf-8", "replace"))
+            inner = unpack_activemime(blob)
+            if inner is not None:   # editdata.mso → the OLE vbaProject inside
+                blob, fname = inner, fname + ".ole"
+            self.childitems.append(self.generate_struct(
+                data=blob, filename=fname, index=idx, parent=self.struct))
+        macro = [n for n in names if n.lower().endswith((".mso", "vbaproject.bin"))]
+        self.info = f"{kind} — {len(names)} embedded binary part(s)"
+        self.reports["flat_office_xml"] = Report(
+            f"{kind}; embedded binary parts: {', '.join(names) or 'none'}",
+            short=kind, label="flat_office_xml",
+            severity=Severity.MEDIUM if macro else Severity.INFO, verbosity=0,
+            data={"kind": kind, "parts": names},
+        )
+        if macro:
+            self.reports["flat_office_xml_macros"] = Report(
+                f"Macro container embedded in XML document: {', '.join(macro)}",
+                short="macros in flat XML", label="macros", severity=Severity.HIGH,
+                verbosity=0, data={"parts": macro},
+            )
+
     def analysis(self):
         super().analysis()
 
-        # Context-aware check: Only run on XMLs from known Office containers.
-        # This check is done by name to avoid circular import dependencies.
-        if not self.struct.parent or not self.struct.parent.analyzer.__class__.__name__ in ['DocxAnalyzer', 'OfficeDocumentAnalyzer']:
+        flat = self.is_flat_office_xml(self.struct.rawdata)
+        if flat:
+            self._flat_document()
+        # Context-aware check: Only run on XMLs from known Office containers
+        # (or standalone Office XML documents).  By name to avoid circular imports.
+        elif not self.struct.parent or not self.struct.parent.analyzer.__class__.__name__ in ['DocxAnalyzer', 'OfficeDocumentAnalyzer']:
             return
-
-        self.info = "Scanning Office XML for suspicious content."
+        else:
+            self.info = "Scanning Office XML for suspicious content."
 
         try:
             content = self.struct.rawdata.decode('utf-8', errors='ignore')

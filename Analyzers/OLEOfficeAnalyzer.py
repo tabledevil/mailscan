@@ -149,6 +149,7 @@ class OLEOfficeAnalyzer(Analyzer):
         "application/vnd.ms-excel",
         "application/vnd.ms-powerpoint",
         "application/x-ole-storage",
+        "application/vnd.ms-office",
         "application/CDFV2",
         "application/CDFV2-corrupt",
     ]
@@ -163,6 +164,17 @@ class OLEOfficeAnalyzer(Analyzer):
         if not struct.rawdata or len(struct.rawdata) < 8:
             return False
         return struct.rawdata[:8] == _OLE_MAGIC
+
+    @classmethod
+    def can_analyze(cls, struct) -> bool:
+        """Content wins: only claim real OLE2 storage.  A declared
+        ``application/msword`` on RTF/HTML/MHT content (common for attachments
+        and Word "save as" variants) must reach the analyzer for the actual
+        content instead of failing here."""
+        try:
+            return cls.can_handle(struct)
+        except Exception:
+            return False
 
     def analysis(self):
         super().analysis()

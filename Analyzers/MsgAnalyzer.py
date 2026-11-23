@@ -1,5 +1,6 @@
 import logging
 from structure import Analyzer, Report, Severity
+from Utils.capabilities import warn_once as _warn_once
 from Utils.temp_manager import TempFileManager
 
 try:
@@ -38,7 +39,7 @@ class MsgAnalyzer(Analyzer):
     def analysis(self):
         super().analysis()
         if not extract_msg:
-            logging.warning("extract-msg is not installed, cannot analyze MSG files.")
+            _warn_once("extract_msg", "extract-msg is not installed, cannot analyze MSG files.")
             return
 
         with TempFileManager() as temp_manager:

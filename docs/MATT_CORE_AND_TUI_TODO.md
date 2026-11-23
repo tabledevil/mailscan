@@ -113,7 +113,7 @@ Verwandt: [`MAIL_ARCHITECTURE_TODO.md`](MAIL_ARCHITECTURE_TODO.md) (Mail-Schicht
 
 ## Vorgeschlagene Reihenfolge
 
-0. **Schnelle Fixes mit großem Effekt, ohne Umbau:**
+0. **Erledigt (2026-11-23)** — schnelle Fixes mit großem Effekt, ohne Umbau:
    - Capability-Snapshot und Meldung einmal pro Lauf;
    - DOC-Dispatch-Lücke mit Regressionstest;
    - exiftool-Auswertung (Felder und Findings).

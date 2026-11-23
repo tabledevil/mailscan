@@ -244,14 +244,22 @@ def detect_all_providers(data: bytes, filename: Optional[str] = None) -> List[Di
     """Run all available MIME detection providers and return their results.
 
     Returns a list of dicts with keys: provider, mime, description, error.
-    Each provider is tried regardless of whether others succeeded.
+    Each available provider is tried regardless of whether others succeeded.
+    Providers that are not installed are skipped (reported once per run via
+    ``Utils.capabilities``, not on every object).  Large inputs are probed by
+    their first MiB only, like ``Structure.magic``.
     """
+    from Utils import capabilities
+    if len(data) > getattr(flags, "large_file_threshold", 256 << 20):
+        data = bytes(data[:1 << 20])
     order = _resolve_provider_order()
     results = []
     for provider_name in order:
         provider = _PROVIDERS.get(provider_name)
         if provider is None:
             results.append({"provider": provider_name, "mime": "", "description": "", "error": "unknown provider"})
+            continue
+        if not capabilities.provider_available(provider_name):
             continue
         try:
             result = provider.detect(data, filename=filename)
